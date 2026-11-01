@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-model;osr-target;xolotl
 # Runs inside the dedicated Xolotl LXC after matching NVIDIA userspace is ready.
 #
 #   bash install-target.sh             install or update Xolotl and start it

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-model;osr-target;avalon
 # Runs inside the dedicated Avalon LXC once its GPU is passed through (and, for
 # CUDA, matching NVIDIA user space is installed).
 #

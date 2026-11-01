@@ -34,7 +34,7 @@ bash ollama-smart-router-install.sh
 
 The installer asks which targets to create: Gitea and Mattermost services;
 Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl and Avalon model servers; and
-Open Terminal, Hermes and ComfyUI companions. Enter comma-separated names or
+Open Terminal, Hermes, ComfyUI and OpenClaw companions. Enter comma-separated names or
 menu numbers, or press Enter for none. Gitea stores configuration history and
 Mattermost receives alerts; both are optional and can also be installed
 separately from [targets/gitea](targets/gitea/README.md) and
@@ -62,7 +62,7 @@ Generated Gitea and Mattermost admin passwords are in
 | LXC | Default | Other supported releases |
 |---|---|---|
 | Router, Gitea, ComfyUI | Debian 13 | — |
-| Open Terminal, Hermes | Debian 13 | Debian 12 |
+| Open Terminal, Hermes, OpenClaw | Debian 13 | Debian 12 |
 | Ollama | Debian 13 | Debian 12; Ubuntu 22.04, 24.04, 26.04 (`OLLAMA_CT_OS`, `OLLAMA_CT_VERSION`) |
 | Mattermost | Ubuntu 24.04 | Ubuntu 22.04 (`MATTERMOST_CT_VERSION`); Ubuntu only |
 | AirLLM | chosen at prompt | Debian 12/13; Ubuntu 24.04/26.04 (Python 3.11+) |
@@ -159,7 +159,7 @@ admin key require interaction. Install the router unattended, then run each
 target's `provision-lxc.sh` from the full checkout. Target CT variables are
 separate from the router's `CT_ID`, `IP_CIDR` and `STORAGE`; targets share its
 bridge and gateway. Target-specific options (`GPU_DEVICES`, `BACKEND`,
-`OLLAMA_PULL_MODELS`, `HERMES_MODEL`, `COMFYUI_MODEL_URL`, etc.) are documented
+`OLLAMA_PULL_MODELS`, `HERMES_MODEL`, `OPENCLAW_MODEL`, `COMFYUI_MODEL_URL`, etc.) are documented
 in their READMEs.
 
 Model server addresses may be IPs, `host:port`, URLs, or `kind://host` for
@@ -230,9 +230,34 @@ and recovery steps. Provisioners support `--dry-run`.
 WebUI as `hermes-agent`, not a pool model; it needs a tool-capable model with
 at least 64K context. Re-run its provisioner with `--reconfigure` after a
 router or backend key rotation or a new model host.
+[OpenClaw](targets/openclaw/README.md) is a second agent client on the same
+pattern, registered as `openclaw`, with its Control UI on port 18789. It is
+installed with nvm, Node 24 and `npm install -g openclaw` (the
+[brax.me script](https://brax.me/openclaw/install.sh)'s steps, without its
+Ollama install) and uses Hermes's direct dispatcher.
 [ComfyUI](targets/comfyui/README.md) adds image generation to Open WebUI on
 port 8188. Select distilled FLUX.2 Klein 4B or 9B; 9B needs a Hugging Face
 token for an account that accepted the license.
+
+### Proxmox tags
+
+Each installer tags the CT it creates, so the Proxmox tree can be filtered by
+role. `osr-target` marks every CT installed alongside the router (model
+servers, services and companions); the last tag names the target.
+
+| CT | Tags |
+|---|---|
+| Router (`ollama-smart-router-install.sh`) | `ai`, `ai-tools`, `osr-router`, `openwebui` |
+| Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl, Avalon, ComfyUI | `ai`, `ai-model`, `osr-target`, `<target>` |
+| Gitea, Mattermost, Open Terminal, Hermes, OpenClaw | `ai`, `ai-tools`, `osr-target`, `<target>` |
+
+`<target>` is the target's directory name under `targets/` (`ollama`,
+`llamacpp`, `open-terminal` and so on). The Proxmox community script that
+creates the Ollama, ComfyUI, Gitea and Mattermost CTs also adds its own
+`community-script` tag. Tags are set only when a CT is created; to tag an
+existing CT, run `pct set <CT_ID> --tags '<tag>;<tag>'` on the host. The tag
+lists are in each `provision-lxc.sh` (the router's in
+`ollama-smart-router-install.sh`); keep this table in step when changing them.
 
 ## How routing works
 
@@ -271,7 +296,7 @@ checks use a separate `ROUTER_URL`
 defaulting to `http://127.0.0.1:8000`; set it to the new reachable base URL
 when running `apply`, `discover` or the updater inside the CT. The host-side
 management and update wrappers do not forward that override. Reconfigure
-Hermes if it uses the old router URL. Hermes's `--reconfigure` derives
+Hermes and OpenClaw if they use the old router URL. Their `--reconfigure` derives
 `ROUTER_URL` again from the router's IP and `ROUTER_PORT` in
 `/app/router/.env` unless you pass `ROUTER_URL` on that run; it does not
 remember one given at install, so pass a custom URL (a DNS name or proxy)
@@ -590,8 +615,16 @@ KEY=$(sed -n 's/^ROUTER_API_KEY=//p' /app/router/secrets.env)
 systemctl status open-webui ollama-router litellm-proxy ollama-monitor
 manage-model-servers status           # configured hosts + live probe
 curl -s -H "Authorization: Bearer $KEY" http://127.0.0.1:8000/routing/inventory
-journalctl -u ollama-router -f        # every routing decision is logged (Ctrl-C to stop)
+journalctl -u ollama-router -f        # decisions for chats sent to /v1/chat/completions
 ```
+
+Hermes `custom:osr` (including `auto`) reads the router's inventory and ranking,
+then sends chat directly from the Hermes CT to a model server. In the Hermes CT,
+use `journalctl -u hermes-direct -f` to see `direct dispatch MODEL -> SERVER`.
+The router CT shows Hermes inventory requests and, for a new or unpinned task,
+`/routing/explain` requests, but no `route class=` line for those chats.
+OpenClaw's provider `osr` works the same way; its dispatcher logs to
+`journalctl -u openclaw-direct -f` in the OpenClaw CT.
 
 | Symptom | Cause / fix |
 |---|---|

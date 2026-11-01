@@ -121,7 +121,7 @@ NONINTERACTIVE="${NONINTERACTIVE:-false}"
 INSTALL_GITEA="${INSTALL_GITEA:-false}"
 INSTALL_MATTERMOST="${INSTALL_MATTERMOST:-false}"
 # Optional targets from targets/ (the Gitea and Mattermost services, model
-# servers, and the Open Terminal / Hermes / ComfyUI companions), each in its own LXC.
+# servers, and the Open Terminal / Hermes / ComfyUI / OpenClaw companions), each in its own LXC.
 # Interactive installs ask which to create;
 # names or menu numbers, comma-separated, e.g. INSTALL_TARGETS=ollama,hermes
 # to pre-fill the answer. Unattended installs refuse a non-empty list.
@@ -1021,7 +1021,8 @@ target_table() {
     'avalon|model|Avalon (Qwen3.8-Flash-Next, llama.cpp fork) on a 16-20 GB AMD RX 7000 (ROCm) or NVIDIA GPU; ~90 GiB download|avalon+http://@IP@:@PORT@|avalon|required:amd,nvidia:rdna3,rtx20,rtx30,rtx40,rtx50' \
     'open-terminal|companion|Open Terminal: a shell tool for Open WebUI|||' \
     'hermes|companion|Hermes Agent: offered in Open WebUI as the model hermes-agent|||' \
-    'comfyui|companion|ComfyUI: image generation for Open WebUI (NVIDIA, AMD or Intel Arc GPU when present)|||optional:nvidia,amd,intel'
+    'comfyui|companion|ComfyUI: image generation for Open WebUI (NVIDIA, AMD or Intel Arc GPU when present)|||optional:nvidia,amd,intel' \
+    'openclaw|companion|OpenClaw: agent offered in Open WebUI as the model openclaw|||'
 }
 # target_field NAME FIELD: one column of the table (phase, label, entry, key, gpu).
 target_field() {
@@ -1506,7 +1507,7 @@ prompt_target_selection() {
     printf '  %d) %-14s %s\n' "$i" "$name" "$label"
     prev_phase="$phase"
   done < <(target_table)
-  echo "Target-specific settings (GPU_DEVICES, BACKEND, STRATA_MODEL, HERMES_MODEL, COMFYUI_MODEL_URL, ...) are read"
+  echo "Target-specific settings (GPU_DEVICES, BACKEND, STRATA_MODEL, HERMES_MODEL, OPENCLAW_MODEL, COMFYUI_MODEL_URL, ...) are read"
   echo "from the environment as each target's README describes."
   prompt_until_valid "Targets to create (numbers or names, comma-separated; none)" \
     INSTALL_TARGETS "${INSTALL_TARGETS:-none}" valid_target_selection || return 1
@@ -1764,7 +1765,7 @@ run_target_provisioner() {
   case "$name" in
     ollama|airllm) flags=(--install-target) ;;
     llamacpp) if llamacpp_model_given; then flags=(--install-target); fi ;;
-    open-terminal|hermes) template="${template:-${TEMPLATE_REF:-}}" ;;
+    open-terminal|hermes|openclaw) template="${template:-${TEMPLATE_REF:-}}" ;;
   esac
   local script_url script_sha channel="${MATTERMOST_CHANNEL:-ollama-monitor}"
   script_url="$(target_setting "$name" COMMUNITY_SCRIPT_URL)"
@@ -1967,9 +1968,9 @@ provision_selected_targets() {
       status=1
       if [[ "${result[$name]}" == "failed (OSR key apply)" ]]; then
         echo "                 run pct exec ${CT_ID} -- /usr/local/bin/manage-model-servers apply"
-      elif [[ "$name" == hermes && "${result[$name]}" == failed ]]; then
-        echo "                 see targets/hermes/README.md; if CT ${id} exists, resume on the Proxmox host with:"
-        echo "                 CT_ID=${id} ROUTER_CT_ID=${CT_ID} bash targets/hermes/provision-lxc.sh --reconfigure"
+      elif [[ ( "$name" == hermes || "$name" == openclaw ) && "${result[$name]}" == failed ]]; then
+        echo "                 see targets/${name}/README.md; if CT ${id} exists, resume on the Proxmox host with:"
+        echo "                 CT_ID=${id} ROUTER_CT_ID=${CT_ID} bash targets/${name}/provision-lxc.sh --reconfigure"
       else
         echo "                 see targets/${name}/README.md; rerun targets/${name}/provision-lxc.sh"
       fi

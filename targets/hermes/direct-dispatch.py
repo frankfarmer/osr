@@ -632,17 +632,23 @@ class DispatchServer(ThreadingHTTPServer):
 
 def main():
     home = os.environ.get("HERMES_HOME", "/home/hermes/.hermes")
-    etc = os.environ.get("HERMES_ETC", "/etc/hermes-target")
+    # The OpenClaw target (targets/openclaw) runs this same dispatcher with its
+    # own files: DIRECT_ETC (settings, backend-keys, targets), DIRECT_SECRETS_FILE
+    # (holds ROUTER_API_KEY) and DIRECT_CONTEXT_SETTING (the settings key with
+    # the context floor). Unset, they are Hermes's.
+    etc = os.environ.get("DIRECT_ETC") or os.environ.get("HERMES_ETC", "/etc/hermes-target")
+    secrets_file = os.environ.get("DIRECT_SECRETS_FILE") or home + "/.env"
+    context_setting = os.environ.get("DIRECT_CONTEXT_SETTING") or "HERMES_CONTEXT_LENGTH"
     settings = read_env(etc + "/settings")
-    secrets = read_env(home + "/.env")
+    secrets = read_env(secrets_file)
     keys = read_env(etc + "/backend-keys")
     router_url = settings.get("ROUTER_URL", "")
     if not router_url:
-        raise SystemExit("ROUTER_URL missing from Hermes settings")
+        raise SystemExit(f"ROUTER_URL missing from {etc}/settings")
     try:
-        min_context = int(settings.get("HERMES_CONTEXT_LENGTH") or 0)
+        min_context = int(settings.get(context_setting) or 0)
     except ValueError:
-        raise SystemExit("HERMES_CONTEXT_LENGTH in Hermes settings is not a number") from None
+        raise SystemExit(f"{context_setting} in {etc}/settings is not a number") from None
     Handler.dispatcher = Dispatcher(router_url, secrets.get("ROUTER_API_KEY", ""), keys, min_context,
                                     load_targets(etc + "/targets"))
     port = int(os.environ.get("HERMES_DIRECT_PORT", "8765"))

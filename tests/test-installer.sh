@@ -162,7 +162,7 @@ unset MATTERMOST_WEBHOOK_URL CONFIG_SOURCE BRIDGE NAMESERVER MATTERMOST_CHANNEL 
 # and restored by re-sourcing the extracted functions at the end.
 _tt="$(mktemp -d)"
 TARGETS_DIR="$_tt/targets"
-for _name in gitea mattermost ollama llamacpp airllm strata basalt maya xolotl avalon open-terminal hermes comfyui; do
+for _name in gitea mattermost ollama llamacpp airllm strata basalt maya xolotl avalon open-terminal hermes comfyui openclaw; do
   mkdir -p "$TARGETS_DIR/$_name"
   # The fake provisioner records what it was given: settings, flags, and
   # whether the admin token reached it (by value, compared to $EXPECT_TOKEN).
@@ -188,8 +188,8 @@ done
 unset _name
 
 describe target_table
-assert_eq "lists the thirteen targets in menu order" \
-  "gitea mattermost ollama llamacpp airllm strata basalt maya xolotl avalon open-terminal hermes comfyui" \
+assert_eq "lists the fourteen targets in menu order" \
+  "gitea mattermost ollama llamacpp airllm strata basalt maya xolotl avalon open-terminal hermes comfyui openclaw" \
   "$(target_table | cut -d'|' -f1 | paste -sd' ')"
 
 describe target_field
@@ -197,6 +197,8 @@ assert_eq "model phase" model "$(target_field strata phase)"
 assert_eq "companion phase" companion "$(target_field hermes phase)"
 assert_eq "ComfyUI is a companion of Open WebUI" companion "$(target_field comfyui phase)"
 assert_eq "and not a model server" "" "$(target_field comfyui entry)"
+assert_eq "OpenClaw is a companion" companion "$(target_field openclaw phase)"
+assert_eq "and runs without a GPU" "" "$(target_field openclaw gpu)"
 assert_eq "service phase" service "$(target_field gitea phase)"
 assert_eq "router entry template" "strata+http://@IP@:@PORT@" "$(target_field strata entry)"
 assert_eq "key kind" basalt "$(target_field basalt key)"
@@ -540,13 +542,14 @@ assert_ok "Xolotl takes a template" target_needs_template xolotl
 assert_ok "Avalon takes a template" target_needs_template avalon
 assert_fail "llama.cpp prompts for its own" target_needs_template llamacpp
 assert_fail "Hermes uses the router's" target_needs_template hermes
+assert_fail "OpenClaw uses the router's" target_needs_template openclaw
 assert_fail "ComfyUI's community script picks its own" target_needs_template comfyui
 
 describe valid_target_selection
-for _sel in "" none "1,10" "ollama hermes" " 2 , strata " "8" "13" "comfyui" "xolotl" "avalon"; do
+for _sel in "" none "1,10" "ollama hermes" " 2 , strata " "8" "13" "14" "comfyui" "xolotl" "avalon" "openclaw"; do
   assert_ok "accepts '${_sel}'" valid_target_selection "$_sel"
 done
-for _sel in 0 14 bogus "ollama,bogus"; do
+for _sel in 0 15 bogus "ollama,bogus"; do
   assert_fail "rejects '${_sel}'" valid_target_selection "$_sel"
 done
 unset _sel
@@ -567,12 +570,13 @@ INSTALL_TARGETS=bogus
 assert_fail "an invalid preset is refused" prompt_target_selection
 NONINTERACTIVE=false; INSTALL_TARGETS=""
 _out="$(mktemp)"
-prompt_target_selection > "$_out" 2>&1 <<< $'14\n4,hermes\n'
+prompt_target_selection > "$_out" 2>&1 <<< $'15\n4,hermes\n'
 assert_eq "re-prompts until valid, then keeps the choice" "llamacpp hermes" "$TARGETS"
 assert_contains "the menu lists the model servers" "9) xolotl" "$(cat "$_out")"
 assert_contains "Avalon among them" "10) avalon" "$(cat "$_out")"
 assert_contains "the menu lists the companions" "12) hermes" "$(cat "$_out")"
 assert_contains "ComfyUI among them" "13) comfyui" "$(cat "$_out")"
+assert_contains "OpenClaw last, keeping the earlier numbers" "14) openclaw" "$(cat "$_out")"
 assert_contains "and separates them from the model servers" "Companions:" "$(cat "$_out")"
 assert_contains "the services come first" "Services: created now, before OSR" "$(cat "$_out")"
 assert_contains "starting with Gitea" "1) gitea" "$(cat "$_out")"
@@ -1011,6 +1015,7 @@ OLLAMA_CT_ID=911; OLLAMA_STORAGE=t-store
 STRATA_CT_ID=912; STRATA_STORAGE=gpu-store; STRATA_TEMPLATE=local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
 LLAMACPP_CT_ID=913; LLAMACPP_IP_CIDR=192.0.2.93/24; LLAMACPP_STORAGE=t-store
 HERMES_CT_ID=914; HERMES_IP_CIDR=192.0.2.94/24; HERMES_STORAGE=t-store
+OPENCLAW_CT_ID=918; OPENCLAW_IP_CIDR=192.0.2.98/24; OPENCLAW_STORAGE=t-store
 TARGET_ADMIN_TOKEN=owui-admin-secret; export EXPECT_TOKEN=owui-admin-secret
 mock_reset_log
 assert_ok "runs Ollama's provisioner" run_target_provisioner ollama
@@ -1060,6 +1065,10 @@ run_target_provisioner hermes
 assert_eq "a companion gets the router CT, the router's template and the token" \
   "provision hermes|914|192.0.2.94/24|192.0.2.1|t-store|vmbr2|local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst|||910|8080|match|" "$(mock_calls)"
 assert_not_contains "the token is never an argument" "owui-admin-secret" "$(mock_calls)"
+mock_reset_log
+run_target_provisioner openclaw
+assert_eq "OpenClaw too gets the router CT, the router's template and the token" \
+  "provision openclaw|918|192.0.2.98/24|192.0.2.1|t-store|vmbr2|local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst|||910|8080|match|" "$(mock_calls)"
 COMFYUI_CT_ID=917; COMFYUI_IP_CIDR=192.0.2.97/24; COMFYUI_STORAGE=t-store
 COMFYUI_COMMUNITY_SCRIPT_SHA256=def456
 COMFYUI_IMAGE_VARIANT=klein-4b
@@ -1225,6 +1234,12 @@ FAKE_FAIL=hermes provision_selected_targets > "$_out" 2>&1; _rc=$?
 assert_eq "a failed Hermes companion fails the run" 1 "$_rc"
 assert_contains "and gives the partial CT recovery command" \
   "CT_ID=914 ROUTER_CT_ID=910 bash targets/hermes/provision-lxc.sh --reconfigure" "$(cat "$_out")"
+TARGETS="ollama openclaw"
+FAKE_FAIL=openclaw provision_selected_targets > "$_out" 2>&1; _rc=$?
+assert_eq "a failed OpenClaw companion fails the run" 1 "$_rc"
+assert_contains "and gives its partial CT recovery command" \
+  "CT_ID=918 ROUTER_CT_ID=910 bash targets/openclaw/provision-lxc.sh --reconfigure" "$(cat "$_out")"
+TARGETS="ollama strata hermes"
 FAKE_NO_TOKEN=1 provision_selected_targets > "$_out" 2>&1; _rc=$?
 assert_eq "no admin key fails the run" 1 "$_rc"
 assert_contains "and the companions are skipped, not run" "skipped (no Open WebUI admin key)" "$(cat "$_out")"
@@ -1260,7 +1275,8 @@ CT_ID=100; TARGETS=""; INSTALL_TARGETS=""; TARGET_ADMIN_TOKEN=""
 unset TARGETS_DIR TARGET_RESERVED_IDS TARGET_RESERVED_IPS TEMPLATE_REF GATEWAY BRIDGE NAMESERVER \
   OPENWEBUI_PORT STORAGE CORES ROOTFS_GB IP_CIDR _tt _out _rc _stdin _pveam_list_local _pveam_list_nfs \
   OLLAMA_CT_ID OLLAMA_IP_CIDR OLLAMA_STORAGE STRATA_CT_ID STRATA_IP_CIDR STRATA_STORAGE STRATA_TEMPLATE \
-  LLAMACPP_CT_ID LLAMACPP_IP_CIDR LLAMACPP_STORAGE HERMES_CT_ID HERMES_IP_CIDR HERMES_STORAGE MAYA_IP_CIDR
+  LLAMACPP_CT_ID LLAMACPP_IP_CIDR LLAMACPP_STORAGE HERMES_CT_ID HERMES_IP_CIDR HERMES_STORAGE MAYA_IP_CIDR \
+  OPENCLAW_CT_ID OPENCLAW_IP_CIDR OPENCLAW_STORAGE
 TEMPLATE_STORAGE="local"; MODEL_SERVER_COUNT=3
 
 # ── validators ────────────────────────────────────────────────────────────────

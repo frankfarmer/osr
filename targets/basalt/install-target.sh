@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-model;osr-target;basalt
 # Runs inside the dedicated Basalt LXC after host-matched NVIDIA user-space and
 # a CUDA 13.0+ toolkit are available.
 #

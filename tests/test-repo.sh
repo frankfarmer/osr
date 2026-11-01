@@ -197,10 +197,11 @@ for t in "${ROOT}"/targets/*/install-target.sh; do
 done
 for dir in "${ROOT}"/targets/*/; do
   name=$(basename "$dir")
-  # Hermes (an agent client) and the Gitea and Mattermost services are upgraded
-  # by their own updaters (hermes update, the community script, apt); the
-  # inference-target rollback contract does not apply to them.
-  case $name in hermes|gitea|mattermost) continue ;; esac
+  # Hermes and OpenClaw (agent clients) and the Gitea and Mattermost services
+  # are upgraded by their own updaters (hermes update, openclaw update, the
+  # community script, apt); the inference-target rollback contract does not
+  # apply to them.
+  case $name in hermes|openclaw|gitea|mattermost) continue ;; esac
   # Code lines of the target's tests (comments do not count as a test).
   tests_code="cat '${dir}'test-*.sh | grep -vE '^[[:space:]]*#'"
   if grep -qE -- '--upgrade\)' "${dir}install-target.sh"; then

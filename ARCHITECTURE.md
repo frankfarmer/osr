@@ -13,7 +13,8 @@ The router gives clients one OpenAI-compatible endpoint for 1–20 configured
 model hosts. It inventories models and selects a host for each request by
 size, capabilities and load-spreading score. The router CT also contains Open
 WebUI, LiteLLM fallback and health monitoring. Optional `targets/` LXCs
-provide model servers, Gitea, Mattermost, Open Terminal, Hermes and ComfyUI.
+provide model servers, Gitea, Mattermost, Open Terminal, Hermes, OpenClaw and
+ComfyUI.
 
 The design keeps GPU workloads separate from the router, stores configuration
 in a Gitea repository when available, and applies changes with validation and
@@ -41,6 +42,7 @@ flowchart LR
     end
     term["Open Terminal LXC<br/>:8000"]
     hermes["Hermes Agent LXC<br/>API server :8642"]
+    openclaw["OpenClaw LXC<br/>Gateway :18789"]
     comfy["ComfyUI LXC<br/>:8188"]
     gitea["Gitea"]
     mm["Mattermost"]
@@ -50,9 +52,12 @@ flowchart LR
     webui -->|OpenAI API| router
     webui -->|terminal tool| term
     webui -->|"OpenAI API (hermes-agent)"| hermes
+    webui -->|"OpenAI API (openclaw)"| openclaw
     webui -->|"image generation"| comfy
     hermes -.->|inventory and ranking :8000| router
     hermes -->|direct inference| pool
+    openclaw -.->|inventory and ranking :8000| router
+    openclaw -->|direct inference| pool
     router -->|direct dispatch| pool
     router -.->|fallback| litellm
     litellm --> pool
@@ -68,6 +73,7 @@ flowchart LR
 | Mattermost (webhook) | Optional | Alerts logged and retried |
 | Open Terminal (`:8000`) | Optional | Terminal tool unavailable; chat unaffected |
 | Hermes API server (`:8642`) | Optional | `hermes-agent` unavailable in Open WebUI; other models unaffected |
+| OpenClaw Gateway (`:18789`) | Optional | `openclaw` unavailable in Open WebUI; other models unaffected |
 | ComfyUI (`:8188`) | Optional | Image generation in Open WebUI fails; chat unaffected |
 
 ---
@@ -368,15 +374,17 @@ service account before building its venv.
 | 11434 / 1234 / 8080 | Model hosts | outbound | Router, LiteLLM, monitor → pool |
 | 8000 | Open Terminal CT | outbound | Open WebUI → terminal |
 | 8642 / 8765 | Hermes CT API / local dispatcher | `0.0.0.0` / `127.0.0.1` in its CT | Open WebUI → Hermes; dispatcher → router metadata and model servers |
+| 18789 / 8765 | OpenClaw CT Gateway (API, Control UI) / local dispatcher | `0.0.0.0` (loopback without Open WebUI and Control UI) / `127.0.0.1` in its CT | Open WebUI → OpenClaw, browsers → Control UI; dispatcher as for Hermes |
 | 8188 | ComfyUI CT | `0.0.0.0` in its CT | Open WebUI → ComfyUI (HTTP and WebSocket) |
 
 With the CT firewall enabled, the installer accepts TCP 22, 8000 and the Open
 WebUI port from `API_ALLOW_CIDR`. SSH is included because enabling the
 firewall sets the input policy to drop. Target CTs are created with
-`firewall=1`. Open Terminal, Hermes and ComfyUI admit only the router's address
-(ComfyUI also `UI_ALLOW_CIDR`, for its web UI); model targets leave the rules to
-the operator. The Hermes CT also restricts egress by
-default: the router's API, registered model server endpoints, DNS and internet HTTP(S) (§17.1).
+`firewall=1`. Open Terminal, Hermes, OpenClaw and ComfyUI admit only the router's
+address (ComfyUI also `UI_ALLOW_CIDR`, Hermes's dashboard and OpenClaw's Control
+UI anyone, for their web UIs); model targets leave the rules to the operator. The
+Hermes and OpenClaw CTs also restrict egress by default: the router's API,
+registered model server endpoints, DNS and internet HTTP(S) (§17.1, §17.4).
 
 ---
 
@@ -399,6 +407,8 @@ default: the router's API, registered model server endpoints, DNS and internet H
 | Open Terminal key | `/etc/open-terminal/api-key`; Open WebUI connection settings | Generated in the terminal CT |
 | Hermes API server key | `/etc/hermes-target/api-key` (0600), `~hermes/.hermes/.env` (0600); Open WebUI connection settings | Generated in the Hermes CT |
 | Router and backend keys in the Hermes CT | `~hermes/.hermes/.env` (0600) for the router key; `/etc/hermes-target/backend-keys` (0640) for backend keys | Pushed as 0600 files, never in argv; `--reconfigure` after a rotation |
+| OpenClaw Gateway token | `/etc/openclaw-target/api-key` (0600), `~openclaw/.openclaw/.env` (0600, `OPENCLAW_GATEWAY_TOKEN`; the config holds only an env SecretRef); Open WebUI connection settings | Generated in the OpenClaw CT; also the Control UI login |
+| Router and backend keys in the OpenClaw CT | `/etc/openclaw-target/router.env` and `backend-keys` (0640 root:openclaw-direct) | Read only by the dispatcher's own account, not by the agent; pushed as 0600 files; `--reconfigure` after a rotation |
 | Hugging Face token (ComfyUI `klein-9b` weights) | Not kept: the installer's memory, a 0600 file in the provisioner's stage directory and, during the guest step only, `/root/comfyui-target-deploy/hf-token` (0600) in the ComfyUI CT; removed afterwards, also on failure | Never in argv or the CT's environment; only root reads it, as a curl header file |
 
 | Accepted risk | Mitigation |
@@ -412,6 +422,8 @@ default: the router's API, registered model server endpoints, DNS and internet H
 | The gated 9B weights have no reviewed hash (Hugging Face hides it from accounts without access) | Checked against the hash Hugging Face sends for the authenticated request and the pinned size; `COMFYUI_KLEIN_9B_SHA256` pins it |
 | ComfyUI has no authentication (queue, outputs, uploads) | Its CT firewall drops all inbound except :8188 from the router and `UI_ALLOW_CIDR`; the service runs unprivileged and cannot write its code or venv (§17.3) |
 | Hermes users can read router and backend keys and share one agent memory | The agent runs as `hermes`, which owns its configuration. Keep `hermes-agent` admin-only or limited to one group; one Hermes profile per user or group for separation |
+| OpenClaw's chat token is full operator access to its Gateway; its users share one agent and workspace | The token is only in Open WebUI's connection and root-only files; keep `openclaw` admin-only or limited to one group. The router and backend keys are out of the agent's reach (`openclaw-direct`) |
+| OpenClaw's installer chain is unpinned beyond nvm (Node and npm `latest`) | nvm's `install.sh` is checked against its SHA-256; nvm checks Node against nodejs.org's checksums; `OPENCLAW_VERSION` and `OPENCLAW_NODE_VERSION` pin exact releases |
 
 ---
 
@@ -469,6 +481,7 @@ lists the commands and endpoints to inspect a running installation.
 | Secrets in `secrets.env` | Committed env | Tokens out of git, still readable by every unit |
 | Targets in their own LXCs | Engines in the router CT | GPU, memory and disk stay off the router; a failed target is just a down host |
 | Hermes as a second Open WebUI connection | Hermes as a model-server kind in the pool | `auto` could route to Hermes, which calls `auto`: a loop. Hermes has no size or capabilities to score |
+| OpenClaw reuses Hermes's dispatcher (`DIRECT_ETC`, `DIRECT_SECRETS_FILE`, `DIRECT_CONTEXT_SETTING`) | A copy per agent | One implementation of ranking, task pinning, failover and stream checks; both agents name direct targets the same |
 | ComfyUI as Open WebUI's image engine | An image route in the router | The router's API is chat-only; Open WebUI already drives ComfyUI's workflow API (queue, WebSocket progress, `/view`) |
 
 ---
@@ -659,6 +672,20 @@ checks the selected FLUX.2 Klein weights before Open WebUI integration.
 Upgrades build a pinned release beside the running one and switch a symlink
 after health checks.
 
+### 17.4 OpenClaw (`targets/openclaw/`)
+
+[OpenClaw](targets/openclaw/README.md) is a second agent connection on
+Hermes's pattern. Its Gateway on 18789 serves the agent, the Control UI and,
+for Open WebUI, `/v1/chat/completions` (token auth; the model `openclaw`).
+OpenClaw's provider `osr` and one provider per model server point at the
+Hermes dispatcher on 8765, run as `openclaw-direct` with this target's files;
+their model lists, with the configured context window, are written from the
+dispatcher's `/v1/models` on each install run. OpenClaw is installed as the
+brax.me script does (nvm v0.40.4, Node 24, `npm install -g openclaw`) without
+its Ollama step, with the nvm installer's hash and the official security floor
+checked. Firewall and egress follow Hermes; the Control UI port is open to the
+LAN when enabled.
+
 ## 18. Verification and CI
 
 * `tests/run-tests.sh` runs every shell and pytest suite and every
@@ -666,8 +693,8 @@ after health checks.
   function. Nothing touches the network, a CT or a GPU. Most target
   end-to-end cases need root (or `unshare -r`) and skip otherwise; the result
   lists every skip, and `--strict` (or `CI=true`) makes a skip fail the run.
-  The provisioner suites (Hermes, Gitea, Mattermost) stub `id` and need no
-  root.
+  The provisioner suites (Hermes, OpenClaw, Gitea, Mattermost) stub `id` and
+  need no root.
 * `tests/test-repo.sh` checks repository invariants: unit hardening, no secrets
   in `env/`, UTF-8, embedded copies in sync, Maya's update switch, Xolotl's
   and Avalon's pinned weights and the upgrade contract.

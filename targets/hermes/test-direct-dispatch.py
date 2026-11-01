@@ -619,6 +619,29 @@ class TestDirect(unittest.TestCase):
                     self.assertRaises(SystemExit):
                 direct.main()
 
+    def test_main_takes_another_targets_files(self):
+        # The OpenClaw target runs this dispatcher with its own settings,
+        # router key file and context setting.
+        with tempfile.TemporaryDirectory() as root:
+            etc = pathlib.Path(root, "openclaw-target")
+            etc.mkdir()
+            (etc / "settings").write_text(
+                "ROUTER_URL=http://r:8000\nHERMES_CONTEXT_LENGTH=99999\nOPENCLAW_CONTEXT_LENGTH=40000\n")
+            (etc / "router.env").write_text("ROUTER_API_KEY=openclaw-key\n")
+            (etc / "backend-keys").write_text("STRATA_API_KEY=sk-b\n")
+            env = {"DIRECT_ETC": str(etc), "DIRECT_SECRETS_FILE": str(etc / "router.env"),
+                   "DIRECT_CONTEXT_SETTING": "OPENCLAW_CONTEXT_LENGTH",
+                   "HERMES_ETC": str(pathlib.Path(root, "missing")), "HERMES_HOME": str(pathlib.Path(root, "none"))}
+            with mock.patch.dict("os.environ", env), \
+                    mock.patch.object(direct, "DispatchServer"), \
+                    mock.patch.object(direct.logging, "basicConfig"):
+                direct.main()
+            dispatcher = direct.Handler.dispatcher
+            self.assertEqual(dispatcher.min_context, 40000)
+            self.assertEqual(dispatcher.router_key, "openclaw-key")
+            self.assertEqual(dispatcher.backend_keys, {"STRATA_API_KEY": "sk-b"})
+            self.assertEqual(dispatcher.router_url, "http://r:8000")
+
     def test_connect_timeout_is_short_and_read_timeout_long(self):
         made = []
         real = socket.create_connection

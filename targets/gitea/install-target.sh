@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-tools;osr-target;gitea
 # Run as root in the Gitea CT made by the Proxmox VE community script
 # (provision-lxc.sh pushes and runs this). It finishes Gitea's setup without the
 # browser and prepares what the router's configuration repository needs:

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-model;osr-target;ollama
 # Run INSIDE an Ollama target CT created by the Proxmox community script
 # (ct/ollama.sh, via provision-lxc.sh), never on the router CT or the PVE host.
 # Adopts that install into this repository's target conventions:

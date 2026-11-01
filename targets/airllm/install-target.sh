@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-model;osr-target;airllm
 # Run INSIDE a dedicated AirLLM inference-target LXC or VM, never on the router
 # CT or the PVE host. Installs server.py as airllm-ollama-api.service: an
 # Ollama-compatible API on TCP 11434 serving one AirLLM layer-streamed model.
