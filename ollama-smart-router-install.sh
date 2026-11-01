@@ -846,6 +846,8 @@ valid_ollama_addr() {
   [[ "$raw" == maya://* ]] && raw="${raw#maya://}"
   raw="${raw#xolotl+}"
   [[ "$raw" == xolotl://* ]] && raw="${raw#xolotl://}"
+  raw="${raw#avalon+}"
+  [[ "$raw" == avalon://* ]] && raw="${raw#avalon://}"
   if [[ "$raw" == http://* || "$raw" == https://* ]]; then
     valid_http_url "$raw"; return $?
   fi
@@ -859,7 +861,7 @@ valid_ollama_addr() {
 }
 # Normalise any accepted form to a base URL with an explicit port.
 # Stored form: http://host:port for Ollama or a kind-prefixed URL for
-# LM Studio, Strata, Basalt, Maya and Xolotl, matching the manager, router and monitor.
+# LM Studio, Strata, Basalt, Maya, Xolotl and Avalon, matching the manager, router and monitor.
 normalize_ollama_url() {
   local raw="${1%/}" prefix="" port="$OLLAMA_PORT"
   if [[ "$raw" == lmstudio+* ]]; then
@@ -882,6 +884,10 @@ normalize_ollama_url() {
     prefix="xolotl+"; raw="${raw#xolotl+}"; port="${XOLOTL_PORT:-8080}"
   elif [[ "$raw" == xolotl://* ]]; then
     prefix="xolotl+"; raw="${raw#xolotl://}"; port="${XOLOTL_PORT:-8080}"
+  elif [[ "$raw" == avalon+* ]]; then
+    prefix="avalon+"; raw="${raw#avalon+}"; port="${AVALON_PORT:-8080}"
+  elif [[ "$raw" == avalon://* ]]; then
+    prefix="avalon+"; raw="${raw#avalon://}"; port="${AVALON_PORT:-8080}"
   fi
   if [[ "$raw" == http://* || "$raw" == https://* ]]; then
     printf '%s%s\n' "$prefix" "$raw"
@@ -1012,6 +1018,7 @@ target_table() {
     'basalt|model|Basalt on a Blackwell GPU (CUDA 13)|basalt+http://@IP@:@PORT@|basalt|required:nvidia:rtx50' \
     'maya|model|Project Maya (GLM-5.3-Flash) on an NVIDIA GPU|maya+http://@IP@:@PORT@|maya|required:nvidia' \
     'xolotl|model|Xolotl (DeepSeek-V4.1-Flash, 552B) on a 24 GB NVIDIA GPU; ~372 GB download|xolotl+http://@IP@:@PORT@|xolotl|required:nvidia' \
+    'avalon|model|Avalon (Qwen3.8-Flash-Next, llama.cpp fork) on a 16-20 GB AMD RX 7000 (ROCm) or NVIDIA GPU; ~90 GiB download|avalon+http://@IP@:@PORT@|avalon|required:amd,nvidia:rdna3,rtx20,rtx30,rtx40,rtx50' \
     'open-terminal|companion|Open Terminal: a shell tool for Open WebUI|||' \
     'hermes|companion|Hermes Agent: offered in Open WebUI as the model hermes-agent|||' \
     'comfyui|companion|ComfyUI: image generation for Open WebUI (NVIDIA, AMD or Intel Arc GPU when present)|||optional:nvidia,amd,intel'
@@ -1040,8 +1047,9 @@ llamacpp_model_given() {
 # target_gpu_spec NAME: need|vendors|generations for the target as configured.
 # llama.cpp needs a GPU for its default build: BACKEND=cuda (NVIDIA) or vulkan
 # (AMD, Intel Arc), unset for whichever the host has; BACKEND=cpu does without.
-# AirLLM uses an NVIDIA GPU only when GPU_DEVICES is given. Ollama and ComfyUI
-# follow GPU (nvidia, amd or intel picks one; no or none runs on the CPU).
+# AirLLM uses an NVIDIA GPU only when GPU_DEVICES is given. Avalon follows
+# AVALON_BACKEND (rocm: AMD, cuda: NVIDIA). Ollama and ComfyUI follow GPU
+# (nvidia, amd or intel picks one; no or none runs on the CPU).
 target_gpu_spec() {
   local need vendors gens
   IFS=: read -r need vendors gens <<< "$(target_field "$1" gpu)" || true
@@ -1055,6 +1063,11 @@ target_gpu_spec() {
         *) need="" ;;
       esac ;;
     airllm) [[ -z "${GPU_DEVICES:-}" ]] || need=required ;;
+    avalon)
+      case "${AVALON_BACKEND:-auto}" in
+        rocm) vendors=amd ;;
+        cuda) vendors=nvidia ;;
+      esac ;;
     ollama|comfyui)
       case "${GPU:-auto}" in
         no|none) need="" ;;
@@ -1362,7 +1375,9 @@ prepare_host_gpu() {
 # (NAME=value lines), unless they were preset: GPU for Ollama and ComfyUI and,
 # for a chosen card, GPU_CARD (its PCI address); for llama.cpp BACKEND (cuda
 # or vulkan) and GPU_DEVICES: the card's render node for Vulkan, its
-# /dev/nvidia<minor> with the control and UVM devices for CUDA.
+# /dev/nvidia<minor> with the control and UVM devices for CUDA; for Avalon
+# AVALON_BACKEND (rocm or cuda) and GPU_DEVICES: /dev/kfd and the card's
+# render node for ROCm, the NVIDIA nodes for CUDA.
 target_gpu_env() {
   local state vendor render minor pci
   IFS='|' read -r state vendor render minor pci <<< "$(target_gpu_result "$1")"
@@ -1385,11 +1400,26 @@ target_gpu_env() {
       elif [[ "$backend" == cuda && -n "$minor" ]]; then
         echo "GPU_DEVICES=/dev/nvidia${minor} /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools"
       fi ;;
+    avalon)
+      local avalon_backend="${AVALON_BACKEND:-auto}"
+      [[ $state == ready ]] || return 0
+      if [[ "$avalon_backend" == auto ]]; then
+        case "$vendor" in nvidia) avalon_backend=cuda ;; amd) avalon_backend=rocm ;; *) return 0 ;; esac
+        echo "AVALON_BACKEND=${avalon_backend}"
+      fi
+      [[ -z "${GPU_DEVICES:-}" ]] || return 0
+      if [[ "$avalon_backend" == rocm && -n "$render" ]]; then
+        echo "GPU_DEVICES=/dev/kfd ${render}"
+      elif [[ "$avalon_backend" == cuda && -n "$minor" ]]; then
+        echo "GPU_DEVICES=/dev/nvidia${minor} /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools"
+      fi ;;
   esac
 }
 
-# Strata, Basalt, Maya and Xolotl take a template; the others choose or prompt for theirs.
-target_needs_template() { [[ "$1" == strata || "$1" == basalt || "$1" == maya || "$1" == xolotl ]]; }
+# Strata, Basalt, Maya, Xolotl and Avalon take a template; the others choose or prompt for theirs.
+target_needs_template() {
+  [[ "$1" == strata || "$1" == basalt || "$1" == maya || "$1" == xolotl || "$1" == avalon ]]
+}
 
 # The newer NVIDIA repositories do not carry the targets' CUDA defaults.
 # Keep an explicit user choice, including an unavailable one (the target's
@@ -1508,6 +1538,11 @@ valid_target_template() {
 valid_strata_template() {
   valid_target_template "$1" && [[ "$1" != *:vztmpl/ubuntu-26.04-* ]]
 }
+# Avalon: AMD supports ROCm on Radeon cards on Ubuntu 24.04 and 22.04 only
+# (the CUDA build runs there too).
+valid_avalon_template() {
+  valid_target_template "$1" && [[ "$1" == *:vztmpl/ubuntu-24.04-* || "$1" == *:vztmpl/ubuntu-22.04-* ]]
+}
 show_strata_template_alternatives() {
   local selected="$1" storage ref shown=0
   while IFS= read -r storage; do
@@ -1541,10 +1576,12 @@ host_gpu_cuda_arch() {
 # compatibility). Ubuntu 26.04 is next for Basalt, Maya and Xolotl; Strata's
 # upstream setup does not support it. Maya on a card CUDA 13 cannot build for
 # (compute capability below 7.5, e.g. a V100) needs CUDA 12.x, which only the
-# Ubuntu 24.04/22.04 and Debian 12 repositories carry.
+# Ubuntu 24.04/22.04 and Debian 12 repositories carry. Avalon's ROCm build
+# needs Ubuntu 24.04 or 22.04 (AMD's Radeon support; its CUDA build runs there too).
 gpu_target_template_order() {
   case "$1" in
     strata) echo debian-13 ubuntu-24.04 ubuntu-22.04 debian-12 ;;
+    avalon) echo ubuntu-24.04 ubuntu-22.04 ;;
     maya)
       local arch
       arch="$(host_gpu_cuda_arch)"
@@ -1585,7 +1622,7 @@ ensure_target_template() {
 }
 
 # For each selected target: CT ID, static address and storage (and a template
-# for Strata, Basalt, Maya and Xolotl), asked now so a typo costs a re-prompt. Presets:
+# for Strata, Basalt, Maya, Xolotl and Avalon), asked now so a typo costs a re-prompt. Presets:
 # <NAME>_CT_ID, <NAME>_IP_CIDR, <NAME>_STORAGE, <NAME>_TEMPLATE.
 prompt_target_settings() {
   local name prefix id_var ip_var storage_var template_var default ip
@@ -1643,6 +1680,10 @@ prompt_target_settings() {
         [[ "$NONINTERACTIVE" == true ]] || show_strata_template_alternatives "$default"
         prompt_until_valid "    Template (Ubuntu 22.04/24.04 or Debian 12/13; downloaded if missing)" \
           "$template_var" "$default" valid_strata_template || return 1
+      elif [[ $name == avalon ]]; then
+        [[ -n "$default" ]] || default="$(default_gpu_target_template "$name")" || default=""
+        prompt_until_valid "    Template (Ubuntu 24.04 or 22.04: ROCm's Radeon support; downloaded if missing)" \
+          "$template_var" "$default" valid_avalon_template || return 1
       else
         [[ -n "$default" ]] || default="$(default_gpu_target_template "$name")" || default=""
         prompt_until_valid "    Template (Ubuntu 22.04/24.04/26.04 or Debian 12/13; downloaded if missing; Ubuntu 26.04 needs CUDA 13.3+)" \
@@ -2121,10 +2162,10 @@ prompt_model_servers() {
     # suggesting the previous server's address would let a stray Enter create a
     # duplicate deployment, which silently double-weights that host.
     if [[ -n "$default_addr" ]]; then
-      prompt_until_valid "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host or xolotl://host)" raw "$default_addr" valid_ollama_addr
+      prompt_until_valid "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host, xolotl://host or avalon://host)" raw "$default_addr" valid_ollama_addr
     else
       while true; do
-        read -r -p "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host or xolotl://host): " raw
+        read -r -p "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host, xolotl://host or avalon://host): " raw
         valid_ollama_addr "$raw" && break
         echo "    Not a valid address — try again." >&2
       done
@@ -3133,7 +3174,7 @@ _DEFAULTS = {
         "tool_match": "0.3",
     },
     # Sizes for exact model ids that an OpenAI-compatible server (Strata,
-    # Basalt, Maya, Xolotl) lists without a parameter count. Matching is by the whole
+    # Basalt, Maya, Xolotl, Avalon) lists without a parameter count. Matching is by the whole
     # id, case-insensitive, so variants and aliases stay unknown-size unless
     # given a line of their own. A blank value removes a built-in entry.
     "model_sizes": {
@@ -3146,6 +3187,7 @@ _DEFAULTS = {
         "qwen3.8-flash-next-iq3_s": "125B",
         "glm-5.3-flash": "321B",        # Project Maya (GLM-5.3-Flash, 321B total)
         "deepseek-v4.1-flash": "552B",  # Xolotl's default id (DeepSeek-V4.1-Flash, 552B total)
+        "qwen3.8-flash-next-avalon": "125B",  # Avalon's default alias (Qwen3.8-Flash-Next)
     },
 }
 ROUTER_INI = os.getenv(
@@ -3316,6 +3358,8 @@ SERVER_KINDS = {
              "label": "Maya", "openai": True},
     "xolotl": {"prefix": "xolotl+", "key_env": "XOLOTL_API_KEY",
                "label": "Xolotl", "openai": True},
+    "avalon": {"prefix": "avalon+", "key_env": "AVALON_API_KEY",
+               "label": "Avalon", "openai": True},
 }
 OPENAI_KINDS = frozenset(k for k, v in SERVER_KINDS.items() if v["openai"])
 # Bearer tokens the router adds per kind (secrets.env). LM Studio's is for
@@ -3680,7 +3724,7 @@ async def fetch_lmstudio_models(client: httpx.AsyncClient, server: str) -> tuple
 
 
 async def fetch_openai_models(client: httpx.AsyncClient, server: str) -> tuple:
-    """Read Strata, Basalt, Maya or Xolotl model IDs and capabilities at /v1/models."""
+    """Read Strata, Basalt, Maya, Xolotl or Avalon model IDs and capabilities at /v1/models."""
     try:
         response = await client.get(f"{server_base(server)}/v1/models",
                                     headers=backend_headers(server),
@@ -4694,6 +4738,8 @@ SERVER_KINDS = {
              "label": "Maya", "openai": True},
     "xolotl": {"prefix": "xolotl+", "key_env": "XOLOTL_API_KEY",
                "label": "Xolotl", "openai": True},
+    "avalon": {"prefix": "avalon+", "key_env": "AVALON_API_KEY",
+               "label": "Avalon", "openai": True},
 }
 KIND_KEYS = {kind: (os.getenv(spec["key_env"]) or "").strip()
              for kind, spec in SERVER_KINDS.items()}
@@ -5270,12 +5316,12 @@ tie_epsilon = 0.05
 # entries are neutral). Small: it breaks near-ties, it does not override fit.
 loaded_bonus = 0.1
 # On a tool request, bonus for a model reported tool-capable over one whose
-# tool support is unknown (Strata/Basalt/Maya/Xolotl, LM Studio's untrained models).
+# tool support is unknown (Strata/Basalt/Maya/Xolotl/Avalon, LM Studio's untrained models).
 tool_match = 0.3
 
 [model_sizes]
 # Sizes for exact model ids that an OpenAI-compatible server (Strata, Basalt,
-# Maya, Xolotl) lists without a parameter count, so the router can size-band them.
+# Maya, Xolotl, Avalon) lists without a parameter count, so the router can size-band them.
 # Matching is by the whole id, case-insensitive: variants and aliases (Strata's
 # Coder, a renamed Basalt alias) stay unknown-size unless listed here.
 # Add a line for a custom alias (e.g. the BASALT_ALIAS a target serves);
@@ -5290,6 +5336,8 @@ qwen3.8-flash-next-iq3_xxs = 125B
 qwen3.8-flash-next-iq3_s = 125B
 glm-5.3-flash = 321B
 deepseek-v4.1-flash = 552B
+# Avalon's default alias (Qwen3.8-Flash-Next, its IQ3_KS hybrid).
+qwen3.8-flash-next-avalon = 125B
 INIEOF
 
 cat > "${REPO_DIR}/services/ollama-monitor/monitor.ini" <<'INIEOF'
@@ -5300,7 +5348,7 @@ cat > "${REPO_DIR}/services/ollama-monitor/monitor.ini" <<'INIEOF'
 interval_seconds = 15
 timeout_seconds = 5
 # Path appended to each Ollama backend URL for the health probe. LM Studio,
-# Strata, Basalt, Maya and Xolotl are probed on /v1/models with their own keys
+# Strata, Basalt, Maya, Xolotl and Avalon are probed on /v1/models with their own keys
 # when set, and are skipped by the keep-alive pinner. They count as down while
 # that list is empty (their engine is not running).
 health_path = /api/tags
@@ -5436,8 +5484,9 @@ LITELLM_REQ="${REPO_DIR}/services/litellm-proxy/requirements.txt"
 LITELLM_LOCK="${REPO_DIR}/services/litellm-proxy/requirements.lock"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 # Default ports of the other server kinds are in kind_field (LM Studio 1234,
-# Strata/Basalt/Maya/Xolotl 8080); LMSTUDIO_PORT, STRATA_PORT, BASALT_PORT,
-# MAYA_PORT and XOLOTL_PORT in the environment override them.
+# Strata/Basalt/Maya/Xolotl/Avalon 8080); LMSTUDIO_PORT, STRATA_PORT,
+# BASALT_PORT, MAYA_PORT, XOLOTL_PORT and AVALON_PORT in the environment
+# override them.
 LMSTUDIO_PORT="${LMSTUDIO_PORT:-1234}"
 SERVER_TYPE="auto"   # --type ollama|<kind>|auto for add / set-tier (see server_kinds)
 MODEL_SERVER_MAX="${MODEL_SERVER_MAX:-20}"
@@ -5485,9 +5534,10 @@ Commands:
   status                     As list, plus a live reachability probe of each host
   discover                   Ask OSR to re-poll and print the live model inventory
   add <addr> [addr...]       Add server(s). Address may be IP, host:port or a URL.
-                             LM Studio, Strata, Basalt, Maya and Xolotl are detected
-                             automatically, or use lmstudio://host / strata://host /
-                             basalt://host / maya://host / xolotl://host or --type.
+                             LM Studio, Strata, Basalt, Maya, Xolotl and Avalon are
+                             detected automatically, or use lmstudio://host /
+                             strata://host / basalt://host / maya://host /
+                             xolotl://host / avalon://host or --type.
                              Detection sends no API key.
   remove <addr> [addr...]    Remove server(s) by address (or by list number)
   set-tier <tier> <addr...>  Replace a tier's servers (tier: fast|medium|large|xlarge)
@@ -5526,6 +5576,9 @@ Commands:
   set-xolotl-token [token|--off]
                              Bearer token for Xolotl servers with an API key
                              (stored in secrets.env)
+  set-avalon-token [token|--off]
+                             Bearer token for Avalon servers with an API key
+                             (stored in secrets.env)
   set-api-key [key|--generate|--off]
                              Require "Authorization: Bearer <key>" on OSR
                              API (Open WebUI is given the same key)
@@ -5539,7 +5592,7 @@ Commands:
 
 Options:
   --tier <t[,t...]>          With 'add': also assign the new server(s) to these tiers
-  --type <ollama|lmstudio|strata|basalt|maya|xolotl> With 'add' / 'set-tier': the server's API (default:
+  --type <ollama|lmstudio|strata|basalt|maya|xolotl|avalon> With 'add' / 'set-tier': the server's API (default:
                              auto-detect by probing; ollama when --no-probe)
   --apply                    Apply + restart services after the change
   --commit[=msg]             Commit and push the change after applying
@@ -5582,7 +5635,7 @@ valid_hostname_or_ip() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
 #   port   -- default port (overridable through the <KIND>_PORT variable)
 #   openai -- 1 for Strata-style servers (models at /v1/models, LiteLLM's
 #             openai provider), 0 for LM Studio (its own API and provider)
-server_kinds() { printf '%s\n' lmstudio strata basalt maya xolotl; }
+server_kinds() { printf '%s\n' lmstudio strata basalt maya xolotl avalon; }
 kind_field() {
   local spec key label port_var port_default openai value
   case "$1" in
@@ -5591,6 +5644,7 @@ kind_field() {
     basalt)   spec='BASALT_API_KEY|Basalt|BASALT_PORT|8080|1' ;;
     maya)     spec='MAYA_API_KEY|Maya|MAYA_PORT|8080|1' ;;
     xolotl)   spec='XOLOTL_API_KEY|Xolotl|XOLOTL_PORT|8080|1' ;;
+    avalon)   spec='AVALON_API_KEY|Avalon|AVALON_PORT|8080|1' ;;
     *) return 1 ;;
   esac
   IFS='|' read -r key label port_var port_default openai <<< "$spec"
@@ -5614,7 +5668,7 @@ is_server_kind() {
 }
 is_openai_kind() { is_server_kind "$1" && [[ "$(kind_field "$1" openai)" == 1 ]]; }
 openai_kinds() { local k; for k in $(server_kinds); do is_openai_kind "$k" && echo "$k"; done; return 0; }
-# "Ollama, LM Studio, Strata, Basalt, Maya or Xolotl"
+# "Ollama, LM Studio, Strata, Basalt, Maya, Xolotl or Avalon"
 kind_labels() {
   local out=Ollama k label last=""
   for k in $(server_kinds); do
@@ -5757,9 +5811,16 @@ detect_server_kind() {
   if [[ "$status_code" == 200 && "$body" == *'"auto_load"'* && "$body" == *'"loaded"'* ]]; then
     echo strata; return 0
   fi
-  if body="$(curl -fsS --max-time "$PROBE_TIMEOUT" "${base}/v1/models" 2>/dev/null)" &&
-     [[ "$body" =~ \"(id|owned_by)\"[[:space:]]*:[[:space:]]*\"strata\" ]]; then
-    echo strata; return 0
+  if body="$(curl -fsS --max-time "$PROBE_TIMEOUT" "${base}/v1/models" 2>/dev/null)"; then
+    if [[ "$body" =~ \"(id|owned_by)\"[[:space:]]*:[[:space:]]*\"strata\" ]]; then
+      echo strata; return 0
+    fi
+    # Avalon serves llama.cpp's API (its /health says only "status"): a
+    # llama-server whose model id names Avalon (qwen3.8-flash-next-avalon).
+    if [[ "$body" =~ \"owned_by\"[[:space:]]*:[[:space:]]*\"llamacpp\" ]] &&
+       [[ "$body" =~ \"id\"[[:space:]]*:[[:space:]]*\"[^\"]*avalon[^\"]*\" ]]; then
+      echo avalon; return 0
+    fi
   fi
   # LM Studio: its native model API (0.4+ /api/v1, 0.3 /api/v0). A 401 still
   # identifies it: authentication is on and needs set-lmstudio-token. An
@@ -7570,8 +7631,8 @@ cmd_set_api_key() {
 }
 
 # Bearer token for one server kind (set-lmstudio-token, set-maya-token, ...):
-# LM Studio servers with "Require authentication" on, or Strata, Basalt, Maya
-# and Xolotl servers started with an API key. One token per kind, stored in
+# LM Studio servers with "Require authentication" on, or Strata, Basalt, Maya,
+# Xolotl and Avalon servers started with an API key. One token per kind, stored in
 # secrets.env (outside the repo) like the other secrets.
 cmd_set_kind_token() {
   local kind="$1" token="${2:-}" confirm_token="" key_env name noun cmd

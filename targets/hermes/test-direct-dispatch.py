@@ -744,10 +744,10 @@ class TestDirectTargets(unittest.TestCase):
             path.write_text("strata-a=strata+http://10.0.0.5:8080\n"
                             "Bad_Name=http://10.0.0.6:11434\n"
                             "ftp-x=ftp://10.0.0.7:21\n"
-                            "ollama-b=http://10.0.0.8:11434\n")
+                            "ollama-b=http://10.0.0.8:11434/a=b\n")
             self.assertEqual(direct.load_targets(str(path)),
                              {"strata-a": "strata+http://10.0.0.5:8080",
-                              "ollama-b": "http://10.0.0.8:11434"})
+                              "ollama-b": "http://10.0.0.8:11434/a=b"})
             self.assertEqual(direct.load_targets(str(path) + ".missing"), {})
 
 

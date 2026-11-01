@@ -480,6 +480,9 @@ out=$(guest) || fail "rerun with a target removed: $out"
 grep -q '^hermes config unset providers.ollama-192-168-11-153-11434$' "$log" || fail 'the stale provider was not unset'
 grep -q '^providers.ollama-192-168-11-153-11434\.' "$config" && fail "the stale provider is still configured: $(cat "$config")"
 [[ $(kv providers.strata-192-168-11-154-8080.api "$config") == */t/strata-192-168-11-154-8080/v1 ]] || fail 'the kept target lost its provider'
+printf 'strata-192-168-11-154-8080=strata+http://192.168.11.154:8080/a=b\n' > "$deploy/targets"
+out=$(guest) || fail "target URL with = was rejected: $out"
+cmp -s "$deploy/targets" "$etc/targets" || fail 'target URL with = was not installed'
 printf 'Bad Name=http://x:1\n' > "$deploy/targets"
 out=$(guest) && fail "an invalid targets file was accepted: $out"
 [[ $out == *'invalid line'* ]] || fail "invalid targets message: $out"

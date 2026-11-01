@@ -188,8 +188,8 @@ done
 unset _name
 
 describe target_table
-assert_eq "lists the twelve targets in menu order" \
-  "gitea mattermost ollama llamacpp airllm strata basalt maya xolotl open-terminal hermes comfyui" \
+assert_eq "lists the thirteen targets in menu order" \
+  "gitea mattermost ollama llamacpp airllm strata basalt maya xolotl avalon open-terminal hermes comfyui" \
   "$(target_table | cut -d'|' -f1 | paste -sd' ')"
 
 describe target_field
@@ -202,6 +202,9 @@ assert_eq "router entry template" "strata+http://@IP@:@PORT@" "$(target_field st
 assert_eq "key kind" basalt "$(target_field basalt key)"
 assert_eq "Xolotl has its own key kind" xolotl "$(target_field xolotl key)"
 assert_eq "Xolotl router entry template" "xolotl+http://@IP@:@PORT@" "$(target_field xolotl entry)"
+assert_eq "Avalon has its own key kind" avalon "$(target_field avalon key)"
+assert_eq "Avalon router entry template" "avalon+http://@IP@:@PORT@" "$(target_field avalon entry)"
+assert_eq "Avalon needs an RDNA 3 or an RTX card" required:amd,nvidia:rdna3,rtx20,rtx30,rtx40,rtx50 "$(target_field avalon gpu)"
 assert_eq "no key for Ollama" "" "$(target_field ollama key)"
 assert_fail "an unknown target" target_field nope phase
 assert_eq "Strata needs an NVIDIA GPU" required:nvidia "$(target_field strata gpu)"
@@ -225,6 +228,9 @@ assert_eq "ComfyUI GPU=amd: AMD" "optional|amd|" "$(GPU=amd target_gpu_spec comf
 assert_eq "Ollama GPU=no: none" "||" "$(GPU=no target_gpu_spec ollama)"
 assert_eq "ComfyUI GPU=none: none" "||" "$(GPU=none target_gpu_spec comfyui)"
 assert_eq "Gitea: none" "||" "$(target_gpu_spec gitea)"
+assert_eq "Avalon: AMD (ROCm) first, or NVIDIA" "required|amd,nvidia|rdna3,rtx20,rtx30,rtx40,rtx50" "$(target_gpu_spec avalon)"
+assert_eq "Avalon AVALON_BACKEND=rocm: AMD" "required|amd|rdna3,rtx20,rtx30,rtx40,rtx50" "$(AVALON_BACKEND=rocm target_gpu_spec avalon)"
+assert_eq "Avalon AVALON_BACKEND=cuda: NVIDIA" "required|nvidia|rdna3,rtx20,rtx30,rtx40,rtx50" "$(AVALON_BACKEND=cuda target_gpu_spec avalon)"
 assert_fail "an unknown target" target_gpu_spec nope
 
 describe target_gpu_need
@@ -496,6 +502,16 @@ assert_eq "no GPU: Ollama runs on the CPU" GPU=none "$(target_gpu_env ollama)"
 assert_eq "no GPU: llama.cpp keeps its own default" "" "$(target_gpu_env llamacpp)"
 GPU_RESULT_STRATA="ready|nvidia|||"
 assert_eq "other targets get nothing" "" "$(target_gpu_env strata)"
+GPU_RESULT_AVALON="ready|amd|/dev/dri/renderD128||0000:03:00.0"
+assert_eq "Avalon on an AMD card: ROCm with /dev/kfd and the card's render node" \
+  $'AVALON_BACKEND=rocm\nGPU_DEVICES=/dev/kfd /dev/dri/renderD128' "$(target_gpu_env avalon)"
+assert_eq "a preset AVALON_BACKEND and GPU_DEVICES are kept" "" \
+  "$(AVALON_BACKEND=rocm GPU_DEVICES='/dev/kfd /dev/dri/renderD129' target_gpu_env avalon)"
+GPU_RESULT_AVALON="ready|nvidia||2|0000:02:00.0"
+assert_eq "Avalon on an NVIDIA card: CUDA with its /dev/nvidia<minor>" \
+  $'AVALON_BACKEND=cuda\nGPU_DEVICES=/dev/nvidia2 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools' "$(target_gpu_env avalon)"
+GPU_RESULT_AVALON="absent||||"
+assert_eq "Avalon without a GPU: nothing (its provisioner stops)" "" "$(target_gpu_env avalon)"
 _gpu_reset
 
 describe target_var_prefix
@@ -521,15 +537,16 @@ describe target_needs_template
 assert_ok "Strata takes a template" target_needs_template strata
 assert_ok "Maya takes a template" target_needs_template maya
 assert_ok "Xolotl takes a template" target_needs_template xolotl
+assert_ok "Avalon takes a template" target_needs_template avalon
 assert_fail "llama.cpp prompts for its own" target_needs_template llamacpp
 assert_fail "Hermes uses the router's" target_needs_template hermes
 assert_fail "ComfyUI's community script picks its own" target_needs_template comfyui
 
 describe valid_target_selection
-for _sel in "" none "1,10" "ollama hermes" " 2 , strata " "8" "12" "comfyui" "xolotl"; do
+for _sel in "" none "1,10" "ollama hermes" " 2 , strata " "8" "13" "comfyui" "xolotl" "avalon"; do
   assert_ok "accepts '${_sel}'" valid_target_selection "$_sel"
 done
-for _sel in 0 13 bogus "ollama,bogus"; do
+for _sel in 0 14 bogus "ollama,bogus"; do
   assert_fail "rejects '${_sel}'" valid_target_selection "$_sel"
 done
 unset _sel
@@ -550,11 +567,12 @@ INSTALL_TARGETS=bogus
 assert_fail "an invalid preset is refused" prompt_target_selection
 NONINTERACTIVE=false; INSTALL_TARGETS=""
 _out="$(mktemp)"
-prompt_target_selection > "$_out" 2>&1 <<< $'13\n4,hermes\n'
+prompt_target_selection > "$_out" 2>&1 <<< $'14\n4,hermes\n'
 assert_eq "re-prompts until valid, then keeps the choice" "llamacpp hermes" "$TARGETS"
 assert_contains "the menu lists the model servers" "9) xolotl" "$(cat "$_out")"
-assert_contains "the menu lists the companions" "11) hermes" "$(cat "$_out")"
-assert_contains "ComfyUI among them" "12) comfyui" "$(cat "$_out")"
+assert_contains "Avalon among them" "10) avalon" "$(cat "$_out")"
+assert_contains "the menu lists the companions" "12) hermes" "$(cat "$_out")"
+assert_contains "ComfyUI among them" "13) comfyui" "$(cat "$_out")"
 assert_contains "and separates them from the model servers" "Companions:" "$(cat "$_out")"
 assert_contains "the services come first" "Services: created now, before OSR" "$(cat "$_out")"
 assert_contains "starting with Gitea" "1) gitea" "$(cat "$_out")"
@@ -655,6 +673,13 @@ assert_ok "Strata on Ubuntu 24.04" valid_strata_template local:vztmpl/ubuntu-24.
 assert_fail "not Ubuntu 26.04 (upstream setup lacks it)" valid_strata_template local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst
 assert_fail "nor another distro" valid_strata_template local:vztmpl/alpine-3.20-default_20240908_amd64.tar.xz
 
+describe valid_avalon_template
+assert_ok "Avalon on Ubuntu 24.04" valid_avalon_template local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+assert_ok "Avalon on Ubuntu 22.04" valid_avalon_template local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst
+assert_fail "not Debian 13 (ROCm supports Radeon cards on Ubuntu only)" valid_avalon_template local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst
+assert_fail "not Ubuntu 26.04 (no ROCm 7.2.4 repository)" valid_avalon_template local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst
+assert_fail "nor another distro" valid_avalon_template local:vztmpl/alpine-3.20-default_20240908_amd64.tar.xz
+
 describe host_gpu_cuda_arch
 HOST_GPU_CUDA_ARCH=120
 assert_eq "the GPU step's result first" 120 "$(host_gpu_cuda_arch)"
@@ -669,12 +694,14 @@ assert_eq "Strata: Debian 13 first, never Ubuntu 26.04" "debian-13 ubuntu-24.04 
 assert_eq "Xolotl: Debian 13, then Ubuntu 26.04" "debian-13 ubuntu-26.04 ubuntu-24.04 ubuntu-22.04 debian-12" "$(gpu_target_template_order xolotl)"
 assert_eq "Maya on an RTX card: Debian 13 first" "debian-13 ubuntu-26.04 ubuntu-24.04 ubuntu-22.04 debian-12" "$(HOST_GPU_CUDA_ARCH=89 gpu_target_template_order maya)"
 assert_eq "Maya on a V100: only CUDA 12 distributions" "ubuntu-24.04 ubuntu-22.04 debian-12" "$(HOST_GPU_CUDA_ARCH=70 gpu_target_template_order maya)"
+assert_eq "Avalon: the Ubuntu releases ROCm supports" "ubuntu-24.04 ubuntu-22.04" "$(gpu_target_template_order avalon)"
 
 describe target_cuda_env
 assert_eq "Basalt on Ubuntu 26.04 uses CUDA 13.3" CUDA_VERSION=13.3 "$(target_cuda_env basalt local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst)"
 assert_eq "Maya on Debian 13 uses CUDA 13.1" MAYA_CUDA_VERSION=13.1 "$(target_cuda_env maya local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst)"
 assert_eq "Xolotl on Ubuntu 26.04 uses CUDA 13.3" XOLOTL_CUDA_VERSION=13.3 "$(target_cuda_env xolotl local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst)"
 assert_eq "Ubuntu 24.04 keeps its CUDA default" "" "$(target_cuda_env basalt local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst)"
+assert_eq "Avalon keeps its own (Ubuntu 24.04/22.04 only)" "" "$(target_cuda_env avalon local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst)"
 MAYA_CUDA_VERSION=13.4
 assert_eq "an explicit CUDA choice is kept" "" "$(target_cuda_env maya local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst)"
 unset MAYA_CUDA_VERSION
@@ -894,6 +921,11 @@ assert_contains "offers the alternate template at the prompt" \
   local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst "$(cat "$_out")"
 assert_eq "accepts the alternate template location" \
   local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst "$STRATA_TEMPLATE"
+TARGETS=avalon; AVALON_CT_ID=932; AVALON_IP_CIDR=192.0.2.94/24; AVALON_STORAGE=router-store; AVALON_TEMPLATE=""
+prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nlocal:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst\n\n'
+assert_contains "a Debian template is refused for Avalon" "Not a valid value: 'local:vztmpl/debian-13" "$(cat "$_out")"
+assert_eq "Avalon takes the Ubuntu default" local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst "$AVALON_TEMPLATE"
+unset AVALON_CT_ID AVALON_IP_CIDR AVALON_STORAGE AVALON_TEMPLATE
 OLLAMA_CT_ID=930; OLLAMA_IP_CIDR=10.9.9.9/24; TARGETS=ollama
 prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\n'
 assert_eq "a preset CT ID is the default" 930 "$OLLAMA_CT_ID"
@@ -948,6 +980,9 @@ assert_fail "a companion is not a server" target_server_entry hermes
 XOLOTL_IP_CIDR=192.0.2.93/24
 assert_eq "Xolotl with its kind prefix" xolotl+http://192.0.2.93:8080 "$(target_server_entry xolotl)"
 unset XOLOTL_IP_CIDR
+AVALON_IP_CIDR=192.0.2.94/24
+assert_eq "Avalon with its kind prefix" avalon+http://192.0.2.94:8080 "$(target_server_entry avalon)"
+unset AVALON_IP_CIDR
 
 describe preset_target_model_servers
 MODEL_SERVER_COUNT=3; MODEL_SERVER_MAX=20
@@ -1319,6 +1354,9 @@ assert_ok   "accepts maya+http url"      valid_ollama_addr maya+http://h:8080
 assert_ok   "accepts xolotl://host"      valid_ollama_addr xolotl://10.0.0.12
 assert_ok   "accepts xolotl+http url"    valid_ollama_addr xolotl+http://h:8080
 assert_fail "rejects xolotl:// junk"     valid_ollama_addr "xolotl://a b"
+assert_ok   "accepts avalon://host"      valid_ollama_addr avalon://10.0.0.13
+assert_ok   "accepts avalon+http url"    valid_ollama_addr avalon+http://h:8080
+assert_fail "rejects avalon:// junk"     valid_ollama_addr "avalon://a b"
 
 describe normalize_ollama_url
 assert_eq "bare ip gets scheme and port" "http://10.0.0.5:11434" "$(normalize_ollama_url 10.0.0.5)"
@@ -1342,6 +1380,11 @@ assert_eq "maya:// default port"            "maya+http://h:8080"     "$(normaliz
 assert_eq "maya+http passes through"        "maya+http://h:8081"     "$(normalize_ollama_url maya+http://h:8081/)"
 assert_eq "xolotl:// default port"          "xolotl+http://h:8080"   "$(normalize_ollama_url xolotl://h)"
 assert_eq "xolotl+http passes through"      "xolotl+http://h:8150"   "$(normalize_ollama_url xolotl+http://h:8150/)"
+assert_eq "avalon:// default port"          "avalon+http://h:8080"   "$(normalize_ollama_url avalon://h)"
+assert_eq "avalon+http passes through"      "avalon+http://h:8181"   "$(normalize_ollama_url avalon+http://h:8181/)"
+AVALON_PORT=8181
+assert_eq "AVALON_PORT sets avalon://'s port" "avalon+http://h:8181"  "$(normalize_ollama_url avalon://h)"
+unset AVALON_PORT
 XOLOTL_PORT=8150
 assert_eq "Xolotl default port can be set"  "xolotl+http://h:8150"   "$(normalize_ollama_url xolotl://h)"
 unset XOLOTL_PORT

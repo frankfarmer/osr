@@ -1,7 +1,7 @@
 # Runs every test suite, shellcheck and ruff on each push and pull request.
 # Needs a Gitea Actions runner (act_runner) with an ubuntu-latest style image.
 # The "test" job talks to nothing beyond PyPI. The "strata-upstream",
-# "maya-upstream" and "xolotl-upstream" jobs each fetch one pinned commit from
+# "maya-upstream", "xolotl-upstream" and "avalon-upstream" jobs each fetch one pinned commit from
 # GitHub; they are separate jobs so a GitHub outage cannot hide the results of
 # the main suites.
 name: tests
@@ -128,3 +128,27 @@ jobs:
 
       - name: Pinned upstream check
         run: python targets/xolotl/test-pinned-upstream.py "$RUNNER_TEMP/xolotl"
+
+  # Checks the pinned Avalon commit (targets/avalon/upstream-commit.txt) with the
+  # installer's own validate_checkout, compares the llama-server arguments the
+  # unit passes with upstream's avalon-server launcher, and checks the API
+  # behaviour the readiness probe, the router and the manager rely on.
+  avalon-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Fetch the pinned Avalon commit
+        run: |
+          pin=$(cat targets/avalon/upstream-commit.txt)
+          [[ $pin =~ ^[0-9a-f]{40}$ ]]
+          git init -q "$RUNNER_TEMP/avalon"
+          git -C "$RUNNER_TEMP/avalon" fetch -q --depth 1 https://github.com/freriadoc/Avalon.git "$pin"
+          git -C "$RUNNER_TEMP/avalon" checkout -q FETCH_HEAD
+
+      - name: Pinned upstream check
+        run: python targets/avalon/test-pinned-upstream.py "$RUNNER_TEMP/avalon"

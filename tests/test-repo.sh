@@ -153,7 +153,7 @@ describe upgrade_contract
 # rollback restores configuration as well as code, is health-checked, and
 # says when it failed too. The behaviour itself is exercised by each target's
 # own tests; this keeps a new or edited target from silently dropping a part.
-for name in strata basalt maya xolotl; do
+for name in strata basalt maya xolotl avalon; do
   t="${ROOT}/targets/${name}/install-target.sh"
   assert_ok "${name}: stages the settings of a good install" grep -q 'stage_record "\$[A-Z_]*ETC_DIR/installed-env" settings_env' "$t"
   assert_ok "${name}: publishes installed settings durably" grep -q 'publish_record "\$env_temporary" "\$[A-Z_]*ETC_DIR/installed-env"' "$t"
@@ -246,6 +246,31 @@ assert_ok "the README names the tested pin" grep -q "$pin" "${xolotl}/README.md"
 assert_ok "CI fetches the default pin" grep -q 'targets/xolotl/upstream-commit.txt' "${ROOT}/.gitea/workflows/tests.yml"
 assert_ok "CI checks the target against the pinned upstream code" \
   grep -q 'targets/xolotl/test-pinned-upstream.py' "${ROOT}/.gitea/workflows/tests.yml"
+
+describe avalon_target
+# The Avalon target downloads ~90 GiB from Hugging Face and reads its API key
+# from a file: keep its weights pinned to one revision and its key out of the
+# unit and its environment, and its ROCm repository pinned to AMD's key.
+avalon="${ROOT}/targets/avalon"
+assert_ok "every weight URL names a commit of its repository" \
+  awk '!/^#/ && NF && $5 !~ /^https:\/\/huggingface\.co\/[^ ]+\/resolve\/[0-9a-f]{40}\// { exit 1 }' "${avalon}/avalon-weights.txt"
+assert_ok "every weight has a hash" \
+  awk '!/^#/ && NF && $4 !~ /^(sha256:[0-9a-f]{64}|git:[0-9a-f]{40})$/ { exit 1 }' "${avalon}/avalon-weights.txt"
+assert_eq "one revision for every weight" 1 \
+  "$(grep -v '^#' "${avalon}/avalon-weights.txt" | grep -oE '/resolve/[0-9a-f]{40}/' | sort -u | wc -l | tr -d ' ')"
+assert_fail "the unit carries no key" grep -qi 'api.key' <(grep -v '^#' "${avalon}/avalon.service")
+assert_ok "the key reaches llama-server as a file" grep -q -- '--api-key-file "\$(key_file)"' "${avalon}/install-target.sh"
+assert_fail "and never as --api-key" grep -qE -- '--api-key[^-]' "${avalon}/install-target.sh"
+assert_ok "the unit leaves the checkout read-only" grep -qx 'ReadWritePaths=/var/lib/avalon /dev/shm' "${avalon}/avalon.service"
+assert_ok "ROCm's repository key is checked against AMD's fingerprint" \
+  grep -qx 'ROCM_KEY_FINGERPRINT=CA8BB4727A47B4D09B4EE8969386B48A1A693C5C' "${avalon}/rocm-toolkit.sh"
+assert_ok "the web UI is neither built nor downloaded" grep -q -- '-DLLAMA_USE_PREBUILT_UI=OFF' "${avalon}/install-target.sh"
+pin="$(< "${avalon}/upstream-commit.txt")"
+assert_ok "the Avalon default pin is a full commit" grep -Eq '^[0-9a-f]{40}$' "${avalon}/upstream-commit.txt"
+assert_ok "the README names the tested pin" grep -q "$pin" "${avalon}/README.md"
+assert_ok "CI fetches the default pin" grep -q 'targets/avalon/upstream-commit.txt' "${ROOT}/.gitea/workflows/tests.yml"
+assert_ok "CI checks the target against the pinned upstream code" \
+  grep -q 'targets/avalon/test-pinned-upstream.py' "${ROOT}/.gitea/workflows/tests.yml"
 
 describe venv_permissions
 # Venvs are built after the secret-bearing tree (umask 077); the service account

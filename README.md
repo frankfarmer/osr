@@ -20,8 +20,8 @@ four hardened systemd services as the `ollama-router` user:
 Normal request path: **client or Open WebUI → router :8000 → model host**.
 LiteLLM handles static tiers when discovery is off or the inventory is empty.
 
-The pool can mix Ollama, LM Studio, llama.cpp, AirLLM, Strata, Basalt, Maya
-and Xolotl. Optional service and companion CTs are listed under
+The pool can mix Ollama, LM Studio, llama.cpp, AirLLM, Strata, Basalt, Maya,
+Xolotl and Avalon. Optional service and companion CTs are listed under
 [Inference targets](#inference-targets).
 
 ## Install
@@ -33,7 +33,7 @@ bash ollama-smart-router-install.sh
 ```
 
 The installer asks which targets to create: Gitea and Mattermost services;
-Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya and Xolotl model servers; and
+Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl and Avalon model servers; and
 Open Terminal, Hermes and ComfyUI companions. Enter comma-separated names or
 menu numbers, or press Enter for none. Gitea stores configuration history and
 Mattermost receives alerts; both are optional and can also be installed
@@ -41,7 +41,7 @@ separately from [targets/gitea](targets/gitea/README.md) and
 [targets/mattermost](targets/mattermost/README.md).
 
 For each selected target, provide a unique CT ID, static IP/CIDR and storage.
-Strata, Basalt, Maya and Xolotl also ask for a template. The installer then
+Strata, Basalt, Maya, Xolotl and Avalon also ask for a template. The installer then
 checks the host GPU, creates selected service CTs, verifies the Gitea token,
 creates the router CT, provisions model targets, and finally connects selected
 companions to Open WebUI. Choose **Default** in the Gitea, Mattermost and
@@ -69,6 +69,7 @@ Generated Gitea and Mattermost admin passwords are in
 | llama.cpp | Debian 13 listed first | Debian 12/13 for CUDA or CPU; Debian 13 for Vulkan |
 | Basalt, Maya, Xolotl | Debian 13 | Debian 12; Ubuntu 22.04, 24.04, 26.04 |
 | Strata | Debian 13 | Debian 12; Ubuntu 22.04/24.04 (no Ubuntu 26.04) |
+| Avalon | Ubuntu 24.04 | Ubuntu 22.04 (AMD supports ROCm on Radeon cards on Ubuntu only); by hand with CUDA also Debian 12/13, Ubuntu 26.04 |
 
 Mattermost's `MATTERMOST_CT_VERSION` also accepts Ubuntu 26.04 as an explicit
 override for future testing, but Mattermost does not currently support it.
@@ -96,6 +97,7 @@ target README for Python, CUDA and GPU requirements.
 |---|---|
 | Strata, Maya, Xolotl | NVIDIA required |
 | Basalt | NVIDIA Blackwell (sm_120: RTX 50 or RTX PRO Blackwell) required |
+| Avalon | AMD Radeon RX 7000 (RDNA 3, ROCm) or NVIDIA (CUDA, RTX 20 or newer), 16 GB+ VRAM, AVX2 CPU |
 | llama.cpp | NVIDIA CUDA or AMD/Intel Vulkan; `BACKEND=cpu` needs no GPU |
 | AirLLM | NVIDIA when `GPU_DEVICES` is set |
 | Ollama, ComfyUI | NVIDIA, AMD or Intel if present; otherwise CPU |
@@ -105,10 +107,11 @@ and its AMD Radeon RX 7000/9000 and Intel Arc A/B cards (from `lspci`; Intel
 iGPUs and older Radeons are not listed). Ollama, llama.cpp and ComfyUI, the
 targets that also run on AMD and Intel, then each ask which of those cards to
 use, so one host can give Ollama a Radeon, llama.cpp an Arc and ComfyUI an
-NVIDIA card. Ollama and ComfyUI also offer `none` (the CPU). Several targets
+NVIDIA card. Avalon is asked too: an RDNA 3 Radeon (built with ROCm) or an
+NVIDIA card (CUDA). Ollama and ComfyUI also offer `none` (the CPU). Several targets
 may pick the same card. When only one card fits a target that needs a GPU,
 it is taken without asking. Cards bound to `vfio-pci` are not offered.
-Presets: `OLLAMA_GPU_CARD`, `LLAMACPP_GPU_CARD`, `COMFYUI_GPU_CARD` (a PCI
+Presets: `OLLAMA_GPU_CARD`, `LLAMACPP_GPU_CARD`, `AVALON_GPU_CARD`, `COMFYUI_GPU_CARD` (a PCI
 address such as `0000:03:00.0`, or `none`). Strata, Basalt, Maya, Xolotl and
 AirLLM run on NVIDIA only and are not asked; they use the NVIDIA driver's
 GPU 0 (or their `GPU_DEVICES`).
@@ -218,6 +221,7 @@ and recovery steps. Provisioners support `--dry-run`.
 | [Basalt](targets/basalt/README.md) | `basalt://` | 8080 | Blackwell GPU (sm_120) and CUDA 13 |
 | [Maya](targets/maya/README.md) | `maya://` | 8080 | NVIDIA; CUDA version must suit CT and card |
 | [Xolotl](targets/xolotl/README.md) | `xolotl://` | 8080 | NVIDIA; ~372 GB of pinned weights |
+| [Avalon](targets/avalon/README.md) | `avalon://` | 8080 | Qwen3.8-Flash-Next on an AMD RX 7000 (ROCm) or NVIDIA GPU, experts in RAM; ~90 GiB of pinned weights |
 
 [Gitea](targets/gitea/README.md) and
 [Mattermost](targets/mattermost/README.md) provide config history and alerts.
@@ -315,7 +319,7 @@ manage-model-servers set-model large qwen3:32b --apply       # every server in t
 manage-model-servers set-server-model large 10.0.0.54 llama3.3:70b --apply   # one server
 manage-model-servers set-keepalive 2h --apply
 manage-model-servers set-api-key [key|--generate|--off]
-manage-model-servers set-<kind>-token [token|--off]          # lmstudio, strata, basalt, maya, xolotl
+manage-model-servers set-<kind>-token [token|--off]          # lmstudio, strata, basalt, maya, xolotl, avalon
 manage-model-servers set-token | set-webhook [url] | test-alert [message]
 manage-model-servers set-webui-version [version|latest] [--apply]
 manage-model-servers apply [--all] | commit [message]
@@ -339,7 +343,10 @@ Non-Ollama servers are stored with a kind prefix (`maya+http://host:8080`);
 without sending a key: Ollama `/api/tags`, then the public `/health` markers of
 Strata, Basalt, Maya and Xolotl, then LM Studio's model API, trying each kind's
 default port. Xolotl runs Strata's server, so its `/health` says `strata`; a
-DeepSeek-V4 model there identifies Xolotl.
+DeepSeek-V4 model there identifies Xolotl. Avalon is a llama-server whose
+`/health` says only `status`; it is identified from `/v1/models`
+(`"owned_by": "llamacpp"` and an Avalon model id), which needs its key once
+one is set, so add a keyed Avalon as `avalon://host`.
 
 | Kind | Default port | Token (in `secrets.env`) | Notes |
 |---|---|---|---|
@@ -349,6 +356,7 @@ DeepSeek-V4 model there identifies Xolotl.
 | Basalt | 8080 | `set-basalt-token` | Model ID is `BASALT_ALIAS` (default `qwen3.8-flash-next`) |
 | Maya | 8080 | `set-maya-token` | Model ID `glm-5.3-flash` |
 | Xolotl | 8080 | `set-xolotl-token` | Model ID `XOLOTL_MODEL_NAME` (default `deepseek-v4.1-flash`, sized 552B) |
+| Avalon | 8080 | `set-avalon-token` | Model ID `AVALON_MODEL_NAME` (default `qwen3.8-flash-next-avalon`, sized 125B) |
 
 Example for a keyed Strata-style server. Set the token first, so the probe can
 authenticate:
@@ -370,13 +378,13 @@ instead of `--host`; it [creates a key by default](https://github.com/Niko1221/S
 
 If an older keyed Strata cannot be identified without a key, add it as
 `strata://host` (that probe uses the key) or with `--no-probe`. Strata, Basalt,
-Maya and Xolotl load models themselves, so no keep-alive is sent. The monitor counts
+Maya, Xolotl and Avalon load models themselves, so no keep-alive is sent. The monitor counts
 them as down while `/v1/models` is empty, which is how they answer when the
 engine is not running.
 
 ### Model sizes for unsized IDs
 
-Strata, Basalt, Maya and Xolotl report no parameter count. `[model_sizes]` in
+Strata, Basalt, Maya, Xolotl and Avalon report no parameter count. `[model_sizes]` in
 `router.ini` maps exact model IDs (case-insensitive) to a size:
 
 ```ini
@@ -505,7 +513,7 @@ to change: it handles both the 0.11.4+ connection check and the older one.
 ### Targets
 
 Target upgrades check readiness and restore the prior code and settings on
-failure. Strata, Basalt, Maya and Xolotl need disk for one runtime snapshot;
+failure. Strata, Basalt, Maya, Xolotl and Avalon need disk for one runtime snapshot;
 their existing installation settings carry forward unless explicitly
 overridden. See the target README and [architecture upgrade contract](ARCHITECTURE.md#16-inference-targets-targets)
 before upgrading.
@@ -600,7 +608,7 @@ journalctl -u ollama-router -f        # every routing decision is logged (Ctrl-C
 | No Mattermost alerts | `journalctl -u ollama-monitor` shows rejected webhooks. Use `set-webhook` and `test-alert`. Alerts fire after 3 failed checks and recover after 2; the startup notice is sent at most hourly. |
 | `apply` failed | The snapshot was restored and the services were restarted on the old files. Read the reported check, then `journalctl -u <unit>`. Snapshots are in `/var/backups/ollama-smart-router/`. |
 | "config is locked" | Another change is running. A hung one: `manage-model-servers clear-lock` shows the holder, and `--force` stops it. Afterwards check `git -C /app/config-repo status` and re-run `apply`. |
-| Target upgrade failed | The installer says whether the previous version is "running again". If not, use `journalctl -u <unit>` in the target CT. Replaced files are kept as `*.prev` (llama.cpp, AirLLM, Ollama); Strata, Basalt, Maya and Xolotl keep their snapshot in `/var/lib/<target>-target/` when the rollback fails. Maya, Basalt and Xolotl: the CT's distro must carry the CUDA release, or the toolkit must already be installed. Debian 13 starts at 13.1 (no V100 support for Maya; set `CUDA_VERSION=13.1` for Basalt). |
+| Target upgrade failed | The installer says whether the previous version is "running again". If not, use `journalctl -u <unit>` in the target CT. Replaced files are kept as `*.prev` (llama.cpp, AirLLM, Ollama); Strata, Basalt, Maya, Xolotl and Avalon keep their snapshot in `/var/lib/<target>-target/` when the rollback fails. Maya, Basalt and Xolotl: the CT's distro must carry the CUDA release, or the toolkit must already be installed. Debian 13 starts at 13.1 (no V100 support for Maya; set `CUDA_VERSION=13.1` for Basalt). |
 
 ## Development
 
@@ -615,4 +623,4 @@ To run CI (`.gitea/workflows/tests.yml`) in Gitea, enable Actions on the
 repository and register an `act_runner` with an ubuntu-latest style image.
 Configure its job containers to run as root, because
 `--strict` fails on skipped root-only tests. The `strata-upstream`,
-`maya-upstream` and `xolotl-upstream` jobs also need access to GitHub.
+`maya-upstream`, `xolotl-upstream` and `avalon-upstream` jobs also need access to GitHub.

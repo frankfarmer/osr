@@ -3,7 +3,7 @@ set -Eeuo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 source "$here/pve-select.sh"
-for target in airllm basalt comfyui gitea hermes mattermost maya ollama strata xolotl; do
+for target in airllm avalon basalt comfyui gitea hermes mattermost maya ollama strata xolotl; do
     cmp -s "$here/pve-select.sh" "$here/$target/pve-select.sh" || die "$target has an outdated selector copy"
 done
 

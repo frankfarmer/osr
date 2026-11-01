@@ -272,14 +272,18 @@ pick them:
 | `custom:osr` | The router-ranked dispatcher, as with `HERMES_MODEL` (the default provider). Accepts `auto`, the tier names and any router model. | `/model custom:osr:xlarge` |
 | `custom:<target>` | One model server, directly. The dispatcher lists that server's own models (`/api/tags` for Ollama-style servers, `/v1/models` for the others) and sends chat only to it, with its backend key. No router inventory, ranking or failover is involved, so it keeps working while the router is down. | `/model custom:strata-192-168-11-154-8080:qwen3.8-flash-next-iq3_xxs` |
 
-A target's name is its kind, host and port, from the router's inventory when
-the CT was provisioned or last reconfigured: `strata-192-168-11-154-8080`,
-`ollama-192-168-11-153-11434`. The list is kept in
+A plain HTTP target on an IPv4 address uses its kind, host and port as its name:
+`strata-192-168-11-154-8080`, `ollama-192-168-11-153-11434`. Other
+endpoints have a stable URL-derived suffix, so targets sharing a host and port
+keep their names when one is removed. Names come from the router's inventory
+when the CT is provisioned or last reconfigured. The list is kept in
 `/etc/hermes-target/targets`. After adding or removing a model server, run
 `--reconfigure`: new servers get a provider (and a firewall rule), and
-providers of servers the router no longer lists are removed. A direct pick
-skips the dispatcher's tool and context checks, since nothing but the server
-answers it; choose a model with tool support and at least
+providers of servers the router no longer lists are removed. On the first
+reconfigure after this naming change, reselect any saved DNS, HTTPS or
+path-based target in Hermes; its provider name will have the new suffix. A
+direct pick skips the dispatcher's tool and context checks, since nothing but
+the server answers it; choose a model with tool support and at least
 `HERMES_CONTEXT_LENGTH` of context.
 
 Upgrade the agent with Hermes's own updater, then restart the gateway:

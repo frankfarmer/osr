@@ -122,6 +122,8 @@ assert_ok   "maya://host"            valid_addr maya://10.0.0.9
 assert_ok   "maya+http url"          valid_addr maya+http://h:8080
 assert_ok   "xolotl://host"          valid_addr xolotl://10.0.0.12
 assert_ok   "xolotl+http url"        valid_addr xolotl+http://h:8080
+assert_ok   "avalon://host"          valid_addr avalon://10.0.0.13
+assert_ok   "avalon+http url"        valid_addr avalon+http://h:8080
 
 describe server_kind
 assert_eq "ollama"   "ollama"   "$(server_kind http://h:11434)"
@@ -130,6 +132,7 @@ assert_eq "strata"   "strata"   "$(server_kind strata+http://h:8080)"
 assert_eq "basalt"   "basalt"   "$(server_kind basalt+http://h:8080)"
 assert_eq "maya"     "maya"     "$(server_kind maya+http://h:8080)"
 assert_eq "xolotl"   "xolotl"   "$(server_kind xolotl+http://h:8080)"
+assert_eq "avalon"   "avalon"   "$(server_kind avalon+http://h:8080)"
 
 describe server_base
 assert_eq "strips the prefix" "http://h:1234" "$(server_base lmstudio+http://h:1234)"
@@ -146,6 +149,7 @@ assert_eq "strata uses OpenAI" "openai" "$(litellm_provider strata+http://h:8080
 assert_eq "basalt uses OpenAI" "openai" "$(litellm_provider basalt+http://h:8080)"
 assert_eq "maya uses OpenAI"   "openai" "$(litellm_provider maya+http://h:8080)"
 assert_eq "xolotl uses OpenAI" "openai" "$(litellm_provider xolotl+http://h:8080)"
+assert_eq "avalon uses OpenAI" "openai" "$(litellm_provider avalon+http://h:8080)"
 
 describe litellm_api_base
 assert_eq "ollama base as-is"      "http://h:11434"   "$(litellm_api_base http://h:11434)"
@@ -180,6 +184,10 @@ assert_eq "maya:// default port"              "maya+http://h:8080"   "$(normaliz
 assert_eq "maya+http passes through"          "maya+http://h:8888"   "$(normalize_addr maya+http://h:8888/)"
 assert_eq "xolotl:// default port"            "xolotl+http://h:8080" "$(normalize_addr xolotl://h)"
 assert_eq "xolotl+http passes through"        "xolotl+http://h:8150" "$(normalize_addr xolotl+http://h:8150/)"
+assert_eq "avalon:// default port"            "avalon+http://h:8080" "$(normalize_addr avalon://h)"
+AVALON_PORT=8181
+assert_eq "AVALON_PORT sets avalon://'s port"  "avalon+http://h:8181" "$(normalize_addr avalon://h)"
+unset AVALON_PORT
 STRATA_PORT=11434
 assert_eq "Strata default port can be 11434" "strata+http://h:11434" "$(normalize_addr strata://h)"
 unset STRATA_PORT
@@ -241,7 +249,7 @@ assert_fail "no prefix match"  is_secret_key GITEA_DEPLOY_TOKEN_OLD
 # arrive late, as it does on a loaded CT.
 _pipe_strict() {
   ( trap '' PIPE; set -o pipefail
-    server_kinds() { printf 'lmstudio\n'; sleep 0.3; printf '%s\n' strata basalt maya xolotl; }
+    server_kinds() { printf 'lmstudio\n'; sleep 0.3; printf '%s\n' strata basalt maya xolotl avalon; }
     "$@" ) 2>&1
 }
 assert_eq "token under pipefail without SIGPIPE" "yes" \
@@ -526,6 +534,32 @@ case "$*" in
 esac
 EOF
 assert_eq "Strata's model id identifies it" "strata" "$(detect_server_kind http://h:8080)"
+# Avalon is a llama-server: /health says only "status"; /v1/models names the
+# owner llamacpp and Avalon's alias.
+mock_script curl <<'EOF'
+case "$*" in
+  *"/api/tags"*) exit 22;;
+  *"/health"*) printf '{"status":"ok"}';;
+  *"/v1/status"*) printf '{"error":{"code":404}}\n404';;
+  *"/api/v1/models"*|*"/api/v0/models"*) printf 404;;
+  *"/v1/models"*) echo '{"models":[{"name":"qwen3.8-flash-next-avalon"}],"object":"list","data":[{"id":"qwen3.8-flash-next-avalon","object":"model","owned_by":"llamacpp"}]}';;
+  *) exit 22;;
+esac
+EOF
+mock_reset_log
+assert_eq "Avalon (a llama-server serving an Avalon model id) is identified" "avalon" "$(detect_server_kind http://h:8080)"
+assert_not_contains "Avalon detection sends no key" "-H @" "$(mock_calls)"
+mock_script curl <<'EOF'
+case "$*" in
+  *"/api/tags"*) exit 22;;
+  *"/health"*) printf '{"status":"ok"}';;
+  *"/v1/status"*) printf '{"error":{"code":404}}\n404';;
+  *"/api/v1/models"*|*"/api/v0/models"*) printf 404;;
+  *"/v1/models"*) echo '{"object":"list","data":[{"id":"gemma-4","object":"model","owned_by":"llamacpp"}]}';;
+  *) exit 22;;
+esac
+EOF
+assert_status "another llama-server is not taken for Avalon" 1 detect_server_kind http://h:8080
 # A keyed older Strata without a distinguishing public /health response still
 # cannot be identified safely, so such a host has to be named.
 reset_repo
@@ -543,6 +577,7 @@ assert_status "keyed host off LM Studio's port is not guessed" 1 detect_server_k
 assert_not_contains "detection never sends a key" "-H @" "$(mock_calls)"
 out="$(detect_server_kind http://h:11434 2>&1 >/dev/null || true)"
 assert_contains "says how to add it" "strata://h:11434" "$out"
+assert_contains "Avalon among the forms" "avalon://h:11434" "$out"
 assert_status "a bare keyed address is not resolved" 1 resolve_server h:11434
 assert_eq "an explicit strata:// address needs no probe" "strata+http://h:11434" "$(resolve_server strata://h:11434)"
 assert_eq "a keyed host on LM Studio's port is LM Studio" "lmstudio" "$(detect_server_kind http://h:1234)"
@@ -610,6 +645,7 @@ assert_eq "explicit Strata on port 11434 needs no probe" "strata+http://10.0.0.9
 assert_eq "explicit Basalt on port 11434 needs no probe" "basalt+http://10.0.0.9:11434" "$(resolve_server basalt://10.0.0.9:11434)"
 assert_eq "explicit Maya on port 11434 needs no probe" "maya+http://10.0.0.9:11434" "$(resolve_server maya://10.0.0.9:11434)"
 assert_eq "explicit Xolotl on port 8150 needs no probe" "xolotl+http://10.0.0.12:8150" "$(resolve_server xolotl://10.0.0.12:8150)"
+assert_eq "explicit Avalon needs no probe" "avalon+http://10.0.0.13:8080" "$(resolve_server avalon://10.0.0.13)"
 SERVER_TYPE=lmstudio
 assert_eq "--type lmstudio needs no probe"        "lmstudio+http://10.0.0.9:1234" "$(resolve_server 10.0.0.9)"
 SERVER_TYPE=strata
@@ -766,6 +802,18 @@ regenerate_litellm >/dev/null 2>&1
 assert_file_contains "Xolotl key reference" "api_key: os.environ/XOLOTL_API_KEY" "$LITELLM_YAML"
 assert_fail "the Strata key is not used for Xolotl" grep -q 'STRATA_API_KEY' "$LITELLM_YAML"
 assert_fail "Xolotl key never enters YAML" grep -q 'xolotl-key' "$LITELLM_YAML"
+reset_repo
+
+env_set MODEL_SERVERS "avalon+http://10.0.0.13:8080"
+env_set BACKEND_XLARGE "avalon+http://10.0.0.13:8080"
+TIER_MODEL_OVERRIDE[xlarge]="qwen3.8-flash-next-avalon"
+env_set AVALON_API_KEY "avalon-key"
+regenerate_litellm >/dev/null 2>&1
+TIER_MODEL_OVERRIDE=()
+assert_file_contains "Avalon OpenAI provider" "model: openai/qwen3.8-flash-next-avalon" "$LITELLM_YAML"
+assert_file_contains "Avalon /v1 base" "api_base: http://10.0.0.13:8080/v1" "$LITELLM_YAML"
+assert_file_contains "Avalon key reference" "api_key: os.environ/AVALON_API_KEY" "$LITELLM_YAML"
+assert_fail "Avalon key never enters YAML" grep -q 'avalon-key' "$LITELLM_YAML"
 reset_repo
 
 describe litellm_fallbacks
@@ -1397,7 +1445,7 @@ assert_eq "--off clears it" "" "$(env_get ROUTER_API_KEY)"
 reset_repo
 
 describe server_kinds
-assert_eq "kinds, in detection order" "lmstudio strata basalt maya xolotl" "$(server_kinds | paste -sd' ' -)"
+assert_eq "kinds, in detection order" "lmstudio strata basalt maya xolotl avalon" "$(server_kinds | paste -sd' ' -)"
 
 describe kind_field
 assert_eq "maya key" MAYA_API_KEY "$(kind_field maya key)"
@@ -1421,10 +1469,10 @@ assert_fail "LM Studio is not" is_openai_kind lmstudio
 assert_fail "nor is Ollama" is_openai_kind ollama
 
 describe openai_kinds
-assert_eq "OpenAI-style kinds" "strata basalt maya xolotl" "$(openai_kinds | paste -sd' ' -)"
+assert_eq "OpenAI-style kinds" "strata basalt maya xolotl avalon" "$(openai_kinds | paste -sd' ' -)"
 
 describe kind_labels
-assert_eq "labels for messages" "Ollama, LM Studio, Strata, Basalt, Maya or Xolotl" "$(kind_labels)"
+assert_eq "labels for messages" "Ollama, LM Studio, Strata, Basalt, Maya, Xolotl or Avalon" "$(kind_labels)"
 
 describe kind_secret_name
 assert_eq "LM Studio has a token" "LM Studio token" "$(kind_secret_name lmstudio)"
@@ -1435,6 +1483,9 @@ assert_eq "set-maya-token names maya" maya "$(token_command_kind set-maya-token)
 assert_eq "set-xolotl-token names xolotl" xolotl "$(token_command_kind set-xolotl-token)"
 assert_eq "xolotl key" XOLOTL_API_KEY "$(kind_field xolotl key)"
 assert_eq "xolotl default port" 8080 "$(kind_field xolotl port)"
+assert_eq "set-avalon-token names avalon" avalon "$(token_command_kind set-avalon-token)"
+assert_eq "avalon key" AVALON_API_KEY "$(kind_field avalon key)"
+assert_eq "avalon default port" 8080 "$(kind_field avalon port)"
 assert_eq "set-lmstudio-token names lmstudio" lmstudio "$(token_command_kind set-lmstudio-token)"
 assert_eq "set-token is not a kind command" "" "$(token_command_kind set-token)"
 assert_eq "set-ollama-token is not a kind command" "" "$(token_command_kind set-ollama-token)"
@@ -1443,8 +1494,8 @@ assert_fail "unknown token commands do not" command_writes set-bogus-token
 
 describe secret_keys
 assert_eq "secrets include every kind's key" \
-  "LMSTUDIO_API_TOKEN STRATA_API_KEY BASALT_API_KEY MAYA_API_KEY XOLOTL_API_KEY" \
-  "$(secret_keys | tail -n 5 | paste -sd' ' -)"
+  "LMSTUDIO_API_TOKEN STRATA_API_KEY BASALT_API_KEY MAYA_API_KEY XOLOTL_API_KEY AVALON_API_KEY" \
+  "$(secret_keys | tail -n 6 | paste -sd' ' -)"
 
 describe litellm_provider
 assert_eq "litellm provider for maya" openai "$(litellm_provider maya+http://h:8080)"

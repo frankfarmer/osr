@@ -334,7 +334,7 @@ def test_maya_health_key_and_keep_alive(monkeypatch):
     assert pinned == [A]
 
 
-@pytest.mark.parametrize("kind", ["strata", "basalt", "maya", "xolotl"])
+@pytest.mark.parametrize("kind", ["strata", "basalt", "maya", "xolotl", "avalon"])
 def test_openai_host_with_an_empty_model_list_is_down(monkeypatch, kind):
     """Strata-style servers answer /v1/models with 200 and no models while
     their engine is down; the router cannot use them, so neither is the host up."""
@@ -363,6 +363,26 @@ def test_xolotl_health_key_and_keep_alive(monkeypatch):
     assert check.url == "http://10.0.0.12:8080/v1/models"
     assert check.headers == {"Authorization": "Bearer xolotl-secret"}
     assert "Xolotl host" in check.label
+    pinned = []
+    monkeypatch.setattr(module, "pin_model", lambda url, model: pinned.append(url) or True)
+    module.refresh_keep_alive(lambda url: True)
+    assert pinned == [A]
+
+
+def test_avalon_health_key_and_keep_alive(monkeypatch):
+    avalon = "avalon+http://10.0.0.13:8080"
+    module = load_monitor(monkeypatch, MODEL_SERVERS=f"{A},{avalon}",
+                          BACKEND_XLARGE=avalon, MODEL_FAST="qwen3.8-flash-next-avalon",
+                          XOLOTL_API_KEY="xolotl-secret", AVALON_API_KEY="avalon-secret",
+                          OLLAMA_KEEP_ALIVE="2h")
+    check = [c for c in module.build_checks() if c.key == avalon][0]
+    assert check.url == "http://10.0.0.13:8080/v1/models"
+    assert check.headers == {"Authorization": "Bearer avalon-secret"}
+    assert "Avalon host" in check.label
+    # llama-server answers 503 while the model loads: the host is down then.
+    loading = httpx.Client(transport=httpx.MockTransport(
+        lambda r: httpx.Response(503, json={"error": {"code": 503, "message": "Loading model"}})))
+    assert not module.probe(check.url, loading, check.headers, check.require_models)[0]
     pinned = []
     monkeypatch.setattr(module, "pin_model", lambda url, model: pinned.append(url) or True)
     module.refresh_keep_alive(lambda url: True)

@@ -58,20 +58,27 @@ pass 'inventory endpoints: a URL without a port uses 80 (http) or 443 (https); b
 printf '{"enabled":true,"servers":["strata+http://192.168.11.154:8080","http://192.168.11.153:11434/","maya+https://GPU.lan","http://10.0.0.5:8080","lmstudio+http://10.0.0.5:8080"]}\n' > "$inv"
 expected='strata-192-168-11-154-8080=strata+http://192.168.11.154:8080
 ollama-192-168-11-153-11434=http://192.168.11.153:11434
-maya-gpu-lan-443=maya+https://GPU.lan
+maya-gpu-lan-443-29eaec1a9229=maya+https://GPU.lan
 ollama-10-0-0-5-8080=http://10.0.0.5:8080
 lmstudio-10-0-0-5-8080=lmstudio+http://10.0.0.5:8080'
 [[ $(inventory_targets "$inv") == "$expected" ]] || fail "inventory targets: $(inventory_targets "$inv" 2>&1)"
-printf '{"enabled":true,"servers":["http://10.0.0.5:8080","http://10.0.0.5:8080/x"]}\n' > "$inv"
-[[ $(inventory_targets "$inv") == $'ollama-10-0-0-5-8080=http://10.0.0.5:8080\nollama-10-0-0-5-8080-2=http://10.0.0.5:8080/x' ]] ||
-  fail "duplicate target names: $(inventory_targets "$inv" 2>&1)"
-for bad in http://h:0 ftp://h:21 http://user@h:80 'http://h:80?x=1' 'http://h:80/a=b'; do
+printf '{"enabled":true,"servers":["http://10.0.0.5:8080","http://10.0.0.5:8080/x","http://10.0.0.5:8080/x=y"]}\n' > "$inv"
+expected=$'ollama-10-0-0-5-8080=http://10.0.0.5:8080\nollama-10-0-0-5-8080-4fa8df2c545e=http://10.0.0.5:8080/x\nollama-10-0-0-5-8080-cb5a17befbcf=http://10.0.0.5:8080/x=y'
+[[ $(inventory_targets "$inv") == "$expected" ]] ||
+  fail "distinct endpoint names: $(inventory_targets "$inv" 2>&1)"
+printf '{"enabled":true,"servers":["http://10.0.0.5:8080/x=y"]}\n' > "$inv"
+[[ $(inventory_targets "$inv") == 'ollama-10-0-0-5-8080-cb5a17befbcf=http://10.0.0.5:8080/x=y' ]] ||
+  fail 'removing a peer changed the remaining target name'
+printf '{"enabled":true,"servers":["http://plain.lan:80","http://plain-lan:80"]}\n' > "$inv"
+mapfile -t names < <(inventory_targets "$inv")
+[[ ${#names[@]} == 2 && ${names[0]%%=*} != "${names[1]%%=*}" ]] || fail 'distinct DNS hosts share a target name'
+for bad in http://h:0 ftp://h:21 http://user@h:80 'http://h:80?x=1'; do
   printf '{"enabled":true,"servers":["%s"]}\n' "$bad" > "$inv"
   if inventory_targets "$inv" >/dev/null 2>&1; then fail "inventory target accepted: $bad"; fi
 done
 printf '{"enabled":false,"servers":[]}\n' > "$inv"
 if inventory_targets "$inv" >/dev/null 2>&1; then fail 'targets read from a router with discovery off'; fi
-pass 'direct targets: one name per model server (kind, host, port), unique, with bad URLs refused'
+pass 'direct targets: stable names per endpoint, including URLs with =, with bad URLs refused'
 
 # Reconfigure rewrites only this target's rules (marked with a rule comment, or
 # in the layout earlier versions wrote) and keeps every other line.

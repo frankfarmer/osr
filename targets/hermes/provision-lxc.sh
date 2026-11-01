@@ -307,17 +307,19 @@ for item in data["servers"]:
 PY
 }
 # inventory_targets FILE: NAME=ENTRY per registered model server, the direct
-# targets Hermes can pick as provider custom:NAME without the router. NAME is
-# the kind, host and port, e.g. strata-192-168-11-154-8080.
+# targets Hermes can pick as provider custom:NAME without the router. Plain
+# HTTP IPv4 endpoints keep their kind-host-port name; other endpoints get a
+# suffix derived from their URL so removing a peer cannot rename them.
 inventory_targets() {
   python3 - "$1" <<'PY'
-import json, re, sys
+import hashlib, ipaddress, json, re, sys
 from urllib.parse import urlsplit
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 if not data.get("enabled") or not isinstance(data.get("servers"), list):
     raise SystemExit("Router discovery is disabled; enable [discovery] before installing Hermes")
-kinds = ("lmstudio", "strata", "basalt", "maya", "xolotl")
-names = set()
+kinds = ("lmstudio", "strata", "basalt", "maya", "xolotl", "avalon")
+names = {}
+seen = set()
 for item in data["servers"]:
     if not isinstance(item, str):
         raise SystemExit("Invalid model server in router inventory")
@@ -334,14 +336,26 @@ for item in data["servers"]:
         port = None
     if parsed.scheme not in ("http", "https") or not port or not parsed.hostname \
             or parsed.username or parsed.password or parsed.query or parsed.fragment \
-            or any(c.isspace() or c == "=" for c in item):
+            or any(c.isspace() for c in item):
         raise SystemExit("Invalid model server URL in router inventory: " + item)
     host = re.sub(r"[^a-z0-9]+", "-", parsed.hostname.lower()).strip("-")
-    name = base = f"{kind}-{host}-{port}"[:60].rstrip("-")
-    n = 2
-    while name in names:
-        name, n = f"{base}-{n}", n + 1
-    names.add(name)
+    identity = f"{kind}|{parsed.scheme}|{parsed.hostname.lower()}|{port}|{parsed.path.rstrip('/')}"
+    if identity in seen:
+        continue
+    seen.add(identity)
+    base = f"{kind}-{host}-{port}"
+    try:
+        ipv4 = isinstance(ipaddress.ip_address(parsed.hostname), ipaddress.IPv4Address)
+    except ValueError:
+        ipv4 = False
+    if ipv4 and parsed.scheme == "http" and parsed.path in ("", "/"):
+        name = base
+    else:
+        suffix = hashlib.sha256(identity.encode()).hexdigest()[:12]
+        name = f"{base[:50].rstrip('-')}-{suffix}"
+    if name in names:
+        raise SystemExit("Direct target name collision in router inventory: " + name)
+    names[name] = identity
     print(f"{name}={item.rstrip('/')}")
 PY
 }
@@ -625,7 +639,7 @@ if (( ! dry_run )); then
   # Straight into a 0600 file: the key never passes through argv or a variable.
   router_exec awk -F= '$1=="ROUTER_API_KEY" {sub(/^[^=]*=/,""); print; exit}' /app/router/secrets.env \
     > "$stage/router-api-key" 2>/dev/null || : > "$stage/router-api-key"
-  router_exec awk -F= '$1 ~ /^(LMSTUDIO_API_TOKEN|STRATA_API_KEY|BASALT_API_KEY|MAYA_API_KEY|XOLOTL_API_KEY)$/ {print}' /app/router/secrets.env \
+  router_exec awk -F= '$1 ~ /^(LMSTUDIO_API_TOKEN|STRATA_API_KEY|BASALT_API_KEY|MAYA_API_KEY|XOLOTL_API_KEY|AVALON_API_KEY)$/ {print}' /app/router/secrets.env \
     > "$stage/backend-keys" 2>/dev/null || : > "$stage/backend-keys"
   if [[ -s $stage/router-api-key ]]; then
     note "Read ROUTER_API_KEY from ${router_label}."

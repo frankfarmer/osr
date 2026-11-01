@@ -803,7 +803,8 @@ def test_model_sizes_default_without_a_router_ini(monkeypatch, tmp_path):
                                   "qwen3.8-flash-next-iq2_xs": "125B",
                                   "qwen3.8-flash-next-iq3_xxs": "125B",
                                   "qwen3.8-flash-next-iq3_s": "125B",
-                                  "glm-5.3-flash": "321B", "deepseek-v4.1-flash": "552B"}
+                                  "glm-5.3-flash": "321B", "deepseek-v4.1-flash": "552B",
+                                  "qwen3.8-flash-next-avalon": "125B"}
 
 
 def test_legacy_per_kind_size_keys_still_apply(monkeypatch, tmp_path):
@@ -816,7 +817,8 @@ def test_legacy_per_kind_size_keys_still_apply(monkeypatch, tmp_path):
     router = load_router(monkeypatch, ROUTER_INI=str(custom))
     quants = {f"qwen3.8-flash-next-{q}": "125B" for q in ("q2_0", "iq2_xs", "iq3_xxs", "iq3_s")}
     assert router.MODEL_SIZES == {"qwen3.8-flash-next": "125B", "my-basalt": "100B", **quants,
-                                  "glm-5.3-flash": "300B", "deepseek-v4.1-flash": "552B"}
+                                  "glm-5.3-flash": "300B", "deepseek-v4.1-flash": "552B",
+                                  "qwen3.8-flash-next-avalon": "125B"}
 
 
 @pytest.mark.parametrize("port", [8080, 11434])
@@ -931,6 +933,48 @@ def test_xolotl_discovery_and_dispatch(monkeypatch):
     assert response.headers["x-router-server"] == xolotl
     assert calls == [("/v1/models", "Bearer xolotl-secret"),
                      ("/v1/chat/completions", "Bearer xolotl-secret")]
+
+
+def test_avalon_discovery_and_dispatch(monkeypatch):
+    """Avalon is a llama-server (llama.cpp's /v1/models shape, with an Ollama-
+    style "models" list beside "data") with its own key; its alias is sized
+    from [model_sizes], and no other kind's key is sent to it."""
+    avalon = "avalon+http://10.0.0.13:8080"
+    calls = []
+
+    def handler(request):
+        calls.append((request.url.path, request.headers.get("authorization")))
+        if request.headers.get("authorization") != "Bearer avalon-secret":
+            return httpx.Response(401, json={"error": {"code": 401, "message": "Invalid API Key"}})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={
+                "models": [{"name": "qwen3.8-flash-next-avalon", "model": "qwen3.8-flash-next-avalon",
+                            "details": {"parameter_size": ""}}],
+                "object": "list",
+                "data": [{"id": "qwen3.8-flash-next-avalon", "aliases": ["qwen3.8-flash-next-avalon"],
+                          "object": "model", "owned_by": "llamacpp",
+                          "architecture": {"input_modalities": ["text"]},
+                          "meta": {"n_ctx": 262144, "n_ctx_train": 262144, "n_params": 125000000000}}]})
+        if request.url.path == "/v1/chat/completions":
+            return streamed(200, {"model": json.loads(request.content)["model"]})
+        return httpx.Response(404)
+
+    router = load_router(monkeypatch, MODEL_SERVERS=avalon, STRATA_API_KEY="strata-secret",
+                         AVALON_API_KEY="avalon-secret", ROUTER_API_KEY="client-secret")
+    router._HTTP["transport"] = httpx.MockTransport(handler)
+    with TestClient(router.app) as client:
+        models = {e["name"]: e for e in router.INVENTORY["models"]}
+        response = client.post("/v1/chat/completions",
+                               headers={"Authorization": "Bearer client-secret"},
+                               json={"model": "qwen3.8-flash-next-avalon", "messages": [user("hi")]})
+    assert router.server_kind(avalon) == "avalon"
+    assert router.server_base(avalon) == "http://10.0.0.13:8080"
+    assert models["qwen3.8-flash-next-avalon"]["params_b"] == 125
+    assert not models["qwen3.8-flash-next-avalon"]["is_vision"]
+    assert response.status_code == 200 and response.json()["model"] == "qwen3.8-flash-next-avalon"
+    assert response.headers["x-router-server"] == avalon
+    assert calls == [("/v1/models", "Bearer avalon-secret"),
+                     ("/v1/chat/completions", "Bearer avalon-secret")]
 
 
 # --- named models on unreachable hosts ----------------------------------------

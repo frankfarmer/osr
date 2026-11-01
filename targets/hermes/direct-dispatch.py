@@ -27,6 +27,7 @@ KEY_NAMES = {
     "basalt": "BASALT_API_KEY",
     "maya": "MAYA_API_KEY",
     "xolotl": "XOLOTL_API_KEY",
+    "avalon": "AVALON_API_KEY",
 }
 PREFIXES = {kind: kind + "+" for kind in KEY_NAMES}
 MAX_BODY = 64 * 1024 * 1024

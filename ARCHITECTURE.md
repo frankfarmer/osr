@@ -37,7 +37,7 @@ flowchart LR
     subgraph pool["Model pool (1-20 hosts)"]
         o1["Ollama / llama.cpp bridge / AirLLM<br/>:11434"]
         o2["LM Studio<br/>:1234"]
-        o3["Strata / Basalt / Maya / Xolotl<br/>:8080"]
+        o3["Strata / Basalt / Maya / Xolotl / Avalon<br/>:8080"]
     end
     term["Open Terminal LXC<br/>:8000"]
     hermes["Hermes Agent LXC<br/>API server :8642"]
@@ -171,7 +171,7 @@ own venv (§7). The version is pinned in
 No listener. Every `interval_seconds` (15) it probes each distinct host in
 `MODEL_SERVERS`/`BACKEND_*` once, labelling alerts with that host's tiers:
 Ollama on `/api/tags`, other kinds on `/v1/models` with their token.
-Strata-style servers (Strata, Basalt, Maya, Xolotl) also count as down while
+Strata-style servers (Strata, Basalt, Maya, Xolotl, Avalon) also count as down while
 that list is empty, and a rejected
 token counts as down. It also probes LiteLLM, the router's `/healthz` and Open
 WebUI's `/health`. A state change needs `fail_threshold` (3) or
@@ -394,8 +394,8 @@ default: the router's API, registered model server endpoints, DNS and internet H
 |---|---|---|
 | Gitea deploy token, Mattermost webhook | `/app/router/secrets.env` (0640 root:ollama-router) | Never committed; moved out of `env/router.env` by `commit`/`apply` |
 | `ROUTER_API_KEY` (= Open WebUI `OPENAI_API_KEYS`) | `secrets.env` | Generated on new installs; `set-api-key` |
-| `LMSTUDIO_API_TOKEN`, `STRATA_API_KEY`, `BASALT_API_KEY`, `MAYA_API_KEY`, `XOLOTL_API_KEY` | `secrets.env` | `set-<kind>-token`; sent only to that kind; LiteLLM reads `os.environ/...` |
-| Target API keys | `/etc/<target>-target/api-key` (0600) in each target CT; Xolotl's also in its server config `/etc/xolotl/xolotl-ds41.json` (0640 root:xolotl) | Generated in the CT; never in a unit, log or the router's process list |
+| `LMSTUDIO_API_TOKEN`, `STRATA_API_KEY`, `BASALT_API_KEY`, `MAYA_API_KEY`, `XOLOTL_API_KEY`, `AVALON_API_KEY` | `secrets.env` | `set-<kind>-token`; sent only to that kind; LiteLLM reads `os.environ/...` |
+| Target API keys | `/etc/<target>-target/api-key` (0600) in each target CT; Xolotl's also in its server config `/etc/xolotl/xolotl-ds41.json` (0640 root:xolotl); Avalon's also in `/etc/avalon/api-key` (0640 root:avalon, read by llama-server's `--api-key-file`) | Generated in the CT; never in a unit, log or the router's process list |
 | Open Terminal key | `/etc/open-terminal/api-key`; Open WebUI connection settings | Generated in the terminal CT |
 | Hermes API server key | `/etc/hermes-target/api-key` (0600), `~hermes/.hermes/.env` (0600); Open WebUI connection settings | Generated in the Hermes CT |
 | Router and backend keys in the Hermes CT | `~hermes/.hermes/.env` (0600) for the router key; `/etc/hermes-target/backend-keys` (0640) for backend keys | Pushed as 0600 files, never in argv; `--reconfigure` after a rotation |
@@ -505,6 +505,7 @@ URLs; other kinds are identified only by their prefix.
 | Basalt | `basalt+http://host:8080` | `/v1/models` | `openai/` | `BASALT_API_KEY` |
 | Maya | `maya+http://host:8080` | `/v1/models` | `openai/` | `MAYA_API_KEY` |
 | Xolotl | `xolotl+http://host:8080` | `/v1/models` | `openai/` | `XOLOTL_API_KEY` |
+| Avalon | `avalon+http://host:8080` | `/v1/models` | `openai/` | `AVALON_API_KEY` |
 
 ### 15.1 The kind table
 
@@ -525,7 +526,7 @@ The 0.4+ API gives `params_string`, `capabilities.vision` and
 `lmstudio_loaded_only` excludes cold ones. Keep-alive is not sent, because LM
 Studio uses its own idle TTL.
 
-### 15.3 Strata-style servers (Strata, Basalt, Maya, Xolotl)
+### 15.3 Strata-style servers (Strata, Basalt, Maya, Xolotl, Avalon)
 
 * **Discovery:** model ID, image support (`input_modalities` or
   `architecture.input_modalities`), residency (`status`), `parameter_size` if
@@ -539,7 +540,10 @@ Studio uses its own idle TTL.
   their public `/health`; Maya by `glm-5.3-flash` plus a `version` field;
   Xolotl, which runs Strata's own server (`service: strata`), by a model id
   starting with `deepseek-v4` there. Xolotl has its own kind and key so that a
-  Strata key is never sent to it (or the other way round).
+  Strata key is never sent to it (or the other way round). Avalon is a
+  llama-server, whose `/health` carries no marker: it is identified from
+  `/v1/models` (`"owned_by": "llamacpp"` and an id containing `avalon`), which
+  answers without a key only when none is set.
   Strata also has older fingerprints. A keyed server that cannot identify
   itself is added as `kind://host`.
 * **Keep-alive** is never sent.
@@ -563,6 +567,7 @@ treats it as another host of its API kind. Every target provisioner offers
 | [Basalt](targets/basalt/README.md) | `basalt`, :8080 | Blackwell/CUDA 13, `.basalt` pack |
 | [Maya](targets/maya/README.md) | `maya`, :8080 | GLM-5.3-Flash; CUDA chosen for CT and card |
 | [Xolotl](targets/xolotl/README.md) | `xolotl`, :8080 | DeepSeek-V4.1-Flash; pinned weights |
+| [Avalon](targets/avalon/README.md) | `avalon`, :8080 | Qwen3.8-Flash-Next llama.cpp fork; ROCm (RDNA 3) or CUDA; pinned weights |
 
 Target units use their own service accounts, limited writable paths and no
 capabilities. GPU nodes are group-accessible rather than root-owned.
@@ -570,12 +575,13 @@ Strata-style keys are generated inside the CT and stored outside unit files.
 The [README's distribution table](README.md#lxc-distribution-support) lists
 supported CT releases; GPU driver setup precedes CT creation. The installer
 asks each target that also runs on AMD Radeon or Intel Arc (Ollama, llama.cpp,
-ComfyUI) which of the host's GPUs it gets (`tools/setup-host-gpu.sh --list`),
+Avalon, ComfyUI) which of the host's GPUs it gets (`tools/setup-host-gpu.sh --list`),
 then checks or sets up the driver once per chosen card (`--card`) and once for
 the NVIDIA-only targets, so targets on one host can use different cards and
 vendors. Ollama and ComfyUI receive `GPU_CARD` and keep only that card's
 device nodes after their community scripts pass every card of the vendor;
-llama.cpp receives the card's nodes as `GPU_DEVICES`.
+llama.cpp receives the card's nodes as `GPU_DEVICES`, and so does Avalon
+(`/dev/kfd` and the render node for ROCm, with `AVALON_BACKEND`).
 `tools/update-gpu-drivers.sh` keeps those drivers current afterwards: it finds
 the GPU containers from their configs and offers the newest compatible NVIDIA
 release (checked against the cards' `supported-gpus.json` and test-built for
@@ -596,7 +602,7 @@ configuration are restored and the old runtime is health-checked. llama.cpp,
 AirLLM, Ollama and ComfyUI preserve an intentionally stopped service. The
 target README describes its snapshot or side-by-side release strategy.
 
-Strata, Basalt, Maya and Xolotl save the last good settings and use them on
+Strata, Basalt, Maya, Xolotl and Avalon save the last good settings and use them on
 rerun unless non-empty environment overrides are given. An interrupted first
 install resumes its pending settings. Existing installations without a
 readable settings record require explicit values rather than fresh-install
@@ -664,12 +670,12 @@ after health checks.
   root.
 * `tests/test-repo.sh` checks repository invariants: unit hardening, no secrets
   in `env/`, UTF-8, embedded copies in sync, Maya's update switch, Xolotl's
-  pinned weights and the upgrade contract.
+  and Avalon's pinned weights and the upgrade contract.
 * `.gitea/workflows/tests.yml` runs the suites with `--strict` (so its job
   container must run as root), shellcheck and ruff, with
   separate router and bridge venvs. ShellCheck discovers all repository shell
-  files, including test helpers. The `strata-upstream`, `maya-upstream` and
-  `xolotl-upstream` jobs fetch one pinned commit each, kept separate so a GitHub outage cannot
+  files, including test helpers. The `strata-upstream`, `maya-upstream`,
+  `xolotl-upstream` and `avalon-upstream` jobs fetch one pinned commit each, kept separate so a GitHub outage cannot
   hide the main results.
 
 ---

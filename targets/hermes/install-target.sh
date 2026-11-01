@@ -302,7 +302,7 @@ if [[ -n $router_key ]]; then
 fi
 targets_sha256=none
 if [[ -f $targets_source ]]; then
-  if grep -Evq '^[a-z0-9][a-z0-9-]{0,62}=[^[:space:]=]+$' "$targets_source"; then
+  if grep -Evq '^[a-z0-9][a-z0-9-]{0,62}=[^[:space:]]+$' "$targets_source"; then
     die "$targets_source has an invalid line; rerun provision-lxc.sh --reconfigure."
   fi
   targets_sha256=$(sha256sum "$targets_source" | cut -d' ' -f1)
