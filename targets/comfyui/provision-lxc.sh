@@ -146,7 +146,7 @@ community_vars() {
     [[ $gpu != none ]] || passthrough=no
     printf '%s\n' "var_ctid=$CT_ID" "var_hostname=$CT_HOSTNAME" "var_cpu=$CORES" "var_ram=$MEMORY_MB" \
         "var_disk=$ROOTFS_GB" "var_unprivileged=1" "var_nesting=1" "var_os=debian" "var_version=13" \
-        "var_gpu=$passthrough" "var_comfyui_gpu_type=$(community_gpu_choice "$gpu")" "var_brg=$BRIDGE"
+        "var_gpu=$passthrough" "var_comfyui_gpu_type=$(community_gpu_choice "$gpu")" "var_brg=$BRIDGE" "var_tags=ai;ai-model;osr-target;comfyui"
     [[ -z $IP_CIDR ]] || printf '%s\n' "var_net=$IP_CIDR"
     [[ -z $GATEWAY || $IP_CIDR == dhcp ]] || printf '%s\n' "var_gateway=$GATEWAY"
     [[ -z $NAMESERVER ]] || printf '%s\n' "var_ns=$NAMESERVER"

@@ -24,7 +24,7 @@ check() {
     output=$(env -i "PATH=$PATH" "${common[@]}" "$@" "$bash_bin" "$provision" "${flags[@]}" 2>&1) || status=$?
     if [[ $expected == success ]]; then
         if (( status != 0 )); then printf 'FAIL %s\n%s\n' "$label" "$output" >&2; exit 1; fi
-        [[ $output == *'+ pct create 250 '* && $output == *'--unprivileged 1'* && $output == *'--features nesting=1'* && $output == *'+ pct push 250 '* ]] || { printf 'FAIL %s: incomplete command plan\n' "$label" >&2; exit 1; }
+        [[ $output == *'+ pct create 250 '* && $output == *'--unprivileged 1'* && $output == *'--features nesting=1'* && $output == *'--tags ai\;ai-model\;osr-target\;llamacpp'* && $output == *'+ pct push 250 '* ]] || { printf 'FAIL %s: incomplete command plan\n' "$label" >&2; exit 1; }
         [[ $output != *'huggingface.co/'*'/blob/'* ]] || { printf 'FAIL %s: Hugging Face browser URL was not normalized\n' "$label" >&2; exit 1; }
         [[ $output == *'install-nvidia-driver.sh /root/llama-target-deploy/install-nvidia-driver.sh --perms 0755'* ]] || { printf 'FAIL %s: NVIDIA helper was not copied into the deployment directory\n' "$label" >&2; exit 1; }
         [[ $output != *'CUDA_COMPILER=/usr/local/cuda-13.0/bin/nvcc'* ]] || { printf 'FAIL %s: command plan injected a CUDA compiler path that was not configured\n' "$label" >&2; exit 1; }

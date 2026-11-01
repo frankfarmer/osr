@@ -31,6 +31,7 @@ plan
 has '+ pct create 282 '
 has '--hostname xolotl-target'
 has '--unprivileged 1'
+has '--tags ai\;ai-model\;osr-target\;xolotl'
 has '--features nesting=1'
 has '--memory 98304'
 has '--rootfs local-lvm:420'

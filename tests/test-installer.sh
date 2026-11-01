@@ -162,7 +162,7 @@ unset MATTERMOST_WEBHOOK_URL CONFIG_SOURCE BRIDGE NAMESERVER MATTERMOST_CHANNEL 
 # and restored by re-sourcing the extracted functions at the end.
 _tt="$(mktemp -d)"
 TARGETS_DIR="$_tt/targets"
-for _name in gitea mattermost ollama llamacpp airllm strata basalt maya xolotl open-terminal hermes comfyui; do
+for _name in gitea mattermost ollama llamacpp airllm strata basalt maya xolotl avalon open-terminal hermes comfyui; do
   mkdir -p "$TARGETS_DIR/$_name"
   # The fake provisioner records what it was given: settings, flags, and
   # whether the admin token reached it (by value, compared to $EXPECT_TOKEN).
@@ -177,8 +177,8 @@ printf 'provision %s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$(basename "$(dirna
 [[ -z ${COMFYUI_IMAGE_VARIANT:-} ]] || printf 'image-variant %s\n' "$COMFYUI_IMAGE_VARIANT" >> "$MOCK_LOG"
 [[ -z ${GPU:-}${BACKEND:-}${GPU_DEVICES:-}${GPU_CARD:-} ]] ||
   printf 'gpu-env %s|%s|%s|%s\n' "${GPU:-}" "${BACKEND:-}" "${GPU_DEVICES:-}" "${GPU_CARD:-}" >> "$MOCK_LOG"
-[[ -z ${CUDA_VERSION:-}${MAYA_CUDA_VERSION:-}${XOLOTL_CUDA_VERSION:-} ]] ||
-  printf 'cuda-env %s|%s|%s\n' "${CUDA_VERSION:-}" "${MAYA_CUDA_VERSION:-}" "${XOLOTL_CUDA_VERSION:-}" >> "$MOCK_LOG"
+[[ -z ${CUDA_VERSION:-}${MAYA_CUDA_VERSION:-}${XOLOTL_CUDA_VERSION:-}${AVALON_CUDA_VERSION:-} ]] ||
+  printf 'cuda-env %s|%s|%s|%s\n' "${CUDA_VERSION:-}" "${MAYA_CUDA_VERSION:-}" "${XOLOTL_CUDA_VERSION:-}" "${AVALON_CUDA_VERSION:-}" >> "$MOCK_LOG"
 if [[ -n ${HF_TOKEN:-} ]]; then
   if [[ $HF_TOKEN == "${EXPECT_HF_TOKEN:-unset}" ]]; then echo 'hf-token match'; else echo 'hf-token other'; fi >> "$MOCK_LOG"
 fi
@@ -678,6 +678,10 @@ assert_ok "Avalon on Ubuntu 24.04" valid_avalon_template local:vztmpl/ubuntu-24.
 assert_ok "Avalon on Ubuntu 22.04" valid_avalon_template local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst
 assert_fail "not Debian 13 (ROCm supports Radeon cards on Ubuntu only)" valid_avalon_template local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst
 assert_fail "not Ubuntu 26.04 (no ROCm 7.2.4 repository)" valid_avalon_template local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst
+assert_eq "CUDA accepts Debian 13" 0 "$(AVALON_BACKEND=cuda valid_avalon_template local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst; echo $?)"
+assert_eq "CUDA accepts Ubuntu 26.04" 0 "$(AVALON_BACKEND=cuda valid_avalon_template local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst; echo $?)"
+assert_eq "an automatically selected NVIDIA card accepts Debian 13" 0 "$(GPU_RESULT_AVALON='ready|nvidia||0|' valid_avalon_template local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst; echo $?)"
+assert_eq "NVIDIA GPU_DEVICES accepts Debian 13" 0 "$(GPU_DEVICES='/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm' valid_avalon_template local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst; echo $?)"
 assert_fail "nor another distro" valid_avalon_template local:vztmpl/alpine-3.20-default_20240908_amd64.tar.xz
 
 describe host_gpu_cuda_arch
@@ -701,7 +705,9 @@ assert_eq "Basalt on Ubuntu 26.04 uses CUDA 13.3" CUDA_VERSION=13.3 "$(target_cu
 assert_eq "Maya on Debian 13 uses CUDA 13.1" MAYA_CUDA_VERSION=13.1 "$(target_cuda_env maya local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst)"
 assert_eq "Xolotl on Ubuntu 26.04 uses CUDA 13.3" XOLOTL_CUDA_VERSION=13.3 "$(target_cuda_env xolotl local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst)"
 assert_eq "Ubuntu 24.04 keeps its CUDA default" "" "$(target_cuda_env basalt local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst)"
-assert_eq "Avalon keeps its own (Ubuntu 24.04/22.04 only)" "" "$(target_cuda_env avalon local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst)"
+assert_eq "Avalon keeps its CUDA default on Ubuntu 24.04" "" "$(target_cuda_env avalon local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst)"
+assert_eq "Avalon on Debian 13 uses CUDA 13.1" AVALON_CUDA_VERSION=13.1 "$(target_cuda_env avalon local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst)"
+assert_eq "Avalon on Ubuntu 26.04 uses CUDA 13.3" AVALON_CUDA_VERSION=13.3 "$(target_cuda_env avalon local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst)"
 MAYA_CUDA_VERSION=13.4
 assert_eq "an explicit CUDA choice is kept" "" "$(target_cuda_env maya local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst)"
 unset MAYA_CUDA_VERSION
@@ -1024,6 +1030,12 @@ mock_reset_log
 run_target_provisioner maya
 assert_contains "Debian 13's CUDA version reaches Maya" "cuda-env |13.1|" "$(mock_calls)"
 unset MAYA_CT_ID MAYA_IP_CIDR MAYA_STORAGE MAYA_TEMPLATE
+AVALON_CT_ID=919; AVALON_IP_CIDR=192.0.2.99/24; AVALON_STORAGE=gpu-store
+AVALON_TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst
+mock_reset_log
+run_target_provisioner avalon
+assert_contains "Debian 13's CUDA version reaches Avalon" "cuda-env |||13.1" "$(mock_calls)"
+unset AVALON_CT_ID AVALON_IP_CIDR AVALON_STORAGE AVALON_TEMPLATE
 mock_reset_log
 run_target_provisioner llamacpp
 assert_contains "llama.cpp without a model only gets its CT" "|no|" "$(mock_calls)"

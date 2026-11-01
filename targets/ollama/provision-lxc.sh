@@ -83,7 +83,7 @@ community_vars() {
     local passthrough=yes
     [[ $gpu != none ]] || passthrough=no
     printf '%s\n' "var_ctid=$CT_ID" "var_hostname=$CT_HOSTNAME" "var_cpu=$CORES" "var_ram=$MEMORY_MB" \
-        "var_disk=$ROOTFS_GB" "var_unprivileged=1" "var_nesting=1" "var_gpu=$passthrough" "var_brg=$BRIDGE" \
+        "var_disk=$ROOTFS_GB" "var_unprivileged=1" "var_nesting=1" "var_gpu=$passthrough" "var_brg=$BRIDGE" "var_tags=ai;ai-model;osr-target;ollama" \
         "var_os=$OLLAMA_CT_OS" "var_version=$OLLAMA_CT_VERSION"
     [[ -z $IP_CIDR ]] || printf '%s\n' "var_net=$IP_CIDR"
     [[ -z $GATEWAY || $IP_CIDR == dhcp ]] || printf '%s\n' "var_gateway=$GATEWAY"

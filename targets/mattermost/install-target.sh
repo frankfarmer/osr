@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-tools;osr-target;mattermost
 # Run as root in the Mattermost CT made by the Proxmox VE community script
 # (provision-lxc.sh pushes and runs this). It does the first-run setup the
 # browser would, with mmctl in local mode, and prepares the router's alerts:

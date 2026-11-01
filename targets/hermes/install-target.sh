@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-tools;osr-target;hermes
 # Run as root in the dedicated Hermes LXC (provision-lxc.sh pushes this file,
 # hermes-gateway.service and the router's API key). Hermes discovers models
 # through the router but sends inference to model servers through a local

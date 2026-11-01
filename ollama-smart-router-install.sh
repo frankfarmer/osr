@@ -1430,6 +1430,7 @@ target_cuda_env() {
     basalt) key=CUDA_VERSION ;;
     maya) key=MAYA_CUDA_VERSION ;;
     xolotl) key=XOLOTL_CUDA_VERSION ;;
+    avalon) key=AVALON_CUDA_VERSION ;;
     *) return 0 ;;
   esac
   [[ -z ${!key:-} ]] || return 0
@@ -1538,10 +1539,23 @@ valid_target_template() {
 valid_strata_template() {
   valid_target_template "$1" && [[ "$1" != *:vztmpl/ubuntu-26.04-* ]]
 }
-# Avalon: AMD supports ROCm on Radeon cards on Ubuntu 24.04 and 22.04 only
-# (the CUDA build runs there too).
+# Avalon: ROCm on Radeon cards needs Ubuntu 24.04 or 22.04. Its CUDA build
+# also supports the other templates accepted by the target provisioner.
 valid_avalon_template() {
-  valid_target_template "$1" && [[ "$1" == *:vztmpl/ubuntu-24.04-* || "$1" == *:vztmpl/ubuntu-22.04-* ]]
+  valid_target_template "$1" || return 1
+  case ${AVALON_BACKEND:-auto} in
+    cuda) return 0 ;;
+    rocm) ;;
+    auto)
+      if [[ -n ${GPU_DEVICES:-} ]]; then
+        [[ " $GPU_DEVICES " == *' /dev/nvidia'* ]] && return 0
+      else
+        local state vendor
+        IFS='|' read -r state vendor _ <<< "$(target_gpu_result avalon)"
+        [[ $state == ready && $vendor == nvidia ]] && return 0
+      fi ;;
+  esac
+  [[ "$1" == *:vztmpl/ubuntu-24.04-* || "$1" == *:vztmpl/ubuntu-22.04-* ]]
 }
 show_strata_template_alternatives() {
   local selected="$1" storage ref shown=0
@@ -1682,7 +1696,7 @@ prompt_target_settings() {
           "$template_var" "$default" valid_strata_template || return 1
       elif [[ $name == avalon ]]; then
         [[ -n "$default" ]] || default="$(default_gpu_target_template "$name")" || default=""
-        prompt_until_valid "    Template (Ubuntu 24.04 or 22.04: ROCm's Radeon support; downloaded if missing)" \
+        prompt_until_valid "    Template (Ubuntu 24.04/22.04; CUDA also supports Debian 12/13 and Ubuntu 26.04; downloaded if missing)" \
           "$template_var" "$default" valid_avalon_template || return 1
       else
         [[ -n "$default" ]] || default="$(default_gpu_target_template "$name")" || default=""
@@ -2947,6 +2961,7 @@ create_args=(
   -net0 "name=eth0,bridge=${BRIDGE},ip=${IP_CIDR},gw=${GATEWAY},firewall=${FIREWALL}"
   -unprivileged 1
   -onboot 1
+  -tags "ai;ai-tools;osr-router;openwebui"
   -start 1
 )
 [[ -n "$NAMESERVER" ]] && create_args+=(-nameserver "$NAMESERVER")

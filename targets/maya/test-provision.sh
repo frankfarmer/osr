@@ -30,6 +30,7 @@ reject() {
 plan
 has '+ pct create 281 '
 has '--unprivileged 1'
+has '--tags ai\;ai-model\;osr-target\;maya'
 has '--features nesting=1'
 has '--memory 65536'
 has '--rootfs local-lvm:160'

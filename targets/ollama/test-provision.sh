@@ -32,7 +32,7 @@ has() { [[ $out == *"$1"* ]] || { printf 'FAIL: plan lacks %s\n%s\n' "$1" "$out"
 lacks() { [[ $out != *"$1"* ]] || { printf 'FAIL: plan contains %s\n%s\n' "$1" "$out" >&2; exit 1; }; }
 
 ok 'the community script runs with this target'"'"'s presets'
-has '+ env var_ctid=270 var_hostname=ollama var_cpu=4 var_ram=16384 var_disk=128 var_unprivileged=1 var_nesting=1 var_gpu=no var_brg=vmbr0 var_os=debian var_version=13 var_net=192.0.2.70/24 var_gateway=192.0.2.1 var_container_storage=local-lvm bash '
+has '+ env var_ctid=270 var_hostname=ollama var_cpu=4 var_ram=16384 var_disk=128 var_unprivileged=1 var_nesting=1 var_gpu=no var_brg=vmbr0 var_tags=ai\;ai-model\;osr-target\;ollama var_os=debian var_version=13 var_net=192.0.2.70/24 var_gateway=192.0.2.1 var_container_storage=local-lvm bash '
 ok 'template storage override is passed to the community script' TEMPLATE_STORAGE=local
 has 'var_template_storage=local var_container_storage=local-lvm'
 has 'https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/ollama.sh'

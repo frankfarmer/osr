@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-model;osr-target;llamacpp
 # Run INSIDE a dedicated Debian inference-target LXC (Debian 12 or 13 for CUDA
 # and CPU builds, Debian 13 for Vulkan), never on the router or PVE host.
 set -Eeuo pipefail

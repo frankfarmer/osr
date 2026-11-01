@@ -199,7 +199,7 @@ net="name=eth0,bridge=$BRIDGE,ip=$IP_CIDR,firewall=1"
 [[ -z $VLAN_TAG ]] || net+=",tag=$VLAN_TAG"
 create=(pct create "$CT_ID" "$TEMPLATE" --hostname "$CT_HOSTNAME" --ostype "$(template_ostype "$TEMPLATE")"
     --unprivileged 1 --features nesting=1 --cores "$CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB"
-    --rootfs "$STORAGE:$ROOTFS_GB" --net0 "$net" --onboot "$ONBOOT"
+    --rootfs "$STORAGE:$ROOTFS_GB" --net0 "$net" --onboot "$ONBOOT" --tags 'ai;ai-model;osr-target;airllm'
     --description 'AirLLM inference target; Ollama-compatible API on TCP 11434')
 [[ -z $NAMESERVER ]] || create+=(--nameserver "$NAMESERVER")
 [[ -z $SSH_PUBLIC_KEY ]] || create+=(--ssh-public-keys "$SSH_PUBLIC_KEY")

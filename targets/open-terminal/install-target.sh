@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Proxmox CT tags (set by provision-lxc.sh on the host): ai;ai-tools;osr-target;open-terminal
 # Run inside the dedicated Open Terminal LXC after /etc/open-terminal/api-key
 # has been pushed (provision-lxc.sh does both).
 #

@@ -15,7 +15,7 @@ run_plan() { env -i "PATH=$PATH" "$@" "$bash_bin" "$provision" --dry-run ${FLAGS
 ok() {
     local label=$1; shift
     out=$(run_plan "${common[@]}" "$@") || { printf 'FAIL %s\n%s\n' "$label" "$out" >&2; exit 1; }
-    [[ $out == *'+ pct create 260 '* && $out == *'--unprivileged 1'* && $out == *'+ pct push 260 '* ]] || \
+    [[ $out == *'+ pct create 260 '* && $out == *'--unprivileged 1'* && $out == *'--tags ai\;ai-model\;osr-target\;airllm'* && $out == *'+ pct push 260 '* ]] || \
         { printf 'FAIL %s: incomplete plan\n%s\n' "$label" "$out" >&2; exit 1; }
     [[ $out != *'--password'* ]] || { printf 'FAIL %s: a root password is on the command line\n' "$label" >&2; exit 1; }
     passed=$((passed + 1)); printf 'PASS %s\n' "$label"

@@ -74,7 +74,7 @@ valid_container_ip() {
 # The community script's var_* presets for these settings, one NAME=value per line.
 community_vars() {
     printf '%s\n' "var_ctid=$CT_ID" "var_hostname=$CT_HOSTNAME" "var_cpu=$CORES" "var_ram=$MEMORY_MB" \
-        "var_disk=$ROOTFS_GB" "var_unprivileged=1" "var_nesting=1" "var_gpu=no" "var_brg=$BRIDGE" \
+        "var_disk=$ROOTFS_GB" "var_unprivileged=1" "var_nesting=1" "var_gpu=no" "var_brg=$BRIDGE" "var_tags=ai;ai-tools;osr-target;mattermost" \
         "var_os=ubuntu" "var_version=$MATTERMOST_CT_VERSION"
     [[ -z $IP_CIDR ]] || printf '%s\n' "var_net=$IP_CIDR"
     [[ -z $GATEWAY || $IP_CIDR == dhcp ]] || printf '%s\n' "var_gateway=$GATEWAY"

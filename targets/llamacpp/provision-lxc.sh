@@ -539,7 +539,7 @@ for file in "${files[@]}"; do [[ -r $source_dir/$file ]] || die "Missing deploym
 net="name=eth0,bridge=$BRIDGE,ip=$IP_CIDR,firewall=1"
 [[ -z $GATEWAY ]] || net+=",gw=$GATEWAY"
 [[ -z $VLAN_TAG ]] || net+=",tag=$VLAN_TAG"
-create=(pct create "$CT_ID" "$TEMPLATE" --hostname "$CT_HOSTNAME" --ostype debian --unprivileged 1 --features nesting=1 --cores "$CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "$STORAGE:$ROOTFS_GB" --net0 "$net" --onboot "$ONBOOT" --description 'Standalone llama.cpp inference target; OpenAI/Ollama compatibility on TCP 11434')
+create=(pct create "$CT_ID" "$TEMPLATE" --hostname "$CT_HOSTNAME" --ostype debian --unprivileged 1 --features nesting=1 --cores "$CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "$STORAGE:$ROOTFS_GB" --net0 "$net" --onboot "$ONBOOT" --tags 'ai;ai-model;osr-target;llamacpp' --description 'Standalone llama.cpp inference target; OpenAI/Ollama compatibility on TCP 11434')
 [[ -z $NAMESERVER ]] || create+=(--nameserver "$NAMESERVER")
 [[ -z $SSH_PUBLIC_KEY ]] || create+=(--ssh-public-keys "$SSH_PUBLIC_KEY")
 devices=()

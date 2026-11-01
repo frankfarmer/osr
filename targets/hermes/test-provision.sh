@@ -230,6 +230,7 @@ reject() {
 plan
 has '+ pct create 282 local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst'
 has '--unprivileged 1'
+has '--tags ai\;ai-tools\;osr-target\;hermes'
 has '--features nesting=1'
 has 'read ROUTER_API_KEY from /app/router/secrets.env on router CT 280 into a 0600 file'
 has 'IN ACCEPT -source <router-source-ip>/32 -p tcp -dport 8642'

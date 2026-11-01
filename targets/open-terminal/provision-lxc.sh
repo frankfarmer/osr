@@ -539,7 +539,7 @@ else
   [[ -z $VLAN_TAG ]] || net+=",tag=$VLAN_TAG"
   create=(pct create "$CT_ID" "$TEMPLATE" --hostname "$CT_HOSTNAME" --ostype debian
     --unprivileged 1 --features nesting=1 --cores "$CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB"
-    --rootfs "$STORAGE:$ROOTFS_GB" --net0 "$net" --onboot "$ONBOOT"
+    --rootfs "$STORAGE:$ROOTFS_GB" --net0 "$net" --onboot "$ONBOOT" --tags 'ai;ai-tools;osr-target;open-terminal'
     --description 'Open Terminal workspace for Ollama Smart Router Open WebUI')
   [[ -z $NAMESERVER ]] || create+=(--nameserver "$NAMESERVER")
   create_attempted=1

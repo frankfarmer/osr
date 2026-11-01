@@ -39,6 +39,7 @@ has 'no RDNA 3 card on amdgpu and no NVIDIA driver on this host; planning for ro
 has '+ pct create 283 '
 has '--hostname avalon-target'
 has '--unprivileged 1'
+has '--tags ai\;ai-model\;osr-target\;avalon'
 has '--features nesting=1'
 has '--memory 65536'
 has '--rootfs local-lvm:160'

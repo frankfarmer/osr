@@ -69,7 +69,7 @@ Generated Gitea and Mattermost admin passwords are in
 | llama.cpp | Debian 13 listed first | Debian 12/13 for CUDA or CPU; Debian 13 for Vulkan |
 | Basalt, Maya, Xolotl | Debian 13 | Debian 12; Ubuntu 22.04, 24.04, 26.04 |
 | Strata | Debian 13 | Debian 12; Ubuntu 22.04/24.04 (no Ubuntu 26.04) |
-| Avalon | Ubuntu 24.04 | Ubuntu 22.04 (AMD supports ROCm on Radeon cards on Ubuntu only); by hand with CUDA also Debian 12/13, Ubuntu 26.04 |
+| Avalon | Ubuntu 24.04 | Ubuntu 22.04 (AMD ROCm); with CUDA also Debian 12/13, Ubuntu 26.04 |
 
 Mattermost's `MATTERMOST_CT_VERSION` also accepts Ubuntu 26.04 as an explicit
 override for future testing, but Mattermost does not currently support it.

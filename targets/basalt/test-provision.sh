@@ -22,6 +22,7 @@ reject() {
 
 plan
 has '--unprivileged 1'
+has '--tags ai\;ai-model\;osr-target\;basalt'
 has '--features nesting=1'
 has '--memory 131072'
 has '--rootfs local-lvm:200'
