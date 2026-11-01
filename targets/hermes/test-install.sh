@@ -84,7 +84,7 @@ ROUTER_URL=http://r:8000 HERMES_MODEL=auto HERMES_CONTEXT_LENGTH=65536 HERMES_CH
 # shellcheck disable=SC2034
 HERMES_API_SERVER=true HERMES_API_PORT=8642 HERMES_API_MODEL_NAME=hermes-agent HERMES_DASHBOARD=true unit_sha256=u dashboard_auth_sha256=none
 # shellcheck disable=SC2034
-backend_keys_sha256=none
+backend_keys_sha256=none targets_sha256=none
 router_key_sha256=$(printf 'sk-secret-key' | sha256sum | cut -d' ' -f1)
 record=$(settings_record)
 [[ $record == *"ROUTER_KEY_SHA256=$router_key_sha256"* && $record != *sk-secret-key* ]] ||
@@ -154,6 +154,10 @@ case $1 in
   --version) echo 'Hermes Agent 0.0-test' ;;
   config)
     if [[ $2 == get ]]; then echo null; exit 0; fi
+    if [[ $2 == unset ]]; then
+      grep -v -e "^$3=" -e "^$3\." "$HERMES_HOME/config.kv" > "$HERMES_HOME/config.kv.new" || true
+      mv "$HERMES_HOME/config.kv.new" "$HERMES_HOME/config.kv"; exit 0
+    fi
     [[ $2 == set ]] || exit 2
     [[ ${FAKE_CONFIG_FAIL:-} != "$3" ]] || exit 1
     grep -v "^$3=" "$HERMES_HOME/config.kv" > "$HERMES_HOME/config.kv.new" 2>/dev/null || true
@@ -291,8 +295,11 @@ out=$(guest) || fail "fresh install: $out"
 grep -q 'upstream-install --non-interactive --skip-browser --skip-computer-use --channel stable' "$log" ||
   fail 'upstream installer flags'
 config=$home/.hermes/config.kv
-[[ $(kv model.provider "$config") == custom && $(kv model.base_url "$config") == http://127.0.0.1:8765/v1 ]] ||
+[[ $(kv model.provider "$config") == custom:osr && $(kv model.base_url "$config") == http://127.0.0.1:8765/v1 ]] ||
   fail "provider config: $(cat "$config")"
+[[ $(kv providers.osr.api "$config") == http://127.0.0.1:8765/v1 && $(kv providers.osr.api_key "$config") == no-key &&
+   $(kv providers.osr.transport "$config") == chat_completions && $(kv providers.osr.default_model "$config") == auto &&
+   $(kv providers.osr.context_length "$config") == 65536 ]] || fail "named osr provider: $(cat "$config")"
 [[ $(kv model.api_key "$config") == no-key ]] || fail 'model.api_key is not the local placeholder'
 [[ $(kv model.context_length "$config") == 65536 && $(kv model.default "$config") == auto ]] || fail 'model and context'
 env_file=$home/.hermes/.env
@@ -453,6 +460,31 @@ grep -q '^upstream-install' "$log" && fail 'the mismatching installer ran'
 good=$(sha256sum "$tmp_root/upstream-install.sh" | cut -d' ' -f1)
 out=$(guest HERMES_INSTALLER_SHA256="$good") || fail "matching installer checksum: $out"
 pass 'commit and installer pins are applied, re-applied when changed, and enforced'
+
+# 15. Direct targets: one provider each; a target the router dropped loses its own.
+reset_tree; push_key
+printf 'strata-192-168-11-154-8080=strata+http://192.168.11.154:8080\nollama-192-168-11-153-11434=http://192.168.11.153:11434\n' > "$deploy/targets"
+out=$(guest) || fail "install with targets: $out"
+for name in strata-192-168-11-154-8080 ollama-192-168-11-153-11434; do
+  [[ $(kv "providers.$name.api" "$config") == "http://127.0.0.1:8765/t/$name/v1" &&
+     $(kv "providers.$name.api_key" "$config") == no-key &&
+     $(kv "providers.$name.transport" "$config") == chat_completions ]] || fail "direct provider $name: $(cat "$config")"
+done
+cmp -s "$deploy/targets" "$etc/targets" || fail 'the targets file was not installed for the dispatcher'
+grep -q "^TARGETS_SHA256=$(sha256sum "$deploy/targets" | cut -d' ' -f1)$" "$etc/settings" || fail 'targets not in the settings record'
+: > "$log"
+out=$(guest) || fail "unchanged targets rerun: $out"
+[[ $out == *'nothing to do'* ]] || fail "unchanged targets rerun did work: $out"
+printf 'strata-192-168-11-154-8080=strata+http://192.168.11.154:8080\n' > "$deploy/targets"
+out=$(guest) || fail "rerun with a target removed: $out"
+grep -q '^hermes config unset providers.ollama-192-168-11-153-11434$' "$log" || fail 'the stale provider was not unset'
+grep -q '^providers.ollama-192-168-11-153-11434\.' "$config" && fail "the stale provider is still configured: $(cat "$config")"
+[[ $(kv providers.strata-192-168-11-154-8080.api "$config") == */t/strata-192-168-11-154-8080/v1 ]] || fail 'the kept target lost its provider'
+printf 'Bad Name=http://x:1\n' > "$deploy/targets"
+out=$(guest) && fail "an invalid targets file was accepted: $out"
+[[ $out == *'invalid line'* ]] || fail "invalid targets message: $out"
+rm -f "$deploy/targets"
+pass 'direct targets: a provider per model server, kept in sync with the router inventory'
 
 # 14. One run at a time.
 exec {held}>>"$tmp_root/etc/hermes-target.lock"

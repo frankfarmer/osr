@@ -127,7 +127,7 @@ Finally, `integrate-webui.py` runs in the router CT:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `HERMES_MODEL` | `auto` | A model ID from the router's `/v1/models`. With `auto`, the dispatcher uses `/routing/explain`, prefers models reported loaded, and keeps an agent task on one model while a server for it works. If every server for that model fails, the pin is dropped and the router ranks afresh, so the task moves to the best healthy model, and stays there. Name a model for a fixed choice. |
+| `HERMES_MODEL` | `auto` | The default model of provider `custom:osr`: a model ID from the router's `/v1/models`. With `auto`, the dispatcher uses `/routing/explain`, prefers models reported loaded, and keeps an agent task on one model while a server for it works. If every server for that model fails, the pin is dropped and the router ranks afresh, so the task moves to the best healthy model, and stays there. Name a model for a fixed choice. |
 | `HERMES_CONTEXT_LENGTH` | `65536` | Context the model's host serves; at least 64000. The dispatcher never uses a model the router reports with less (`context_length` in `/routing/inventory`), nor one reported without tool support, for any request. AirLLM is excluded on both counts. |
 | `HERMES_CHANNEL` | `stable` | Upstream update channel (`stable` or `main`). |
 | `HERMES_COMMIT` | — | Pin the Hermes checkout to a commit. A changed pin is applied on the next run. The installer reports the installed commit so you can pin it. |
@@ -261,6 +261,26 @@ pct exec 282 -- grep -E '^HERMES_DASHBOARD_BASIC_AUTH_(USERNAME|PASSWORD)=' /hom
 
 The password and session signing secret are kept in that 0600 file and are
 preserved on reconfigure. Existing OAuth dashboard credentials are also kept.
+
+### Choosing a model in Hermes
+
+The installer registers named providers, so Hermes's `/model` switcher can
+pick them:
+
+| Provider | Goes to | Example |
+|---|---|---|
+| `custom:osr` | The router-ranked dispatcher, as with `HERMES_MODEL` (the default provider). Accepts `auto`, the tier names and any router model. | `/model custom:osr:xlarge` |
+| `custom:<target>` | One model server, directly. The dispatcher lists that server's own models (`/api/tags` for Ollama-style servers, `/v1/models` for the others) and sends chat only to it, with its backend key. No router inventory, ranking or failover is involved, so it keeps working while the router is down. | `/model custom:strata-192-168-11-154-8080:qwen3.8-flash-next-iq3_xxs` |
+
+A target's name is its kind, host and port, from the router's inventory when
+the CT was provisioned or last reconfigured: `strata-192-168-11-154-8080`,
+`ollama-192-168-11-153-11434`. The list is kept in
+`/etc/hermes-target/targets`. After adding or removing a model server, run
+`--reconfigure`: new servers get a provider (and a firewall rule), and
+providers of servers the router no longer lists are removed. A direct pick
+skips the dispatcher's tool and context checks, since nothing but the server
+answers it; choose a model with tool support and at least
+`HERMES_CONTEXT_LENGTH` of context.
 
 Upgrade the agent with Hermes's own updater, then restart the gateway:
 

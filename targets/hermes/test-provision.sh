@@ -55,6 +55,24 @@ for bad in http://h:0 http://h:99999 ftp://h:21 http://user@h:80 'http://h:80?x=
 done
 pass 'inventory endpoints: a URL without a port uses 80 (http) or 443 (https); bad URLs are refused'
 
+printf '{"enabled":true,"servers":["strata+http://192.168.11.154:8080","http://192.168.11.153:11434/","maya+https://GPU.lan","http://10.0.0.5:8080","lmstudio+http://10.0.0.5:8080"]}\n' > "$inv"
+expected='strata-192-168-11-154-8080=strata+http://192.168.11.154:8080
+ollama-192-168-11-153-11434=http://192.168.11.153:11434
+maya-gpu-lan-443=maya+https://GPU.lan
+ollama-10-0-0-5-8080=http://10.0.0.5:8080
+lmstudio-10-0-0-5-8080=lmstudio+http://10.0.0.5:8080'
+[[ $(inventory_targets "$inv") == "$expected" ]] || fail "inventory targets: $(inventory_targets "$inv" 2>&1)"
+printf '{"enabled":true,"servers":["http://10.0.0.5:8080","http://10.0.0.5:8080/x"]}\n' > "$inv"
+[[ $(inventory_targets "$inv") == $'ollama-10-0-0-5-8080=http://10.0.0.5:8080\nollama-10-0-0-5-8080-2=http://10.0.0.5:8080/x' ]] ||
+  fail "duplicate target names: $(inventory_targets "$inv" 2>&1)"
+for bad in http://h:0 ftp://h:21 http://user@h:80 'http://h:80?x=1' 'http://h:80/a=b'; do
+  printf '{"enabled":true,"servers":["%s"]}\n' "$bad" > "$inv"
+  if inventory_targets "$inv" >/dev/null 2>&1; then fail "inventory target accepted: $bad"; fi
+done
+printf '{"enabled":false,"servers":[]}\n' > "$inv"
+if inventory_targets "$inv" >/dev/null 2>&1; then fail 'targets read from a router with discovery off'; fi
+pass 'direct targets: one name per model server (kind, host, port), unique, with bad URLs refused'
+
 # Reconfigure rewrites only this target's rules (marked with a rule comment, or
 # in the layout earlier versions wrote) and keeps every other line.
 fwfile=$tmp_root/legacy.fw
@@ -400,6 +418,8 @@ reset_fake
 out=$(real) || fail "full run: $out"
 [[ $(cat "$fake/pushed-282-router-api-key") == "$router_key" ]] || fail 'the router key was not pushed to the CT'
 [[ $(cat "$fake/pushed-282-backend-keys") == 'STRATA_API_KEY=sk-backend-secret' ]] || fail 'the backend key was not pushed to the CT'
+[[ $(cat "$fake/pushed-282-targets") == 'strata-192-0-2-71-8080=strata+http://192.0.2.71:8080' ]] ||
+  fail "the direct targets were not pushed: $(cat "$fake/pushed-282-targets" 2>&1)"
 [[ -z $(secrets_in_argv) ]] || fail "a secret appeared in a command line: $(secrets_in_argv)"
 grep -q 'install-target.sh' "$log" && grep -q 'HERMES_API_SERVER=true' "$log" || fail 'guest installer not run with the API server'
 grep -q 'ROUTER_URL=http://192.0.2.80:8000' "$log" || fail 'ROUTER_URL not derived from the router address'

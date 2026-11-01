@@ -29,9 +29,11 @@ usage() {
   cat <<'USAGE'
 Usage: ROUTER_URL=http://192.168.11.80:8000 bash install-target.sh [--dry-run]
 
-Installs Hermes Agent with the official POSIX installer and points its custom
-OpenAI-compatible provider at a local direct dispatcher. The dispatcher uses
-the router's inventory and ranking, then calls model servers itself. Rerun to change settings;
+Installs Hermes Agent with the official POSIX installer and points its named
+provider custom:osr at a local direct dispatcher. The dispatcher uses the
+router's inventory and ranking, then calls model servers itself. Each model
+server in the targets file is also a provider, custom:<target>, that the
+dispatcher reaches without the router. Rerun to change settings;
 an unchanged, healthy installation is left alone.
 
 Environment:
@@ -70,6 +72,7 @@ settings_record() {
   printf 'HERMES_DASHBOARD=%s\n' "$HERMES_DASHBOARD"
   printf 'ROUTER_KEY_SHA256=%s\n' "$router_key_sha256"
   printf 'BACKEND_KEYS_SHA256=%s\n' "$backend_keys_sha256"
+  printf 'TARGETS_SHA256=%s\n' "$targets_sha256"
   printf 'DASHBOARD_AUTH_SHA256=%s\n' "$dashboard_auth_sha256"
   printf 'UNIT_SHA256=%s\n' "$unit_sha256"
 }
@@ -191,6 +194,13 @@ DASHBOARD_UNIT=hermes-dashboard.service
 DASHBOARD_PORT=9119
 DIRECT_URL=http://127.0.0.1:8765
 BACKEND_KEYS_FILE=${BACKEND_KEYS_FILE:-$source_dir/backend-keys}
+# NAME=SERVER per model server, from the router's inventory (provision-lxc.sh).
+TARGETS_FILE=${TARGETS_FILE:-$source_dir/targets}
+# target_names FILE: the direct target names in a targets file.
+target_names() { [[ -f $1 ]] && cut -d= -f1 "$1" || true; }
+# This run's targets: the pushed file, else the installed one.
+targets_source=$TARGETS_FILE
+[[ -f $targets_source ]] || targets_source=$HERMES_ETC/targets
 
 [[ -n $ROUTER_URL ]] ||
   die 'ROUTER_URL is unset. Resume from the Proxmox host with provision-lxc.sh --reconfigure; direct guest runs must set ROUTER_URL=http://router-address:8000.'
@@ -232,8 +242,10 @@ if (( dry_run )); then
   printf '+ apt-get install ca-certificates curl git tar coreutils libatomic1 python3 openssl util-linux\n'
   printf '+ create unprivileged user %s; install Hermes via %s --non-interactive --skip-browser --skip-computer-use --channel %s%s\n' \
     "$HERMES_USER" "$INSTALL_URL" "$HERMES_CHANNEL" "${HERMES_COMMIT:+ --commit $HERMES_COMMIT}"
-  printf '+ configure provider=custom, base_url=%s/v1, model=%s, context_length=%s, api_key=<local placeholder>\n' \
+  printf '+ configure provider=custom:osr (api %s/v1), model=%s, context_length=%s, api_key=<local placeholder>\n' \
     "$DIRECT_URL" "$HERMES_MODEL" "$HERMES_CONTEXT_LENGTH"
+  printf '+ configure direct providers custom:<target> (api %s/t/<target>/v1) for: %s\n' \
+    "$DIRECT_URL" "$(target_names "$targets_source" | paste -sd' ' - | sed 's/^$/none/')"
   printf '+ install %s, start %s, discover models via router and dispatch inference directly\n' \
     "$DIRECT_LIB" "$DIRECT_UNIT"
   [[ $HERMES_SKIP_CHAT_PROBE == true ]] ||
@@ -287,6 +299,13 @@ if [[ -n $router_key ]]; then
   router_key_sha256=$(printf '%s' "$router_key" | sha256sum | cut -d' ' -f1)
   # curl reads the header from this file, so the key never appears in argv.
   printf 'Authorization: Bearer %s\n' "$router_key" > "$stage/router-auth"
+fi
+targets_sha256=none
+if [[ -f $targets_source ]]; then
+  if grep -Evq '^[a-z0-9][a-z0-9-]{0,62}=[^[:space:]=]+$' "$targets_source"; then
+    die "$targets_source has an invalid line; rerun provision-lxc.sh --reconfigure."
+  fi
+  targets_sha256=$(sha256sum "$targets_source" | cut -d' ' -f1)
 fi
 backend_keys_sha256=none
 if [[ -f $BACKEND_KEYS_FILE ]]; then
@@ -476,7 +495,7 @@ fi
 backup=$stage/backup
 install -d -m 0700 "$backup"
 for file in "$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$UNIT_DIR/$UNIT" \
-            "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings"; do
+            "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings" "$HERMES_ETC/targets"; do
   if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file").prev"; fi
 done
 gateway_was_active=0
@@ -489,7 +508,7 @@ if systemctl is-active --quiet "$DASHBOARD_UNIT" 2>/dev/null; then dashboard_was
 restore() {
   local file name
   for file in "$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$UNIT_DIR/$UNIT" \
-              "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings"; do
+              "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings" "$HERMES_ETC/targets"; do
     name=$(basename "$file")
     if [[ -f $backup/$name.prev ]]; then cp -a -- "$backup/$name.prev" "$file"; else rm -f -- "$file"; fi
   done
@@ -520,12 +539,31 @@ rollback() {
 }
 trap '[[ $BASHPID == "$$" ]] || exit 1; rollback; exit 1' ERR
 
-run_hermes config set model.provider custom
 run_hermes config set model.base_url "$DIRECT_URL/v1"
 run_hermes config set model.default "$HERMES_MODEL"
 run_hermes config set model.context_length "$HERMES_CONTEXT_LENGTH"
 # The router key stays in .env for discovery, never in a backend request.
 run_hermes config set model.api_key no-key
+# Named providers, so Hermes's /model switcher can pick them: custom:osr is the
+# router-ranked dispatcher; each custom:<target> is one model server, reached
+# by the dispatcher with no router at all. Backend keys stay in the dispatcher.
+set_provider() {
+  run_hermes config set "providers.$1.api" "$2"
+  run_hermes config set "providers.$1.api_key" no-key
+  run_hermes config set "providers.$1.transport" chat_completions
+  run_hermes config set "providers.$1.context_length" "$HERMES_CONTEXT_LENGTH"
+}
+set_provider osr "$DIRECT_URL/v1"
+run_hermes config set providers.osr.default_model "$HERMES_MODEL"
+mapfile -t new_targets < <(target_names "$targets_source")
+for name in "${new_targets[@]}"; do set_provider "$name" "$DIRECT_URL/t/$name/v1"; done
+# Providers of targets no longer registered with the router.
+while IFS= read -r name; do
+  [[ -n $name && " ${new_targets[*]} " != *" $name "* ]] || continue
+  run_hermes config unset "providers.$name" ||
+    note "Could not remove provider $name from Hermes's config.yaml; delete it there by hand."
+done < <(target_names "$HERMES_ETC/targets")
+run_hermes config set model.provider custom:osr
 
 # .env: the API server settings; ROUTER_API_KEY keeps the key for reruns. The
 # placeholder OPENAI_API_KEY=no-key written by earlier versions is removed.
@@ -582,6 +620,9 @@ run_hermes --version >/dev/null
 if [[ -f $BACKEND_KEYS_FILE ]]; then
   install -m 0640 "$BACKEND_KEYS_FILE" "$HERMES_ETC/backend-keys"
   chown "$HERMES_USER:$HERMES_USER" "$HERMES_ETC/backend-keys"
+fi
+if [[ -f $TARGETS_FILE ]]; then
+  install -m 0644 "$TARGETS_FILE" "$HERMES_ETC/targets"
 fi
 install -m 0644 "$source_dir/direct-dispatch.py" "$DIRECT_LIB"
 install -m 0644 "$source_dir/$DIRECT_UNIT" "$UNIT_DIR/$DIRECT_UNIT"

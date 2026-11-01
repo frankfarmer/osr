@@ -48,6 +48,18 @@ class Backend(Quiet):
     errors = {}
     stream_gate = threading.Event()
 
+    def do_GET(self):
+        self.requests.append((self.server.server_port, self.path,
+                              self.headers.get("Authorization"), None))
+        if self.path == "/v1/models":
+            self.send_json({"data": [{"id": "tool-model"}, {"id": "other-model"}]})
+        elif self.path == "/api/tags":
+            self.send_json({"models": [{"name": "llama3:8b"}, {"model": "gemma4:12b"}]})
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.requests.append((self.server.server_port, self.path,
@@ -592,12 +604,14 @@ class TestDirect(unittest.TestCase):
             home.mkdir()
             (etc / "settings").write_text("ROUTER_URL=http://r:8000\nHERMES_CONTEXT_LENGTH=65536\n")
             (home / ".env").write_text("ROUTER_API_KEY=k\n")
+            (etc / "targets").write_text("strata-a=strata+http://10.0.0.5:8080\n")
             env = {"HERMES_ETC": str(etc), "HERMES_HOME": str(home)}
             with mock.patch.dict("os.environ", env), \
                     mock.patch.object(direct, "DispatchServer"), \
                     mock.patch.object(direct.logging, "basicConfig"):
                 direct.main()
             self.assertEqual(direct.Handler.dispatcher.min_context, 65536)
+            self.assertEqual(direct.Handler.dispatcher.targets, {"strata-a": "strata+http://10.0.0.5:8080"})
             (etc / "settings").write_text("ROUTER_URL=http://r:8000\nHERMES_CONTEXT_LENGTH=lots\n")
             with mock.patch.dict("os.environ", env), \
                     mock.patch.object(direct, "DispatchServer"), \
@@ -631,6 +645,110 @@ class TestDirect(unittest.TestCase):
             self.assertEqual(response.readline(), b'data: {"chunk":1}\n')
             Backend.stream_gate.set()
             self.assertIn(b"[DONE]", response.read())
+
+
+class TestDirectTargets(unittest.TestCase):
+    """Targets picked by name in Hermes bypass the router completely."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.backend = serve(Backend)
+        cls.router = serve(Router)
+        cls.proxy = serve(direct.Handler)
+
+    @classmethod
+    def tearDownClass(cls):
+        for server in (cls.proxy, cls.router, cls.backend):
+            server.shutdown()
+            server.server_close()
+
+    def setUp(self):
+        Backend.requests = []
+        Backend.errors = {}
+        Router.requests = []
+        port = self.backend.server_port
+        self.strata = f"strata+http://127.0.0.1:{port}"
+        self.ollama = f"http://127.0.0.1:{port}"
+        self.dispatcher(f"http://127.0.0.1:{self.router.server_port}")
+        self.base = f"http://127.0.0.1:{self.proxy.server_port}"
+
+    def dispatcher(self, router_url):
+        direct.Handler.dispatcher = direct.Dispatcher(
+            router_url, "router-secret", {"STRATA_API_KEY": "backend-secret"}, 65536,
+            {"strata-a": self.strata, "ollama-b": self.ollama})
+
+    def get(self, path):
+        with urlopen(self.base + path, timeout=5) as response:
+            return json.load(response)
+
+    def chat(self, target, body):
+        request = Request(f"{self.base}/t/{target}/v1/chat/completions",
+                          data=json.dumps(body).encode(),
+                          headers={"Content-Type": "application/json"})
+        with urlopen(request, timeout=5) as response:
+            return response, json.load(response)
+
+    def test_a_target_lists_its_own_models_with_its_key(self):
+        listed = self.get("/t/strata-a/v1/models")
+        self.assertEqual([m["id"] for m in listed["data"]], ["tool-model", "other-model"])
+        self.assertEqual(Backend.requests[-1][1:3], ("/v1/models", "Bearer backend-secret"))
+        self.assertEqual(Router.requests, [])
+
+    def test_an_ollama_target_lists_api_tags_without_a_key(self):
+        listed = self.get("/t/ollama-b/v1/models")
+        self.assertEqual([m["id"] for m in listed["data"]], ["llama3:8b", "gemma4:12b"])
+        self.assertEqual(Backend.requests[-1][1:3], ("/api/tags", None))
+
+    def test_chat_goes_to_the_target_only(self):
+        response, data = self.chat("strata-a", {"model": "other-model", "messages": []})
+        self.assertEqual(data["model"], "other-model")
+        self.assertEqual(response.headers["X-Hermes-Direct-Server"], self.strata)
+        port, path, auth, body = Backend.requests[-1]
+        self.assertEqual((path, auth, body["model"]), ("/v1/chat/completions", "Bearer backend-secret", "other-model"))
+        self.assertEqual(Router.requests, [])
+
+    def test_targets_work_while_the_router_is_down(self):
+        with socket.socket() as unused:
+            unused.bind(("127.0.0.1", 0))
+            dead = f"http://127.0.0.1:{unused.getsockname()[1]}"
+        self.dispatcher(dead)
+        self.assertEqual(len(self.get("/t/strata-a/v1/models")["data"]), 2)
+        _, data = self.chat("strata-a", {"model": "tool-model", "messages": []})
+        self.assertEqual(data["model"], "tool-model")
+
+    def test_a_backend_error_is_passed_on(self):
+        Backend.errors = {self.backend.server_port: (404, b'{"error":"no such model"}')}
+        with self.assertRaises(HTTPError) as failed:
+            self.chat("strata-a", {"model": "missing", "messages": []})
+        self.assertEqual(failed.exception.code, 404)
+
+    def test_unknown_targets_and_missing_models_are_refused(self):
+        with self.assertRaises(HTTPError) as failed:
+            self.get("/t/nope/v1/models")
+        self.assertEqual(failed.exception.code, 404)
+        with self.assertRaises(HTTPError) as failed:
+            self.chat("nope", {"model": "x", "messages": []})
+        self.assertEqual(failed.exception.code, 404)
+        with self.assertRaises(HTTPError) as failed:
+            self.chat("strata-a", {"messages": []})
+        self.assertEqual(failed.exception.code, 400)
+        self.assertEqual(Backend.requests, [])
+
+    def test_the_routed_model_list_is_unchanged(self):
+        names = [m["id"] for m in self.get("/v1/models")["data"]]
+        self.assertNotIn("strata-a", names)
+
+    def test_load_targets_keeps_only_valid_lines(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = pathlib.Path(root, "targets")
+            path.write_text("strata-a=strata+http://10.0.0.5:8080\n"
+                            "Bad_Name=http://10.0.0.6:11434\n"
+                            "ftp-x=ftp://10.0.0.7:21\n"
+                            "ollama-b=http://10.0.0.8:11434\n")
+            self.assertEqual(direct.load_targets(str(path)),
+                             {"strata-a": "strata+http://10.0.0.5:8080",
+                              "ollama-b": "http://10.0.0.8:11434"})
+            self.assertEqual(direct.load_targets(str(path) + ".missing"), {})
 
 
 class TestServerErrors(unittest.TestCase):

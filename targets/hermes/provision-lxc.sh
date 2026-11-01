@@ -306,6 +306,45 @@ for item in data["servers"]:
         print(*pair)
 PY
 }
+# inventory_targets FILE: NAME=ENTRY per registered model server, the direct
+# targets Hermes can pick as provider custom:NAME without the router. NAME is
+# the kind, host and port, e.g. strata-192-168-11-154-8080.
+inventory_targets() {
+  python3 - "$1" <<'PY'
+import json, re, sys
+from urllib.parse import urlsplit
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+if not data.get("enabled") or not isinstance(data.get("servers"), list):
+    raise SystemExit("Router discovery is disabled; enable [discovery] before installing Hermes")
+kinds = ("lmstudio", "strata", "basalt", "maya", "xolotl")
+names = set()
+for item in data["servers"]:
+    if not isinstance(item, str):
+        raise SystemExit("Invalid model server in router inventory")
+    kind, _, url = item.partition("+")
+    if kind not in kinds or not url:
+        kind, url = "ollama", item
+    parsed = urlsplit(url)
+    try:
+        # Port 0 is invalid, not "no port": only None takes the default.
+        port = parsed.port
+        if port is None:
+            port = {"http": 80, "https": 443}[parsed.scheme]
+    except (KeyError, ValueError):
+        port = None
+    if parsed.scheme not in ("http", "https") or not port or not parsed.hostname \
+            or parsed.username or parsed.password or parsed.query or parsed.fragment \
+            or any(c.isspace() or c == "=" for c in item):
+        raise SystemExit("Invalid model server URL in router inventory: " + item)
+    host = re.sub(r"[^a-z0-9]+", "-", parsed.hostname.lower()).strip("-")
+    name = base = f"{kind}-{host}-{port}"[:60].rstrip("-")
+    n = 2
+    while name in names:
+        name, n = f"{base}-{n}", n + 1
+    names.add(name)
+    print(f"{name}={item.rstrip('/')}")
+PY
+}
 # End provision helpers. --------------------------------------------------------
 
 positive() { [[ $2 =~ ^[1-9][0-9]{0,8}$ ]] || die "$1 must be a positive integer."; }
@@ -669,7 +708,7 @@ fi
 # The router's API must answer with this key before a CT is made for it.
 if (( dry_run )); then
   printf '+ verify %s/v1/models answers with the router key\n' "$ROUTER_URL"
-  printf '+ discover model-server endpoints from %s/routing/inventory for firewall rules\n' "$ROUTER_URL"
+  printf '+ discover model servers from %s/routing/inventory for direct targets and firewall rules\n' "$ROUTER_URL"
 elif [[ $mode != integrate ]]; then
   : > "$stage/router-auth"
   if [[ -s $stage/router-api-key ]]; then
@@ -690,11 +729,17 @@ if [[ $mode == reconfigure && -f $firewall_file ]] &&
    grep -Eq '^policy_out:[[:space:]]*DROP[[:space:]]*$' "$firewall_file"; then
   model_egress=restricted
 fi
+# The registered model servers: Hermes's direct targets, and with restricted
+# egress the firewall's model endpoints.
+: > "$stage/targets"
+if [[ $mode != integrate ]] && (( ! dry_run )); then
+  status=$(curl --silent --show-error --max-time 15 -o "$stage/inventory" -w '%{http_code}' \
+    -H "@$stage/router-auth" "$ROUTER_URL/routing/inventory" || true)
+  [[ $status == 200 ]] || die "Could not read router model inventory (HTTP ${status:-none})."
+  inventory_targets "$stage/inventory" > "$stage/targets" || die 'Could not parse router model inventory.'
+fi
 if [[ $mode != integrate && $model_egress == restricted ]]; then
   if (( ! dry_run )); then
-    status=$(curl --silent --show-error --max-time 15 -o "$stage/inventory" -w '%{http_code}' \
-      -H "@$stage/router-auth" "$ROUTER_URL/routing/inventory" || true)
-    [[ $status == 200 ]] || die "Could not read router model inventory (HTTP ${status:-none})."
     endpoints=$(inventory_endpoints "$stage/inventory") || die 'Could not parse router model inventory.'
     mapfile -t model_endpoints <<< "$endpoints"
   else
@@ -806,6 +851,7 @@ if [[ $mode != integrate ]]; then
   run pct push "$CT_ID" "$source_dir/hermes-direct.service" "$deploy/hermes-direct.service" --perms 0644
   run pct push "$CT_ID" "$source_dir/hermes-dashboard.service" "$deploy/hermes-dashboard.service" --perms 0644
   run pct push "$CT_ID" "$stage/backend-keys" "$deploy/backend-keys" --perms 0600
+  run pct push "$CT_ID" "$stage/targets" "$deploy/targets" --perms 0644
   if (( dry_run )) || [[ -s $stage/router-api-key ]]; then
     run pct push "$CT_ID" "$stage/router-api-key" "$deploy/router-api-key" --perms 0600
   fi

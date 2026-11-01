@@ -38,6 +38,9 @@ TOOL_REJECTION = re.compile(rb"(does not support tools|tool calling.{0,30}not su
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 300
 SKIP_SECONDS = 60
+# A direct target: one model server, picked in Hermes as provider custom:<name>
+# and served under /t/<name>/v1. Names come from the router's inventory.
+TARGET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
 def read_env(path):
@@ -63,6 +66,22 @@ def server_parts(server):
             or "/../" in parsed.path or parsed.path.endswith("/.."):
         raise ValueError("invalid model server URL")
     return kind, server.rstrip("/")
+
+
+def load_targets(path):
+    """{name: server entry} from the targets file the provisioner writes.
+    An invalid line is logged and left out."""
+    targets = {}
+    for name, server in read_env(path).items():
+        try:
+            if not TARGET_NAME.match(name):
+                raise ValueError("invalid target name")
+            server_parts(server)
+        except ValueError as exc:
+            LOG.warning("ignoring direct target %r (%s)", name, exc)
+            continue
+        targets[name] = server
+    return targets
 
 
 class _ConnectTimeout:
@@ -153,8 +172,11 @@ class _SSEDone:
 
 
 class Dispatcher:
-    def __init__(self, router_url, router_key, backend_keys=None, min_context=0):
+    def __init__(self, router_url, router_key, backend_keys=None, min_context=0, targets=None):
         self.router_url = router_url.rstrip("/")
+        # Direct targets bypass the router entirely: listing and chat go to
+        # the one server, with no inventory, ranking or failover.
+        self.targets = targets or {}
         # HERMES_CONTEXT_LENGTH: a model reported to serve less is never used.
         self.min_context = min_context
         self.router_key = router_key
@@ -293,6 +315,25 @@ class Dispatcher:
         return {"object": "list", "data": [{"id": name, "object": "model"}
                                           for name in ["auto", *sorted(names)]]}
 
+    def backend_key(self, server):
+        kind, _ = server_parts(server)
+        return self.backend_keys.get(KEY_NAMES.get(kind, ""), "")
+
+    def target_models(self, name):
+        """The models one direct target serves, asked of the server itself."""
+        server = self.targets[name]
+        kind, base = server_parts(server)
+        if kind == "ollama":
+            # Ollama and the Ollama-compatible targets list models at /api/tags.
+            data = request_json(base + "/api/tags", "")
+            names = [m.get("name") or m.get("model") for m in data.get("models") or []
+                     if isinstance(m, dict)]
+        else:
+            data = request_json(base + "/v1/models", self.backend_key(server))
+            names = [m.get("id") for m in data.get("data") or [] if isinstance(m, dict)]
+        return {"object": "list", "data": [{"id": n, "object": "model", "owned_by": name}
+                                          for n in names if isinstance(n, str) and n]}
+
     def router_models(self):
         data = request_json(self.router_url + "/v1/models", self.router_key)
         return {m["id"] for m in data.get("data", [])
@@ -313,7 +354,7 @@ class Dispatcher:
         kind, base = server_parts(entry["server"])
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream, application/json",
                    "Accept-Encoding": "identity"}
-        key = self.backend_keys.get(KEY_NAMES.get(kind, ""), "")
+        key = self.backend_key(entry["server"])
         if key:
             headers["Authorization"] = "Bearer " + key
         payload = dict(body, model=entry["name"])
@@ -349,7 +390,28 @@ class Handler(BaseHTTPRequestHandler):
         # The request body may be unread, so the connection is not reused.
         self.json_response(status, {"error": {"message": message, "type": "server_error"}}, close=True)
 
+    def direct_target(self):
+        """(name, server, rest of the path) for /t/<name>/..., else None."""
+        path = self.path.split("?", 1)[0]
+        if not path.startswith("/t/"):
+            return None
+        name, _, rest = path[3:].partition("/")
+        return name, self.dispatcher.targets.get(name), "/" + rest
+
     def do_GET(self):
+        target = self.direct_target()
+        if target:
+            name, server, rest = target
+            if server is None:
+                self.error(404, f"Unknown direct target {name!r}; run provision-lxc.sh --reconfigure after adding a model server")
+            elif rest != "/v1/models":
+                self.error(404, "Unknown endpoint")
+            else:
+                try:
+                    self.json_response(200, self.dispatcher.target_models(name))
+                except (OSError, ValueError, TypeError, AttributeError) as exc:
+                    self.error(502, f"Direct target {name} ({server}) did not list its models: {exc}")
+            return
         if self.path == "/healthz":
             self.json_response(200, {"status": "ok"})
         elif self.path == "/v1/models":
@@ -360,19 +422,54 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.error(404, "Unknown endpoint")
 
-    def do_POST(self):
-        if self.path != "/v1/chat/completions":
-            self.error(404, "Unknown endpoint")
-            return
+    def read_chat_body(self):
+        """The chat request body, or None after an error response was sent."""
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 1 or length > MAX_BODY:
                 self.error(413, "Invalid request size")
-                return
+                return None
             body = json.loads(self.rfile.read(length))
-            if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
-                self.error(400, "Expected a chat completion request")
-                return
+        except ValueError:
+            self.error(400, "Expected a chat completion request")
+            return None
+        if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+            self.error(400, "Expected a chat completion request")
+            return None
+        return body
+
+    def direct_chat(self, name, server):
+        """A chat request for one direct target: that server only, no router."""
+        if server is None:
+            self.error(404, f"Unknown direct target {name!r}; run provision-lxc.sh --reconfigure after adding a model server")
+            return
+        body = self.read_chat_body()
+        if body is None:
+            return
+        model = body.get("model")
+        if not isinstance(model, str) or not model:
+            self.error(400, f"Name one of {name}'s models (GET /t/{name}/v1/models)")
+            return
+        self.last_error = ""
+        if not self.relay(body, Candidates([{"server": server, "name": model}]), set(), final=True):
+            self.error(502, f"Direct target {name} did not answer. " + self.last_error)
+
+    def do_POST(self):
+        target = self.direct_target()
+        if target:
+            name, server, rest = target
+            if rest == "/v1/chat/completions":
+                self.direct_chat(name, server)
+            else:
+                self.error(404, "Unknown endpoint")
+            return
+        if self.path != "/v1/chat/completions":
+            self.error(404, "Unknown endpoint")
+            return
+        body = self.read_chat_body()
+        if body is None:
+            return
+        try:
             candidates = self.dispatcher.candidates(body)
         except (ValueError, TypeError, URLError) as exc:
             self.error(503, "Could not choose a model: " + str(exc))
@@ -545,7 +642,8 @@ def main():
         min_context = int(settings.get("HERMES_CONTEXT_LENGTH") or 0)
     except ValueError:
         raise SystemExit("HERMES_CONTEXT_LENGTH in Hermes settings is not a number") from None
-    Handler.dispatcher = Dispatcher(router_url, secrets.get("ROUTER_API_KEY", ""), keys, min_context)
+    Handler.dispatcher = Dispatcher(router_url, secrets.get("ROUTER_API_KEY", ""), keys, min_context,
+                                    load_targets(etc + "/targets"))
     port = int(os.environ.get("HERMES_DIRECT_PORT", "8765"))
     logging.basicConfig(level=logging.INFO)
     DispatchServer(("127.0.0.1", port), Handler).serve_forever()
