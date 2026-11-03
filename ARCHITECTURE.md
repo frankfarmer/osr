@@ -686,6 +686,21 @@ its Ollama step, with the nvm installer's hash and the official security floor
 checked. Firewall and egress follow Hermes; the Control UI port is open to the
 LAN when enabled.
 
+### 17.5 Honcho memory (`targets/honcho/`)
+
+[Honcho](targets/honcho/README.md) is shared agent memory in a CPU-only Debian
+13 CT: PostgreSQL with pgvector, the Honcho API (8000) and deriver from a
+pinned upstream release, and its Streamable HTTP MCP server (3000) on a
+checksum-pinned Bun. Honcho's chat model is a router tier (`HONCHO_MODEL=fast`);
+embeddings come from an OpenAI-compatible `/v1` endpoint or the router, with
+the vector size set at bootstrap. The admin JWT stays in the CT; Open WebUI
+(MCP tool server, admin-only until granted), Hermes and OpenClaw get a JWT
+scoped to the `osr` workspace and share the `user` peer. The installer
+provisions Honcho before the agents and passes its URL and CT only to them;
+an agent's later `--reconfigure` reads the URL back from its settings, so the
+egress rule and memory survive, and `HONCHO_URL=` turns them off. Inbound is
+limited to the router (API and MCP) and the selected agents (API).
+
 ## 18. Verification and CI
 
 * `tests/run-tests.sh` runs every shell and pytest suite and every
@@ -694,7 +709,7 @@ LAN when enabled.
   end-to-end cases need root (or `unshare -r`) and skip otherwise; the result
   lists every skip, and `--strict` (or `CI=true`) makes a skip fail the run.
   The provisioner suites (Hermes, OpenClaw, Gitea, Mattermost) stub `id` and
-  need no root.
+  need no root. Honcho's provisioner suite checks dry-run plans and its pins.
 * `tests/test-repo.sh` checks repository invariants: unit hardening, no secrets
   in `env/`, UTF-8, embedded copies in sync, Maya's update switch, Xolotl's
   and Avalon's pinned weights and the upgrade contract.

@@ -1586,7 +1586,8 @@ show_strata_template_alternatives() {
 }
 valid_comfyui_variant() { [[ $1 == klein-4b || $1 == klein-9b ]]; }
 valid_honcho_model() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; }
-valid_honcho_embedding_url() { [[ $1 =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/v1/?$ ]]; }
+# Blank: Honcho asks the router's /v1/embeddings.
+valid_honcho_embedding_url() { [[ -z $1 || $1 =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]]; }
 valid_hf_token() { [[ $1 =~ ^hf_[A-Za-z0-9]{30,}$ ]]; }
 
 # host_gpu_cuda_arch: GPU 0's compute capability (86), from the GPU step or,
@@ -1685,6 +1686,7 @@ prompt_target_settings() {
     if [[ $name == honcho ]]; then
       echo "    Honcho needs an OpenAI-compatible embedding endpoint reachable from its CT."
       echo "    For an Ollama CT, pull an embedding model there and use http://<ollama-ip>:11434/v1."
+      echo "    Leave the URL blank to use OSR's /v1/embeddings (it needs an embedding model mapped in LiteLLM)."
       prompt_until_valid "    Embedding model" HONCHO_EMBEDDING_MODEL "${HONCHO_EMBEDDING_MODEL:-}" valid_honcho_model || return 1
       prompt_until_valid "    Embedding dimensions" HONCHO_EMBEDDING_DIMENSIONS "${HONCHO_EMBEDDING_DIMENSIONS:-}" valid_positive_int || return 1
       prompt_until_valid "    Embedding base URL" HONCHO_EMBEDDING_BASE_URL "${HONCHO_EMBEDDING_BASE_URL:-}" valid_honcho_embedding_url || return 1
@@ -1837,9 +1839,11 @@ run_target_provisioner() {
           HONCHO_EMBEDDING_BASE_URL="${HONCHO_EMBEDDING_BASE_URL:-}"
         [[ -z $client_ips ]] || export HONCHO_CLIENT_IPS="$client_ips"
       fi
-      if [[ "$name" != honcho && "${HONCHO_READY:-false}" == true ]]; then
-        export HONCHO_URL="http://${HONCHO_IP_CIDR%/*}:8000"
-        export HONCHO_CT_ID="$(target_setting honcho CT_ID)"
+      # Only the agents use Honcho, and only once its CT was provisioned.
+      if [[ ( "$name" == hermes || "$name" == openclaw ) && "${HONCHO_READY:-false}" == true ]]; then
+        local honcho_ct
+        honcho_ct="$(target_setting honcho CT_ID)"
+        export HONCHO_URL="http://${HONCHO_IP_CIDR%/*}:8000" HONCHO_CT_ID="$honcho_ct"
       fi
       OPENWEBUI_ADMIN_TOKEN="$admin_token" exec bash "$script" "${flags[@]}"
     fi

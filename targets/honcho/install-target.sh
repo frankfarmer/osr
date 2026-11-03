@@ -7,13 +7,19 @@ umask 077
 deploy=${HONCHO_DEPLOY_DIR:-/root/honcho-deploy}
 opt=${HONCHO_OPT:-/opt/honcho}
 etc=${HONCHO_ETC:-/etc/honcho-target}
-ref=${HONCHO_REF:-main}
+ref=${HONCHO_REF:-v3.5.0}
 model=${HONCHO_MODEL:-fast}
 router_url=${ROUTER_URL:-}
 embedding_model=${HONCHO_EMBEDDING_MODEL:-}
 embedding_dimensions=${HONCHO_EMBEDDING_DIMENSIONS:-}
 embedding_url=${HONCHO_EMBEDDING_BASE_URL:-${router_url}/v1}
 embedding_dimensions_mode=${HONCHO_EMBEDDING_DIMENSIONS_MODE:-never}
+# Bun runs the MCP server. The release zip is pinned by SHA-256; the AVX2 build
+# needs a CPU with AVX2, the baseline build does not.
+bun_version=${HONCHO_BUN_VERSION:-1.4.4}
+bun_sha256_x64=${HONCHO_BUN_SHA256:-bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c}
+bun_sha256_baseline=${HONCHO_BUN_SHA256:-e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76}
+bun=/opt/honcho-bun/bun
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 [[ $(id -u) == 0 ]] || die 'Run as root in the Honcho CT.'
@@ -21,11 +27,15 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 [[ $model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HONCHO_MODEL.'
 [[ $embedding_model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Set HONCHO_EMBEDDING_MODEL to a model served by an OpenAI-compatible embedding endpoint.'
 [[ $embedding_dimensions =~ ^[1-9][0-9]{0,5}$ ]] || die 'Set HONCHO_EMBEDDING_DIMENSIONS to the model vector size.'
-[[ $embedding_url =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/v1/?$ ]] || die 'Set HONCHO_EMBEDDING_BASE_URL to an HTTP(S) host:port/v1 endpoint.'
+[[ $embedding_url =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]] || die 'Set HONCHO_EMBEDDING_BASE_URL to an HTTP(S) host[:port]/v1 endpoint.'
 [[ $embedding_dimensions_mode =~ ^(never|auto|always)$ ]] || die 'HONCHO_EMBEDDING_DIMENSIONS_MODE must be never, auto or always.'
 embedding_url=${embedding_url%/}
 [[ $ref =~ ^(main|v[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$ ]] || die 'HONCHO_REF must be main, a release tag or a full commit SHA.'
 [[ -s $deploy/router-api-key ]] || die "Missing $deploy/router-api-key."
+[[ $bun_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'HONCHO_BUN_VERSION must be a release such as 1.4.4.'
+if [[ $bun_version != 1.4.4 && -z ${HONCHO_BUN_SHA256:-} ]]; then
+  die 'Set HONCHO_BUN_SHA256 to the release zip checksum for HONCHO_BUN_VERSION.'
+fi
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -99,6 +109,7 @@ if ! runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_database WHERE datname=
 fi
 runuser -u postgres -- psql -d honcho -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector'
 runuser -u postgres -- psql -d honcho -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm'
+runuser -u postgres -- psql -d honcho -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS btree_gin'
 
 if [[ ! -s $etc/jwt-secret ]]; then openssl rand -hex 48 > "$etc/jwt-secret"; fi
 router_key=$(<"$deploy/router-api-key")
@@ -126,29 +137,53 @@ router_key=$(<"$deploy/router-api-key")
 chown root:honcho "$etc/honcho.env"
 chmod 0640 "$etc/honcho.env"
 runuser -u honcho -- env HOME=/var/lib/honcho EMBEDDING_VECTOR_DIMENSIONS=1536 \
-  /opt/honcho-uv/bin/uv --directory "$opt" run --no-dev --env-file "$etc/honcho.env" alembic upgrade head
-runuser -u honcho -- env HOME=/var/lib/honcho /opt/honcho-uv/bin/uv --directory "$opt" run --no-dev --env-file "$etc/honcho.env" \
+  /opt/honcho-uv/bin/uv --directory "$opt" run --frozen --no-dev --env-file "$etc/honcho.env" alembic upgrade head
+runuser -u honcho -- env HOME=/var/lib/honcho /opt/honcho-uv/bin/uv --directory "$opt" run --frozen --no-dev --env-file "$etc/honcho.env" \
   python scripts/configure_embeddings.py --yes
 
+# api-key is the admin key and stays in this CT. client-api-key is scoped to the
+# shared osr workspace; Open WebUI, Hermes and OpenClaw get only that one.
+generate_key() {
+  runuser -u honcho -- env HOME=/var/lib/honcho /opt/honcho-uv/bin/uv --directory "$opt" run --frozen --no-dev --env-file "$etc/honcho.env" \
+    python scripts/generate_jwt.py "$@" --print-only
+}
 if [[ ! -s $etc/api-key ]]; then
-  runuser -u honcho -- env HOME=/var/lib/honcho /opt/honcho-uv/bin/uv --directory "$opt" run --no-dev --env-file "$etc/honcho.env" \
-    python scripts/generate_jwt.py --admin --print-only > "$etc/api-key"
-  chmod 0600 "$etc/api-key"
+  generate_key --admin > "$etc/api-key.new"
+  chmod 0600 "$etc/api-key.new"
+  mv -f "$etc/api-key.new" "$etc/api-key"
+fi
+if [[ ! -s $etc/client-api-key ]]; then
+  generate_key --workspace osr > "$etc/client-api-key.new"
+  chmod 0600 "$etc/client-api-key.new"
+  mv -f "$etc/client-api-key.new" "$etc/client-api-key"
 fi
 
 # Bun runs the upstream HTTP MCP package. It forwards each client's bearer key
 # to the authenticated API; the key is never stored in this unit.
-if [[ ! -x /var/lib/honcho/.bun/bin/bun ]]; then
-  runuser -u honcho -- env HOME=/var/lib/honcho bash -c 'curl -fsSL https://bun.sh/install | bash'
+if [[ ! -x $bun || $("$bun" --version 2>/dev/null) != "$bun_version" ]]; then
+  if grep -qw avx2 /proc/cpuinfo; then
+    bun_asset=bun-linux-x64 bun_sha256=$bun_sha256_x64
+  else
+    bun_asset=bun-linux-x64-baseline bun_sha256=$bun_sha256_baseline
+  fi
+  bun_tmp=$(mktemp -d)
+  curl -fsSL -o "$bun_tmp/bun.zip" \
+    "https://github.com/oven-sh/bun/releases/download/bun-v${bun_version}/${bun_asset}.zip"
+  printf '%s  %s\n' "$bun_sha256" "$bun_tmp/bun.zip" | sha256sum -c --quiet - ||
+    die "Bun ${bun_version} (${bun_asset}.zip) does not match its pinned SHA-256."
+  python3 -m zipfile -e "$bun_tmp/bun.zip" "$bun_tmp"
+  install -d -m 0755 /opt/honcho-bun
+  install -m 0755 "$bun_tmp/$bun_asset/bun" "$bun"
+  rm -rf -- "$bun_tmp"
 fi
-runuser -u honcho -- env HOME=/var/lib/honcho /var/lib/honcho/.bun/bin/bun --cwd "$opt/mcp" install --frozen-lockfile
+runuser -u honcho -- env HOME=/var/lib/honcho "$bun" --cwd "$opt/mcp" install --frozen-lockfile
 install -m 0644 "$deploy/honcho-api.service" /etc/systemd/system/honcho-api.service
 install -m 0644 "$deploy/honcho-deriver.service" /etc/systemd/system/honcho-deriver.service
 install -m 0644 "$deploy/honcho-mcp.service" /etc/systemd/system/honcho-mcp.service
 systemctl daemon-reload
 systemctl enable --now honcho-api.service honcho-deriver.service honcho-mcp.service
 systemctl restart honcho-api.service honcho-deriver.service honcho-mcp.service
-for attempt in {1..60}; do
+for _ in {1..60}; do
   if curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null &&
      curl -fsS --max-time 2 http://127.0.0.1:3000/health >/dev/null; then
     printf 'Honcho API and MCP are healthy.\n'

@@ -14,7 +14,8 @@ When the [Honcho target](../honcho/README.md) is selected, the installer also
 installs the official OpenClaw Honcho plugin with conversation access and the
 shared `osr` workspace. It runs alongside OpenClaw's own memory plugin. For a
 separately installed Honcho CT, set `HONCHO_URL` and `HONCHO_CT_ID` when
-provisioning OpenClaw.
+provisioning OpenClaw. A later `--reconfigure` keeps Honcho as the last
+run set it up (URL, key and egress rule); `HONCHO_URL=` (empty) turns it off.
 
 OpenClaw's **Gateway** (`openclaw-gateway.service`, TCP 18789) serves the
 agent, its Control UI and, with Open WebUI, its OpenAI-compatible

@@ -305,7 +305,8 @@ case $cmd in
     printf 'description: Hermes Agent for Ollama Smart Router\n' > "$FAKE_DIR/ct$id/description" ;;
   config) cat "$FAKE_DIR/ct$id/description" ;;
   start) : ;;
-  push) cp "$1" "$FAKE_DIR/pushed-$id-$(basename "$2")" ;;
+  push) cp "$1" "$FAKE_DIR/pushed-$id-$(basename "$2")"
+    [[ $(basename "$2") != honcho-api-key ]] || cp "$1" "$FAKE_DIR/ct$id/honcho-key" ;;
   pull) [[ $1 == /etc/hermes-target/api-key ]] && printf '%s\n' "$FAKE_HERMES_KEY" > "$2" ;;
   exec)
     [[ $1 == -- ]] && shift
@@ -352,12 +353,16 @@ case $cmd in
           done
           exit "$found" ;;
         sh\ -c\ test\ -d\ /run/systemd/system*) exit 0 ;;
+        sh\ -c\ sed\ *HONCHO_URL*) cat "$FAKE_DIR/ct$id/honcho-url" 2>/dev/null || : ;;
+        'test -s /root/hermes-deploy/honcho-api-key') [[ -s $FAKE_DIR/ct$id/honcho-key ]] ;;
+        'cat /etc/honcho-target/client-api-key') [[ $id == 285 ]] && printf '%s\n' "$FAKE_HONCHO_KEY" ;;
         'install -d -m 0700 /root/hermes-deploy') : ;;
         env\ *install-target.sh)
           cp "$FAKE_DIR/pve/firewall/$id.fw" "$FAKE_DIR/fw-at-guest" 2>/dev/null || : > "$FAKE_DIR/fw-at-guest"
           [[ -z ${FAKE_FW_EDIT:-} ]] || printf '[RULES]\n' >> "$FAKE_DIR/pve/firewall/$id.fw"
           [[ ${FAKE_GUEST_RC:-0} == 0 ]] || exit "$FAKE_GUEST_RC"
           touch "$FAKE_DIR/ct$id/installed"
+          if [[ $all =~ HONCHO_URL=([^\ ]*) ]]; then printf '%s\n' "${BASH_REMATCH[1]}" > "$FAKE_DIR/ct$id/honcho-url"; fi
           [[ $all =~ HERMES_API_SERVER=(true|false) ]] && server=${BASH_REMATCH[1]}
           [[ $all =~ HERMES_API_PORT=([0-9]+) ]] && port=${BASH_REMATCH[1]}
           printf '%s\n' "${server:-false}" > "$FAKE_DIR/ct$id/api-state"
@@ -419,7 +424,8 @@ real() {
     OPENWEBUI_ADMIN_TOKEN="$admin_token" "${common[@]}" "${vars[@]}" bash "$provision" "${flags[@]}" 2>&1
 }
 reset_fake() { rm -rf -- "${fake:?}/ct282" "$fake"/pushed-* "$fake"/fw-at-* "$fake/pve/firewall/282.fw"; : > "$log"; }
-secrets_in_argv() { grep -E -- "$router_key|$admin_token|$hermes_key" "$log" || true; }
+honcho_key=honcho-osr-key-0123456789
+secrets_in_argv() { grep -E -- "$router_key|$admin_token|$hermes_key|$honcho_key" "$log" || true; }
 
 stages_before=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'hermes-setup.*' | wc -l)
 reset_fake
@@ -490,6 +496,29 @@ grep -qx 'OUT ACCEPT -dest 192.0.2.72/32 -p tcp -dport 8080 -log nolog # ollama-
 grep -q '192.0.2.71/32.*hermes-model' "$fake/pve/firewall/282.fw" && fail 'old model server still admitted'
 : > "$log"
 out=$(real --reconfigure) || fail "restore model server: $out"
+# Honcho: given once, kept by a plain --reconfigure, turned off with HONCHO_URL=.
+honcho_rule='OUT ACCEPT -dest 192.0.2.85/32 -p tcp -dport 8000 -log nolog # ollama-smart-router hermes-model'
+: > "$log"; rm -f "$fake"/pushed-*
+out=$(real --reconfigure HONCHO_URL=http://192.0.2.85:8000 HONCHO_CT_ID=285 FAKE_HONCHO_KEY=$honcho_key) || fail "Honcho on: $out"
+grep -q 'pct exec 285 -- cat /etc/honcho-target/client-api-key' "$log" || fail 'the key must be the Honcho osr workspace key'
+[[ $(cat "$fake/pushed-282-honcho-api-key") == "$honcho_key" ]] || fail 'the Honcho key was not pushed as a file'
+grep -qxF "$honcho_rule" "$fwfile" || fail "Honcho egress rule: $(cat "$fwfile")"
+grep -q 'HONCHO_URL=http://192.0.2.85:8000' "$log" || fail 'the guest did not get HONCHO_URL'
+: > "$log"; rm -f "$fake"/pushed-*
+out=$(real --reconfigure) || fail "plain reconfigure: $out"
+[[ $out == *'Keeping Honcho memory at http://192.0.2.85:8000'* ]] || fail "no keep notice: $out"
+grep -qxF "$honcho_rule" "$fwfile" || fail 'a plain reconfigure dropped the Honcho egress rule'
+grep -q 'HONCHO_URL=http://192.0.2.85:8000' "$log" || fail 'a plain reconfigure did not pass HONCHO_URL on'
+[[ ! -e $fake/pushed-282-honcho-api-key ]] || fail 'the Honcho key already in the CT should be reused'
+: > "$log"
+out=$(real --reconfigure HONCHO_URL=) || fail "Honcho off: $out"
+grep -q '192.0.2.85/32' "$fwfile" && fail 'HONCHO_URL= kept the Honcho egress rule'
+grep -q 'HONCHO_URL= ' "$log" || fail 'the guest was not told to turn Honcho off'
+: > "$log"
+out=$(real --reconfigure) || fail "reconfigure after Honcho off: $out"
+[[ $out != *'Keeping Honcho memory'* ]] || fail 'Honcho came back after it was turned off'
+[[ -z $(secrets_in_argv) ]] || fail "a secret appeared in a command line: $(secrets_in_argv)"
+pass 'Honcho: the osr key as a file and an egress rule; kept by a plain --reconfigure; HONCHO_URL= turns it off'
 : > "$log"
 out=$(real --integrate-only) || fail "integrate-only: $out"
 grep -q 'install-target.sh' "$log" && fail '--integrate-only ran the installer'

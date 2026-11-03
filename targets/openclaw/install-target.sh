@@ -791,6 +791,11 @@ with open(sys.argv[3], "w", encoding="utf-8") as f:
 PY
   chown "$OC_USER:$OC_USER" "$OC_USER_HOME/.honcho/config.json"
   chmod 0600 "$OC_USER_HOME/.honcho/config.json"
+elif [[ -n $(env_file_get "$OC_ETC/settings" HONCHO_URL 2>/dev/null) ]]; then
+  # The last run set up Honcho; HONCHO_URL is now empty, so turn it off.
+  run_oc plugins disable openclaw-honcho
+  rm -f -- "$OC_USER_HOME/.honcho/config.json" "$HONCHO_API_KEY_FILE"
+  note 'The OpenClaw Honcho plugin is disabled.'
 fi
 if [[ $OPENCLAW_DASHBOARD == true ]]; then
   run_oc config set gateway.controlUi.allowedOrigins "$origins" --strict-json

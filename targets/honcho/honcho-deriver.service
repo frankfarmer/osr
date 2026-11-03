@@ -9,7 +9,7 @@ Group=honcho
 WorkingDirectory=/opt/honcho
 Environment=HOME=/var/lib/honcho
 EnvironmentFile=/etc/honcho-target/honcho.env
-ExecStart=/opt/honcho-uv/bin/uv run --no-dev python -m src.deriver
+ExecStart=/opt/honcho-uv/bin/uv run --frozen --no-dev python -m src.deriver
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

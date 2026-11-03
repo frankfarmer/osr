@@ -984,7 +984,44 @@ assert_eq "Honcho prompts for a real embedding model" nomic-embed-text "$HONCHO_
 assert_eq "and its vector dimensions" 768 "$HONCHO_EMBEDDING_DIMENSIONS"
 assert_eq "and the embedding endpoint" http://192.0.2.90:11434/v1 "$HONCHO_EMBEDDING_BASE_URL"
 assert_contains "the prompt explains the endpoint" "Ollama CT" "$(cat "$_out")"
+unset HONCHO_EMBEDDING_BASE_URL
+prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nnomic-embed-text\n768\n\n'
+assert_eq "a blank endpoint leaves Honcho on OSR's /v1/embeddings" "" "$HONCHO_EMBEDDING_BASE_URL"
+assert_contains "and the prompt says so" "Leave the URL blank" "$(cat "$_out")"
+# Later cases use the first answers again.
+HONCHO_EMBEDDING_BASE_URL=http://192.0.2.90:11434/v1
 TARGETS=""
+
+describe valid_honcho_model
+assert_ok "a router tier" valid_honcho_model fast
+assert_ok "an Ollama tag with a namespace" valid_honcho_model "hf.co/nomic-ai/nomic-embed-text:v1.5"
+assert_fail "empty" valid_honcho_model ""
+assert_fail "a leading dash" valid_honcho_model -fast
+assert_fail "a space" valid_honcho_model "nomic embed"
+
+describe valid_honcho_embedding_url
+assert_ok "blank uses the router" valid_honcho_embedding_url ""
+assert_ok "an Ollama /v1 endpoint" valid_honcho_embedding_url http://192.0.2.90:11434/v1
+assert_ok "a trailing slash" valid_honcho_embedding_url http://192.0.2.90:11434/v1/
+assert_ok "HTTPS without a port" valid_honcho_embedding_url https://embed.example.net/v1
+assert_fail "Ollama's native API" valid_honcho_embedding_url http://192.0.2.90:11434/api
+assert_fail "no scheme" valid_honcho_embedding_url 192.0.2.90:11434/v1
+assert_fail "a path below /v1" valid_honcho_embedding_url http://192.0.2.90:11434/v1/embeddings
+
+describe target_menu_group
+assert_eq "services" 'Services (CPU): configuration and alerts; created before OSR.' "$(target_menu_group gitea)"
+assert_eq "CPU model servers" 'Model servers (CPU or optional GPU):' "$(target_menu_group airllm)"
+assert_eq "GPU model servers" 'Model servers (GPU required by default):' "$(target_menu_group llamacpp)"
+assert_eq "Honcho alone" 'Memory infrastructure (CPU): created before agents.' "$(target_menu_group honcho)"
+assert_eq "the agents" "$(target_menu_group hermes)" "$(target_menu_group openclaw)"
+assert_contains "Open Terminal's group" "Open WebUI tools" "$(target_menu_group open-terminal)"
+assert_contains "ComfyUI's group" "Image generation" "$(target_menu_group comfyui)"
+_groups=""
+while IFS='|' read -r _name _; do _groups+="$(target_menu_group "$_name")"$'\n'; done < <(target_table)
+assert_eq "every target has a group, and each group is one run of the menu" 7 \
+  "$(printf '%s' "$_groups" | uniq | grep -c .)"
+assert_eq "no target falls outside a group" 0 "$(printf '%s' "$_groups" | grep -c '^$')"
+unset _groups _name
 
 describe valid_comfyui_variant
 assert_ok "klein-4b" valid_comfyui_variant klein-4b
@@ -1101,10 +1138,16 @@ mock_reset_log
 run_target_provisioner hermes
 assert_contains "Hermes gets the provisioned Honcho endpoint and CT" \
   "honcho-env |http://192.0.2.100:8000|920" "$(mock_calls)"
-HONCHO_READY=false; TARGETS=""
+mock_reset_log
+run_target_provisioner openclaw
+assert_contains "OpenClaw gets it too" "honcho-env |http://192.0.2.100:8000|920" "$(mock_calls)"
 COMFYUI_CT_ID=917; COMFYUI_IP_CIDR=192.0.2.97/24; COMFYUI_STORAGE=t-store
 COMFYUI_COMMUNITY_SCRIPT_SHA256=def456
 COMFYUI_IMAGE_VARIANT=klein-4b
+mock_reset_log
+run_target_provisioner comfyui
+assert_not_contains "other companions do not get Honcho" "honcho-env" "$(mock_calls)"
+HONCHO_READY=false; TARGETS=""
 mock_reset_log
 run_target_provisioner comfyui
 assert_contains "ComfyUI gets the router CT and the token, and no template" \

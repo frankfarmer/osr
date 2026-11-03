@@ -600,6 +600,11 @@ PY
   chown "$HERMES_USER:$HERMES_USER" "$HERMES_HOME/honcho.json"
   chmod 0600 "$HERMES_HOME/honcho.json"
   run_hermes config set memory.provider honcho
+elif [[ -n $(env_file_get "$HERMES_ETC/settings" HONCHO_URL 2>/dev/null) ]]; then
+  # The last run set up Honcho; HONCHO_URL is now empty, so turn it off.
+  run_hermes config set memory.provider builtin
+  rm -f -- "$HERMES_HOME/honcho.json" "$HONCHO_API_KEY_FILE"
+  note 'Honcho memory is off; Hermes uses its built-in memory.'
 fi
 
 # .env: the API server settings; ROUTER_API_KEY keeps the key for reruns. The

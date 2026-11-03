@@ -560,7 +560,7 @@ cleanup() {
   if [[ $router_kind == ssh ]] && (( ! dry_run )); then
     ssh "${ssh_opts[@]}" -O exit "$ssh_dest" >/dev/null 2>&1 || true
   fi
-  rm -f -- "$stage/admin-token" "$stage/router-api-key" "$stage/backend-keys" "$stage/openclaw-api-key" "$stage/router-auth" 2>/dev/null || true
+  rm -f -- "$stage/admin-token" "$stage/router-api-key" "$stage/backend-keys" "$stage/openclaw-api-key" "$stage/router-auth" "$stage/honcho-api-key" 2>/dev/null || true
   rm -rf -- "$stage" 2>/dev/null || true
   if (( rc != 0 && ! dry_run )); then
     printf 'Setup stopped. CT %s, if created, is retained: fix the error and re-run with --reconfigure.\n' "$CT_ID" >&2
@@ -647,6 +647,12 @@ else
   fi
   OPENCLAW_IP=$(pct exec "$CT_ID" -- sh -c "ip -4 -o addr show dev eth0 | awk 'NR==1 {split(\$4,a,\"/\"); print a[1]}'")
   ipv4 "$OPENCLAW_IP" || die "Cannot detect CT $CT_ID's IPv4 on eth0."
+  # Unset, HONCHO_URL keeps the Honcho memory recorded by the last run, so a
+  # plain --reconfigure keeps its firewall rule; HONCHO_URL= turns it off.
+  if [[ $mode == reconfigure && -z ${HONCHO_URL+set} ]]; then
+    HONCHO_URL=$(pct exec "$CT_ID" -- sh -c 'sed -n "s/^HONCHO_URL=//p" /etc/openclaw-target/settings 2>/dev/null | head -n 1' | tr -d '\r')
+    [[ -z $HONCHO_URL ]] || note "Keeping Honcho memory at $HONCHO_URL (set HONCHO_URL= to turn it off)."
+  fi
 fi
 if [[ -z $ROUTER_IP ]]; then
   if (( dry_run )); then
@@ -812,7 +818,8 @@ if [[ $mode != integrate ]]; then
     "OPENCLAW_DASHBOARD=$OPENCLAW_DASHBOARD")
   # Unset, the guest pins the known SHA-256 of nvm v0.40.4; set (even empty), it is passed on.
   [[ $nvm_sha_set != set ]] || guest_env+=("NVM_INSTALLER_SHA256=$NVM_INSTALLER_SHA256")
-  [[ -z ${HONCHO_URL:-} ]] || guest_env+=("HONCHO_URL=$HONCHO_URL")
+  # Empty turns off a Honcho memory set up earlier.
+  guest_env+=("HONCHO_URL=${HONCHO_URL:-}")
   run pct exec "$CT_ID" -- install -d -m 0700 "$deploy"
   run pct push "$CT_ID" "$source_dir/install-target.sh" "$deploy/install-target.sh" --perms 0755
   run pct push "$CT_ID" "$source_dir/openclaw-gateway.service" "$deploy/openclaw-gateway.service" --perms 0644
@@ -824,17 +831,24 @@ if [[ $mode != integrate ]]; then
     run pct push "$CT_ID" "$stage/router-api-key" "$deploy/router-api-key" --perms 0600
   fi
   if [[ -n ${HONCHO_URL:-} ]]; then
+    honcho_key_push=true
     if (( ! dry_run )); then
+      # The Honcho target's client key is scoped to the shared osr workspace.
       if [[ -n ${HONCHO_CT_ID:-} ]]; then
-        pct exec "$HONCHO_CT_ID" -- cat /etc/honcho-target/api-key > "$stage/honcho-api-key"
+        pct exec "$HONCHO_CT_ID" -- cat /etc/honcho-target/client-api-key > "$stage/honcho-api-key" ||
+          die "Honcho CT $HONCHO_CT_ID has no osr workspace key. Run targets/honcho/provision-lxc.sh --reconfigure for it first."
       elif [[ -n ${HONCHO_API_KEY_FILE:-} ]]; then
         cp -- "$HONCHO_API_KEY_FILE" "$stage/honcho-api-key"
+      elif pct exec "$CT_ID" -- test -s "$deploy/honcho-api-key"; then
+        honcho_key_push=false
+        note "Using the Honcho key already in CT $CT_ID; set HONCHO_CT_ID to fetch it again."
       else
         die 'Set HONCHO_CT_ID or HONCHO_API_KEY_FILE with HONCHO_URL.'
       fi
-      [[ -s $stage/honcho-api-key ]] || die 'Honcho API key is empty.'
+      [[ $honcho_key_push == false || -s $stage/honcho-api-key ]] || die 'Honcho API key is empty.'
     fi
-    run pct push "$CT_ID" "$stage/honcho-api-key" "$deploy/honcho-api-key" --perms 0600
+    [[ $honcho_key_push == false ]] ||
+      run pct push "$CT_ID" "$stage/honcho-api-key" "$deploy/honcho-api-key" --perms 0600
   fi
   run pct exec "$CT_ID" -- env "${guest_env[@]}" bash "$deploy/install-target.sh"
 fi

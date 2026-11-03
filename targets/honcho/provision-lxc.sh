@@ -16,8 +16,8 @@ Honcho API and deriver services, and Honcho's Streamable HTTP MCP server. The
 chat model uses the router; HONCHO_MODEL=fast by default. Set
 HONCHO_EMBEDDING_MODEL and HONCHO_EMBEDDING_DIMENSIONS for an embedding model.
 HONCHO_EMBEDDING_BASE_URL can point directly to its OpenAI-compatible /v1
-endpoint; by default Honcho asks the router /v1/embeddings. HONCHO_REF may pin an upstream tag or
-commit. HONCHO_CLIENT_IPS is a space-separated list of agent CT addresses to
+endpoint; by default Honcho asks the router /v1/embeddings. HONCHO_REF
+(default v3.5.0) may select another upstream tag, main, or a commit. HONCHO_CLIENT_IPS is a space-separated list of agent CT addresses to
 allow through the Proxmox firewall. The router CT is always allowed.
 
 This target registers the MCP server in Open WebUI. --reconfigure updates an
@@ -50,7 +50,7 @@ ONBOOT=${ONBOOT:-1}
 CT_HOSTNAME=${CT_HOSTNAME:-honcho-ai}
 OPENWEBUI_PORT=${OPENWEBUI_PORT:-8080}
 HONCHO_MODEL=${HONCHO_MODEL:-fast}
-HONCHO_REF=${HONCHO_REF:-main}
+HONCHO_REF=${HONCHO_REF:-v3.5.0}
 HONCHO_EMBEDDING_MODEL=${HONCHO_EMBEDDING_MODEL:-}
 HONCHO_EMBEDDING_DIMENSIONS=${HONCHO_EMBEDDING_DIMENSIONS:-}
 HONCHO_EMBEDDING_BASE_URL=${HONCHO_EMBEDDING_BASE_URL:-}
@@ -72,7 +72,7 @@ fi
 [[ $HONCHO_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HONCHO_MODEL.'
 [[ $HONCHO_EMBEDDING_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Set HONCHO_EMBEDDING_MODEL.'
 [[ $HONCHO_EMBEDDING_DIMENSIONS =~ ^[1-9][0-9]{0,5}$ ]] || die 'Set HONCHO_EMBEDDING_DIMENSIONS.'
-[[ -z $HONCHO_EMBEDDING_BASE_URL || $HONCHO_EMBEDDING_BASE_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/v1/?$ ]] || die 'Invalid HONCHO_EMBEDDING_BASE_URL; use host:port/v1.'
+[[ -z $HONCHO_EMBEDDING_BASE_URL || $HONCHO_EMBEDDING_BASE_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]] || die 'Invalid HONCHO_EMBEDDING_BASE_URL; use http(s)://host[:port]/v1.'
 [[ $HONCHO_EMBEDDING_DIMENSIONS_MODE =~ ^(never|auto|always)$ ]] || die 'Invalid HONCHO_EMBEDDING_DIMENSIONS_MODE.'
 [[ $HONCHO_REF =~ ^(main|v[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$ ]] || die 'Invalid HONCHO_REF.'
 [[ $BRIDGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid BRIDGE.'
@@ -111,6 +111,8 @@ if (( dry_run )); then
   exit 0
 fi
 [[ $(id -u) == 0 ]] || die 'Run as root on the Proxmox host.'
+# Checked before anything is created: the run ends by registering MCP.
+[[ -n ${OPENWEBUI_ADMIN_TOKEN:-} ]] || die 'OPENWEBUI_ADMIN_TOKEN is needed to register Honcho MCP in Open WebUI.'
 for tool in pct pvesh pvesm curl; do command -v "$tool" >/dev/null || die "Missing $tool"; done
 pct status "$ROUTER_CT_ID" 2>/dev/null | grep -q 'status: running' || die "Router CT $ROUTER_CT_ID is not running."
 router_ip=$(pct exec "$ROUTER_CT_ID" -- ip -4 route get "$honcho_ip" |
@@ -192,10 +194,10 @@ pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" "HONCHO_MODEL=$HONCHO_MODEL" \
 pct exec "$ROUTER_CT_ID" -- curl -fsS --max-time 10 "http://${honcho_ip}:3000/health" >/dev/null ||
   die 'Router CT cannot reach Honcho MCP; check the CT firewall.'
 
-[[ -n ${OPENWEBUI_ADMIN_TOKEN:-} ]] || die 'OPENWEBUI_ADMIN_TOKEN is needed to register Honcho MCP.'
 printf '%s\n' "$OPENWEBUI_ADMIN_TOKEN" > "$stage/openwebui-admin-token"
-pct exec "$CT_ID" -- cat /etc/honcho-target/api-key > "$stage/honcho-api-key"
-[[ -s $stage/honcho-api-key ]] || die 'Honcho did not generate an API key.'
+# Open WebUI gets the key scoped to the osr workspace, not the admin key.
+pct exec "$CT_ID" -- cat /etc/honcho-target/client-api-key > "$stage/honcho-api-key"
+[[ -s $stage/honcho-api-key ]] || die 'Honcho did not generate its osr workspace key.'
 pct exec "$ROUTER_CT_ID" -- install -d -m 0700 "$router_stage"
 pct push "$ROUTER_CT_ID" "$source_dir/integrate-webui.py" "$router_stage/integrate-webui.py" --perms 0600
 pct push "$ROUTER_CT_ID" "$stage/openwebui-admin-token" "$router_stage/admin-token" --perms 0600

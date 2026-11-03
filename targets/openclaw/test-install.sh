@@ -129,7 +129,7 @@ ROUTER_URL=http://r:8000 OPENCLAW_MODEL=auto OPENCLAW_CONTEXT_LENGTH=65536 OPENC
 # shellcheck disable=SC2034
 OPENCLAW_NODE_VERSION=24 NVM_VERSION=v0.40.4 OPENCLAW_API=true OPENCLAW_PORT=18789 OPENCLAW_DASHBOARD=true origins='[]'
 # shellcheck disable=SC2034
-backend_keys_sha256=none targets_sha256=none providers_sha256=p unit_sha256=u
+backend_keys_sha256=none targets_sha256=none providers_sha256=p unit_sha256=u HONCHO_URL='' honcho_key_sha256=none
 router_key_sha256=$(printf 'sk-secret-key' | sha256sum | cut -d' ' -f1)
 record=$(settings_record)
 [[ $record == *"ROUTER_KEY_SHA256=$router_key_sha256"* && $record != *sk-secret-key* ]] ||

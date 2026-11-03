@@ -13,7 +13,8 @@ local dispatcher reads the router's inventory and task ranking with
 When the [Honcho target](../honcho/README.md) is selected, the installer also
 installs Hermes's Honcho memory plugin and configures the shared `osr`
 workspace. For a separately installed Honcho CT, set `HONCHO_URL` and
-`HONCHO_CT_ID` when provisioning Hermes.
+`HONCHO_CT_ID` when provisioning Hermes. A later `--reconfigure` keeps Honcho as the last
+run set it up (URL, key and egress rule); `HONCHO_URL=` (empty) turns it off.
 
 By default Hermes's **API server** also runs in the CT (`hermes-gateway.service`,
 TCP 8642). It is registered in the router's Open WebUI as a second OpenAI
