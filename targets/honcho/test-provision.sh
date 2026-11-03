@@ -48,6 +48,81 @@ printf '[OPTIONS]\nenable: 1\n' > "$fw"
 assert_contains "a file without rules gets a [RULES] section" "$(printf '[RULES]\nIN ACCEPT -source 192.0.2.85/32')" "$(router_fw_with_honcho "$fw" 192.0.2.85 8000)"
 rm -f "$fw"
 
+describe rotation_recovery
+# shellcheck disable=SC1090
+source <(awk '/^# Rotation recovery helper$/{c=1;next} /^# End rotation recovery helper\.$/{c=0} c' "$provision")
+stage=$(mktemp -d "${TMPDIR:-/tmp}/honcho-rotation-test.XXXXXX")
+# Read by the sourced helpers.
+# shellcheck disable=SC2034
+CT_ID=285 ROUTER_CT_ID=280 OPENWEBUI_PORT=8080 rotation_files=(jwt-secret api-key client-api-key)
+# shellcheck disable=SC2034
+rotation_stage=/root/honcho-rotation-test router_stage=/root/honcho-integration-test
+# pct: logs each call; FAKE_SAME_SECRET makes cmp report an unchanged secret,
+# FAIL_CT makes the Honcho CT unreachable, FAIL_WEBUI fails its restore, and
+# FAIL_ROUTER_RM simulates losing router CT access during cleanup.
+pct() {
+  printf '%s\n' "$*" >> "$stage/calls"
+  if [[ $1 == exec && $2 == 285 && $4 == true && ${FAIL_CT:-false} == true ]]; then return 1; fi
+  if [[ $1 == exec && $4 == cmp ]]; then [[ ${FAKE_SAME_SECRET:-false} == true ]]; return; fi
+  if [[ $1 == exec && $2 == 280 && $4 == python3 && ${FAIL_WEBUI:-false} == true ]]; then return 1; fi
+  if [[ $1 == exec && $2 == 280 && $4 == rm && ${FAIL_ROUTER_RM:-false} == true ]]; then return 1; fi
+  return 0
+}
+calls() { cat "$stage/calls"; }
+: > "$stage/calls"
+assert_ok "a changed secret means the keys were rotated" rotation_applied
+assert_contains "compared inside the Honcho CT" "exec 285 -- cmp -s $rotation_stage/jwt-secret /etc/honcho-target/jwt-secret" "$(calls)"
+FAKE_SAME_SECRET=true
+assert_fail "an unchanged secret means nothing to undo" rotation_applied
+unset FAKE_SAME_SECRET
+FAIL_CT=true
+rc=0; rotation_applied || rc=$?
+assert_eq "an unreachable CT cannot prove the keys stayed unchanged" 2 "$rc"
+unset FAIL_CT
+: > "$stage/calls"
+assert_ok "old credentials and the Open WebUI connection can be restored" restore_rotation
+for file in jwt-secret api-key client-api-key; do
+  assert_contains "$file is put back" "exec 285 -- cp -a -- $rotation_stage/$file /etc/honcho-target/$file" "$(calls)"
+done
+assert_not_contains "the rest of honcho.env is not rolled back" "/etc/honcho-target/honcho.env" "$(calls | grep -v '^exec 285 -- python3 -c')"
+assert_contains "only its JWT secret line is set, inside the CT" 'lines = ["AUTH_JWT_SECRET=" + secret' "$(calls)"
+restart=$(calls | grep -n 'systemctl restart' | cut -d: -f1)
+restore=$(calls | grep -n 'integrate-webui.py --restore' | cut -d: -f1)
+assert_ok "Honcho restarts before Open WebUI gets its old connection back" test "${restart:-999}" -lt "${restore:-0}"
+assert_contains "from the saved snapshot" "--restore http://127.0.0.1:8080 $router_stage/admin-token $router_stage/webui-honcho-snapshot.json" "$(calls)"
+assert_contains "recovery cleans its CT copy after success" "rm -rf -- $rotation_stage" "$(calls)"
+: > "$stage/calls"
+FAIL_WEBUI=true
+assert_fail "a failed Open WebUI restore is reported" restore_rotation
+assert_not_contains "and leaves the CT copy available" "rm -rf -- $rotation_stage" "$(calls)"
+unset FAIL_WEBUI
+# Read by clean_router_stage.
+# shellcheck disable=SC2034
+router_stage_created=false rotation_pending=false
+: > "$stage/calls"
+warning=$(FAIL_ROUTER_RM=true clean_router_stage 2>&1)
+assert_eq "a run that stopped before the router stage existed stays silent" "" "$warning"
+assert_eq "and touches nothing in the router CT" "" "$(calls)"
+# shellcheck disable=SC2034
+router_stage_created=true
+: > "$stage/calls"
+# shellcheck disable=SC2034
+rotation_pending=true
+clean_router_stage
+assert_contains "an unresolved rotation drops the admin token and new key from the router CT" \
+  "exec 280 -- rm -f -- $router_stage/admin-token $router_stage/honcho-api-key $router_stage/integrate-webui.py" "$(calls)"
+assert_not_contains "but keeps the saved connection" "rm -rf -- $router_stage" "$(calls)"
+warning=$(FAIL_ROUTER_RM=true clean_router_stage 2>&1)
+assert_contains "a failed credential cleanup warns with the router CT path" "$router_stage" "$warning"
+: > "$stage/calls"
+# shellcheck disable=SC2034
+rotation_pending=false
+clean_router_stage
+assert_contains "otherwise the whole staging directory goes" "exec 280 -- rm -rf -- $router_stage" "$(calls)"
+warning=$(FAIL_ROUTER_RM=true clean_router_stage 2>&1)
+assert_contains "a failed whole-directory cleanup warns about the admin token" 'it may still hold an Open WebUI admin token' "$warning"
+[[ $stage == "${TMPDIR:-/tmp}"/honcho-rotation-test.* ]] && rm -rf -- "$stage"
+
 describe honcho_guest_files
 install=$here/install-target.sh
 assert_contains "the guest pins a release too" 'ref=${HONCHO_REF:-v3.5.0}' "$(cat "$install")"

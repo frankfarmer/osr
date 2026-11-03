@@ -42,8 +42,8 @@ it (HONCHO_ROUTER_FIREWALL=false leaves that file alone).
 
 This target registers the MCP server in Open WebUI. --reconfigure updates an
 existing Honcho CT and the registration without deleting its PostgreSQL data;
-moving to another HONCHO_REF dumps the database first and restores it if the
-upgrade fails. --rotate-keys (with --reconfigure) replaces the JWT secret and
+every reconfigure dumps the database before migrations and restores it if the
+guest setup fails. --rotate-keys (with --reconfigure) replaces the JWT secret and
 both keys; reconfigure Hermes and OpenClaw with HONCHO_CT_ID afterwards.
 USAGE
 }
@@ -104,7 +104,7 @@ fi
 [[ $HONCHO_EMBEDDING_DIMENSIONS =~ ^[1-9][0-9]{0,5}$ ]] || die 'Set HONCHO_EMBEDDING_DIMENSIONS.'
 [[ -z $HONCHO_EMBEDDING_BASE_URL || $HONCHO_EMBEDDING_BASE_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]] || die 'Invalid HONCHO_EMBEDDING_BASE_URL; use http(s)://host[:port]/v1.'
 [[ $HONCHO_EMBEDDING_DIMENSIONS_MODE =~ ^(never|auto|always)$ ]] || die 'Invalid HONCHO_EMBEDDING_DIMENSIONS_MODE.'
-[[ $HONCHO_STRUCTURED_OUTPUT_MODE =~ ^(|json_schema|json_object)$ ]] || die 'HONCHO_STRUCTURED_OUTPUT_MODE must be json_schema or json_object.'
+[[ -z $HONCHO_STRUCTURED_OUTPUT_MODE || $HONCHO_STRUCTURED_OUTPUT_MODE =~ ^(json_schema|json_object)$ ]] || die 'HONCHO_STRUCTURED_OUTPUT_MODE must be json_schema or json_object.'
 [[ $HONCHO_SKIP_CHAT_PROBE =~ ^(true|false)$ ]] || die 'HONCHO_SKIP_CHAT_PROBE must be true or false.'
 [[ $HONCHO_ROUTER_FIREWALL =~ ^(true|false)$ ]] || die 'HONCHO_ROUTER_FIREWALL must be true or false.'
 [[ -z $HONCHO_BUN_VERSION || $HONCHO_BUN_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Invalid HONCHO_BUN_VERSION.'
@@ -141,9 +141,116 @@ done
 honcho_ip=${IP_CIDR%/*}
 stage=$(mktemp -d "${TMPDIR:-/tmp}/honcho-target.XXXXXX")
 router_stage="/root/honcho-integration-$$"
+rotation_stage="/root/honcho-rotation-$$"
+rotation_pending=false
+rotation_staged=false
+# Set just before the router CT's staging directory is made: a run that stops
+# earlier (not root, no token, router CT down) has nothing there to clean.
+router_stage_created=false
+rotation_files=(jwt-secret api-key client-api-key)
+# Rotation recovery helper
+# rotation_applied: the guest replaced the JWT secret. A guest that stopped
+# before rotating (model probe, leftover rollback data, apt) leaves nothing to undo.
+rotation_applied() {
+  # An unreachable CT is unknown, not proof that the keys stayed unchanged.
+  pct exec "$CT_ID" -- true >/dev/null 2>&1 || return 2
+  if pct exec "$CT_ID" -- test -f "$rotation_stage/jwt-secret"; then
+    ! pct exec "$CT_ID" -- cmp -s "$rotation_stage/jwt-secret" /etc/honcho-target/jwt-secret
+  else
+    pct exec "$CT_ID" -- test -f /etc/honcho-target/jwt-secret
+  fi
+}
+# restore_rotation: only the credentials go back. The rest of honcho.env stays
+# as this run wrote it, matching the code and schema the guest left running
+# (its own rollback copies are gone once it succeeded); only its
+# AUTH_JWT_SECRET line is set to the restored secret, read inside the CT so
+# the secret is never on a command line.
+restore_rotation() {
+  local file attempt
+  for file in "${rotation_files[@]}"; do
+    if pct exec "$CT_ID" -- test -f "$rotation_stage/$file"; then
+      pct exec "$CT_ID" -- cp -a -- "$rotation_stage/$file" "/etc/honcho-target/$file" || return 1
+    else
+      pct exec "$CT_ID" -- rm -f -- "/etc/honcho-target/$file" || return 1
+    fi
+  done
+  pct exec "$CT_ID" -- python3 -c 'import pathlib
+etc = pathlib.Path("/etc/honcho-target")
+secret = (etc / "jwt-secret").read_text(encoding="utf-8").strip()
+env = etc / "honcho.env"
+lines = env.read_text(encoding="utf-8").splitlines()
+lines = ["AUTH_JWT_SECRET=" + secret if line.startswith("AUTH_JWT_SECRET=") else line for line in lines]
+env.write_text("\n".join(lines) + "\n", encoding="utf-8")' || return 1
+  pct exec "$CT_ID" -- systemctl restart honcho-api.service honcho-deriver.service honcho-mcp.service || return 1
+  for attempt in {1..30}; do
+    if pct exec "$CT_ID" -- curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null &&
+       pct exec "$CT_ID" -- curl -fsS --max-time 2 http://127.0.0.1:3000/health >/dev/null; then break; fi
+    (( attempt < 30 )) || return 1
+    sleep 2
+  done
+  pct exec "$ROUTER_CT_ID" -- python3 "$router_stage/integrate-webui.py" --restore \
+    "http://127.0.0.1:$OPENWEBUI_PORT" "$router_stage/admin-token" \
+    "$router_stage/webui-honcho-snapshot.json" || return 1
+  pct exec "$CT_ID" -- rm -rf -- "$rotation_stage" || return 1
+}
+# clean_router_stage: the router CT's staging directory goes, unless a key
+# rotation is still unresolved; then only the saved Open WebUI connection
+# stays. Recovery is a plain --reconfigure, which pushes the credentials again.
+clean_router_stage() {
+  [[ $router_stage_created == true ]] || return 0
+  if [[ $rotation_pending == false ]]; then
+    pct exec "$ROUTER_CT_ID" -- rm -rf -- "$router_stage" >/dev/null 2>&1 ||
+      printf 'Could not remove router CT %s:%s; it may still hold an Open WebUI admin token. Delete it when the CT is reachable.\n' \
+        "$ROUTER_CT_ID" "$router_stage" >&2
+  else
+    pct exec "$ROUTER_CT_ID" -- rm -f -- "$router_stage/admin-token" "$router_stage/honcho-api-key" \
+      "$router_stage/integrate-webui.py" >/dev/null 2>&1 ||
+      printf 'Could not remove staged credentials from router CT %s:%s; delete admin-token and honcho-api-key when the CT is reachable.\n' \
+        "$ROUTER_CT_ID" "$router_stage" >&2
+  fi
+}
+# End rotation recovery helper.
 cleanup() {
-  if (( ! dry_run )); then pct exec "$ROUTER_CT_ID" -- rm -rf -- "$router_stage" >/dev/null 2>&1 || true; fi
+  local rc=$? applied_rc=0
+  trap - EXIT
+  if (( rc != 0 )) && [[ $rotation_pending == true ]]; then
+    rotation_applied || applied_rc=$?
+    if (( applied_rc == 1 )); then
+      rotation_pending=false
+      printf 'The run stopped before the Honcho keys were rotated; they are unchanged.\n' >&2
+    elif (( applied_rc != 0 )); then
+      printf 'Could not verify Honcho key rotation in CT %s; recovery files remain at %s.\n' \
+        "$CT_ID" "$rotation_stage" >&2
+      printf 'The previous Open WebUI connection remains in router CT %s:%s/webui-honcho-snapshot.json.\n' \
+        "$ROUTER_CT_ID" "$router_stage" >&2
+      printf 'Once CT %s is reachable and Honcho is healthy, run this provisioner again with --reconfigure\n' "$CT_ID" >&2
+      printf '(without --rotate-keys): it registers Open WebUI with the key Honcho has then. Reconfigure Hermes\n' >&2
+      printf 'and OpenClaw with HONCHO_CT_ID=%s if the keys did change, then remove both directories.\n' "$CT_ID" >&2
+    fi
+  fi
+  if (( rc != 0 )) && [[ $rotation_pending == true && $applied_rc == 0 ]]; then
+    if restore_rotation; then
+      rotation_staged=false
+      rotation_pending=false
+      printf 'Honcho key rotation was undone after downstream setup failed.\n' >&2
+    else
+      printf 'Honcho key rotation could not be fully undone; the previous secret and keys remain in CT %s:%s.\n' \
+        "$CT_ID" "$rotation_stage" >&2
+      printf 'The previous Open WebUI connection remains in router CT %s:%s/webui-honcho-snapshot.json.\n' \
+        "$ROUTER_CT_ID" "$router_stage" >&2
+      printf 'Open WebUI may hold a key Honcho no longer accepts. Once Honcho is healthy, run this provisioner\n' >&2
+      printf 'again with --reconfigure (without --rotate-keys): it registers Open WebUI with the key Honcho has\n' >&2
+      printf 'now. Then reconfigure Hermes and OpenClaw with HONCHO_CT_ID=%s, and remove %s from CT %s.\n' \
+        "$CT_ID" "$rotation_stage" "$CT_ID" >&2
+      printf 'After recovery, also remove %s from router CT %s.\n' "$router_stage" "$ROUTER_CT_ID" >&2
+    fi
+  fi
+  if [[ $rotation_staged == true && $rotation_pending == false ]]; then
+    pct exec "$CT_ID" -- rm -rf -- "$rotation_stage" >/dev/null 2>&1 || true
+  fi
+  if (( ! dry_run )); then clean_router_stage; fi
   rm -rf -- "$stage"
+  exit "$rc"
 }
 trap cleanup EXIT
 if (( dry_run )); then
@@ -169,6 +276,19 @@ router_url="http://${router_ip}:${router_port}"
 pct exec "$ROUTER_CT_ID" -- awk -F= '$1=="ROUTER_API_KEY" {sub(/^[^=]*=/,""); print; exit}' \
   /app/router/secrets.env > "$stage/router-api-key"
 [[ -s $stage/router-api-key ]] || printf 'no-key\n' > "$stage/router-api-key"
+# Validate the admin token and endpoint before creating or modifying a Honcho CT.
+printf '%s\n' "$OPENWEBUI_ADMIN_TOKEN" > "$stage/openwebui-admin-token"
+router_stage_created=true
+pct exec "$ROUTER_CT_ID" -- install -d -m 0700 "$router_stage"
+pct push "$ROUTER_CT_ID" "$source_dir/integrate-webui.py" "$router_stage/integrate-webui.py" --perms 0600
+pct push "$ROUTER_CT_ID" "$stage/openwebui-admin-token" "$router_stage/admin-token" --perms 0600
+pct exec "$ROUTER_CT_ID" -- python3 "$router_stage/integrate-webui.py" --check \
+  "http://127.0.0.1:$OPENWEBUI_PORT" "$router_stage/admin-token"
+if [[ $rotate_keys == true ]]; then
+  pct exec "$ROUTER_CT_ID" -- python3 "$router_stage/integrate-webui.py" --snapshot \
+    "http://127.0.0.1:$OPENWEBUI_PORT" "$router_stage/admin-token" \
+    "$router_stage/webui-honcho-snapshot.json"
+fi
 
 fw_file="/etc/pve/firewall/${CT_ID}.fw"
 if [[ $mode == create && -e $fw_file ]]; then die "Refusing to replace $fw_file"; fi
@@ -241,6 +361,16 @@ for file in install-target.sh honcho-api.service honcho-deriver.service honcho-m
   pct push "$CT_ID" "$source_dir/$file" "/root/honcho-deploy/$file" --perms 0600
 done
 pct push "$CT_ID" "$stage/router-api-key" /root/honcho-deploy/router-api-key --perms 0600
+if [[ $rotate_keys == true ]]; then
+  pct exec "$CT_ID" -- install -d -m 0700 "$rotation_stage"
+  rotation_staged=true
+  for file in "${rotation_files[@]}"; do
+    if pct exec "$CT_ID" -- test -f "/etc/honcho-target/$file"; then
+      pct exec "$CT_ID" -- cp -a -- "/etc/honcho-target/$file" "$rotation_stage/$file"
+    fi
+  done
+  rotation_pending=true
+fi
 pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" "HONCHO_MODEL=$HONCHO_MODEL" \
   "HONCHO_REF=$HONCHO_REF" "HONCHO_EMBEDDING_MODEL=$HONCHO_EMBEDDING_MODEL" \
   "HONCHO_EMBEDDING_DIMENSIONS=$HONCHO_EMBEDDING_DIMENSIONS" \
@@ -255,17 +385,21 @@ pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" "HONCHO_MODEL=$HONCHO_MODEL" \
 pct exec "$ROUTER_CT_ID" -- curl -fsS --max-time 10 "http://${honcho_ip}:3000/health" >/dev/null ||
   die 'Router CT cannot reach Honcho MCP; check the CT firewall.'
 
-printf '%s\n' "$OPENWEBUI_ADMIN_TOKEN" > "$stage/openwebui-admin-token"
 # Open WebUI gets the key scoped to the osr workspace, not the admin key.
 pct exec "$CT_ID" -- cat /etc/honcho-target/client-api-key > "$stage/honcho-api-key"
 [[ -s $stage/honcho-api-key ]] || die 'Honcho did not generate its osr workspace key.'
-pct exec "$ROUTER_CT_ID" -- install -d -m 0700 "$router_stage"
-pct push "$ROUTER_CT_ID" "$source_dir/integrate-webui.py" "$router_stage/integrate-webui.py" --perms 0600
-pct push "$ROUTER_CT_ID" "$stage/openwebui-admin-token" "$router_stage/admin-token" --perms 0600
 pct push "$ROUTER_CT_ID" "$stage/honcho-api-key" "$router_stage/honcho-api-key" --perms 0600
 pct exec "$ROUTER_CT_ID" -- python3 "$router_stage/integrate-webui.py" \
   "http://127.0.0.1:$OPENWEBUI_PORT" "$router_stage/admin-token" "$router_stage/honcho-api-key" \
   "http://${honcho_ip}:3000"
+if [[ $rotate_keys == true ]]; then
+  rotation_pending=false
+  if ! pct exec "$CT_ID" -- rm -rf -- "$rotation_stage"; then
+    printf 'Honcho is registered with rotated keys, but could not remove the old keys from CT %s:%s. Remove that directory manually.\n' \
+      "$CT_ID" "$rotation_stage" >&2
+  fi
+  rotation_staged=false
+fi
 printf 'Honcho API: http://%s:8000; MCP: http://%s:3000/mcp\n' "$honcho_ip" "$honcho_ip"
 if [[ $rotate_keys == true ]]; then
   printf 'The keys changed: Hermes and OpenClaw lose Honcho until each is reconfigured, e.g.\n'

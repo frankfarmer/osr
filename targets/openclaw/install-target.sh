@@ -287,6 +287,8 @@ OPENCLAW_PORT=${OPENCLAW_PORT:-18789}
 OPENCLAW_DASHBOARD=${OPENCLAW_DASHBOARD:-true}
 HONCHO_URL=${HONCHO_URL:-}
 HONCHO_API_KEY_FILE=${HONCHO_API_KEY_FILE:-$source_dir/honcho-api-key}
+honcho_key_owned=false
+[[ $HONCHO_API_KEY_FILE != "$source_dir/honcho-api-key" ]] || honcho_key_owned=true
 OPENCLAW_SKIP_CHAT_PROBE=${OPENCLAW_SKIP_CHAT_PROBE:-false}
 OC_STATE=$OC_USER_HOME/.openclaw
 OC_CONFIG=$OC_STATE/openclaw.json
@@ -660,7 +662,8 @@ backup=$stage/backup
 install -d -m 0700 "$backup"
 owned_files=("$OC_CONFIG" "$OC_ENV" "$UNIT_DIR/$UNIT" "$UNIT_DIR/$DIRECT_UNIT" "$DIRECT_LIB"
   "$OC_ETC/backend-keys" "$OC_ETC/router.env" "$OC_ETC/settings" "$OC_ETC/targets" "$OC_ETC/providers.json"
-  "$OC_USER_HOME/.honcho/config.json" "$HONCHO_API_KEY_FILE")
+  "$OC_USER_HOME/.honcho/config.json")
+[[ $honcho_key_owned == false ]] || owned_files+=("$HONCHO_API_KEY_FILE")
 for file in "${owned_files[@]}"; do
   if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file").prev"; fi
 done
@@ -798,7 +801,8 @@ PY
 elif [[ -n $prev_honcho_url ]]; then
   # The last run set up Honcho; HONCHO_URL is now empty, so turn it off.
   run_oc plugins disable openclaw-honcho
-  rm -f -- "$OC_USER_HOME/.honcho/config.json" "$HONCHO_API_KEY_FILE"
+  rm -f -- "$OC_USER_HOME/.honcho/config.json"
+  [[ $honcho_key_owned == false ]] || rm -f -- "$HONCHO_API_KEY_FILE"
   note 'The OpenClaw Honcho plugin is disabled.'
 fi
 if [[ $OPENCLAW_DASHBOARD == true ]]; then

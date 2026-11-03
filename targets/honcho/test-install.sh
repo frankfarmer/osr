@@ -230,12 +230,22 @@ out=$(guest) && rc=0 || rc=$?
 assert_eq "an unchanged rerun succeeds" 0 "$rc"
 assert_not_contains "it migrates with the real vector size" "alembic dims=1536" "$(calls)"
 assert_contains "taken from the env file" "alembic dims=from-env-file" "$(calls)"
-assert_not_contains "the same commit needs no dump" "pg_dump" "$(calls)"
+assert_contains "even the same commit gets a rollback dump" "pg_dump -Fc honcho" "$(calls)"
 assert_eq "the admin key is kept" "$admin_key" "$(<"$etc/api-key")"
 assert_eq "and the client key" "$client_key" "$(<"$etc/client-api-key")"
 out=$(guest HONCHO_EMBEDDING_BASE_URL="http://localhost:$(<"$fake/port")/v1") && rc=0 || rc=$?
 assert_eq "a separate embedding endpoint works" 0 "$rc"
 assert_eq "and gets a placeholder key, not the router's" "Bearer no-key" "$(cat "$fake/embedding-auth")"
+
+describe honcho_same_commit_rollback
+before_env=$(<"$etc/honcho.env") before_db=$(<"$fake/db-data")
+printf '1024\n' > "$fake/dims"
+out=$(guest HONCHO_EMBEDDING_DIMENSIONS=1024 FAKE_MIGRATE_FAIL_COMMIT="$(printf 'a%.0s' {1..40})") && rc=0 || rc=$?
+assert_ne "a failed same-commit migration fails the run" 0 "$rc"
+assert_contains "its database is restored from the dump" "pg_restore --exit-on-error -d honcho" "$(calls)"
+assert_eq "including the prior data" "$before_db" "$(<"$fake/db-data")"
+assert_eq "and its embedding configuration" "$before_env" "$(<"$etc/honcho.env")"
+rm -f "$fake/dims"
 
 describe honcho_upgrade
 out=$(guest HONCHO_REF=v3.6.0) && rc=0 || rc=$?
@@ -269,6 +279,18 @@ out=$(guest HONCHO_REF=v3.6.0 HONCHO_ROTATE_KEYS=true FAKE_UNHEALTHY_COMMIT="$(p
 assert_ne "a rotation whose restart fails is undone" 0 "$rc"
 assert_eq "the old secret is back" "$secret" "$(<"$etc/jwt-secret")"
 assert_eq "and the old client key" "$client_key" "$(<"$etc/client-api-key")"
+# That commit is unhealthy before the rotation too, so the rollback cannot
+# bring Honcho back: it keeps its copies, and the next run waits for them.
+assert_contains "a rollback that cannot come back keeps its copies" "the set-aside copies are in $tmp/ct/state/rollback" "$out"
+assert_ok "with the dump" test -s "$tmp/ct/state/rollback/honcho.dump"
+out=$(guest HONCHO_REF=v3.6.0 HONCHO_ROTATE_KEYS=true) && rc=0 || rc=$?
+assert_ne "the next run refuses while they remain" 0 "$rc"
+assert_contains "and names them" "Previous rollback data remains in $tmp/ct/state/rollback" "$out"
+assert_contains "and how to continue" "rm -r -- $tmp/ct/state/rollback" "$out"
+assert_contains "pointing at the README" "When a rollback does not complete" "$out"
+assert_not_contains "before stopping or dumping anything" "pg_dump" "$(calls)"
+assert_eq "the secret is untouched" "$secret" "$(<"$etc/jwt-secret")"
+rm -rf -- "$tmp/ct/state/rollback"
 out=$(guest HONCHO_REF=v3.6.0 HONCHO_ROTATE_KEYS=true) && rc=0 || rc=$?
 assert_eq "a rotation succeeds" 0 "$rc"
 assert_ne "with a new JWT secret" "$secret" "$(<"$etc/jwt-secret")"

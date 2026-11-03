@@ -522,6 +522,11 @@ out=$(guest HONCHO_URL=) || fail "Honcho off: $out"
 : > "$log"
 out=$(guest) || fail "rerun without Honcho: $out"
 grep -q 'memory.provider' "$log" && fail 'a run that never had Honcho changed the memory provider'
+external_honcho_key=$tmp_root/external-honcho-key
+printf 'external-honcho-key\n' > "$external_honcho_key"
+out=$(guest HONCHO_URL=http://192.0.2.85:8000 HONCHO_API_KEY_FILE="$external_honcho_key") || fail "external Honcho on: $out"
+out=$(guest HONCHO_URL= HONCHO_API_KEY_FILE="$external_honcho_key") || fail "external Honcho off: $out"
+[[ $(<"$external_honcho_key") == external-honcho-key ]] || fail 'disabling Honcho deleted a caller-supplied key file'
 pass 'Honcho: plugin and osr config as a private file; a failed run restores it; HONCHO_URL= turns it off'
 
 printf '%s install cases passed. No system files, packages or services were touched.\n' "$passed"

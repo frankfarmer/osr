@@ -46,15 +46,45 @@ run `uv run --frozen`, so they use exactly the locked dependencies.
 ## Upgrades, rollback and keys
 
 A reconfigure keeps the PostgreSQL database, JWT secret and both keys. Before
-it changes anything in an installed CT, it sets aside the env file, keys,
-units and Bun in `/var/lib/honcho-target/rollback/` (root-only). When
-`HONCHO_REF` resolves to another commit it also stops the three services and
-dumps the database there (`pg_dump -Fc`; leave room for it). If any later
+it changes an installed CT, it sets aside the env file, keys, units and Bun
+in `/var/lib/honcho-target/rollback/` (root-only), stops the three services,
+and dumps the database there (`pg_dump -Fc`; leave room for it). The dump is
+taken even when the commit is unchanged because embedding configuration can
+change empty vector columns. If any later
 step fails, the previous commit, its dependencies, the database (dropped,
 recreated and restored from the dump), the env file, keys, units and Bun are
 put back and the services started again; the run reports whether the
 previous version is healthy. The set-aside copies are deleted after a
 successful run or a clean rollback, and kept for inspection otherwise.
+
+### When a rollback does not complete
+
+If the previous version does not come back healthy (or a restore step fails),
+the run says so and keeps `/var/lib/honcho-target/rollback/`. The next
+reconfigure stops at once, changes nothing and points here, so a second run
+cannot overwrite the only copy of the old database. Inside the Honcho CT:
+
+1. Look at `systemctl status honcho-api honcho-deriver honcho-mcp` and
+   `journalctl -u honcho-api -u honcho-deriver -u honcho-mcp`. The rollback
+   has already put the files back; often the cause is outside Honcho (the
+   router, the embedding endpoint, disk space).
+2. If the database is not as it was, restore the dump with the services
+   stopped:
+
+   ```bash
+   systemctl stop honcho-mcp honcho-deriver honcho-api
+   runuser -u postgres -- dropdb --if-exists honcho
+   runuser -u postgres -- createdb -O honcho honcho
+   runuser -u postgres -- pg_restore --exit-on-error -d honcho < /var/lib/honcho-target/rollback/honcho.dump
+   systemctl start honcho-api honcho-deriver honcho-mcp
+   ```
+
+   `honcho.env`, `jwt-secret`, `api-key`, `client-api-key`, the three units and
+   `bun` in the same directory are the copies from before the failed run; they
+   belong in `/etc/honcho-target/`, `/etc/systemd/system/` and `/opt/honcho-bun/`.
+3. Once Honcho is healthy (`curl -fsS http://127.0.0.1:8000/health` and
+   `http://127.0.0.1:3000/health`), remove the directory with
+   `rm -r -- /var/lib/honcho-target/rollback` and run the reconfigure again.
 
 The first install migrates with Honcho's default 1536-dimension columns and
 then sets them to `HONCHO_EMBEDDING_DIMENSIONS`, as upstream documents. Later
@@ -63,10 +93,31 @@ vector columns keeps it. `configure_embeddings.py` refuses to change the size
 of columns that already hold vectors; that needs a new database.
 
 `--reconfigure --rotate-keys` replaces the JWT secret, which invalidates every
-existing key, and makes a new admin key and `osr` workspace key. Open WebUI
-gets the new key in the same run. Hermes and OpenClaw keep failing to reach
-Honcho until each is reconfigured with `HONCHO_CT_ID`; the run prints those
-commands. The keys do not expire.
+existing key, and makes a new admin key and `osr` workspace key. The
+provisioner verifies Open WebUI admin access first and keeps a separate copy
+of the old secret and keys, and of the Open WebUI connection, until MCP
+registration succeeds. Hermes and OpenClaw keep failing to reach Honcho until
+each is reconfigured with `HONCHO_CT_ID`; the run prints those commands. The
+keys do not expire.
+
+If a run with `--rotate-keys` fails, the provisioner checks in the Honcho CT
+whether the secret actually changed:
+
+- **Not changed** (the run stopped before the rotation): the keys are left
+  alone and the copies are removed.
+- **Changed:** it puts back the old secret and keys (and the matching
+  `AUTH_JWT_SECRET` line; the rest of `honcho.env` stays as the run wrote it),
+  restarts Honcho and restores the saved Open WebUI connection.
+- **That restore fails, or the Honcho CT cannot be reached to check:** automatic
+  recovery stops. The old secret and keys stay in `/root/honcho-rotation-<pid>/`
+  in the Honcho CT and the old Open WebUI connection in
+  `/root/honcho-integration-<pid>/webui-honcho-snapshot.json` in the router CT;
+  the run prints both paths. The Open WebUI admin token and the new client key
+  are removed from the router CT when it is reachable; the run warns if this
+  cleanup fails. Once Honcho is reachable and healthy, a plain `--reconfigure`
+  (without `--rotate-keys`) registers Open WebUI with whatever key Honcho has
+  then; reconfigure Hermes and OpenClaw with `HONCHO_CT_ID` if the keys did
+  change, and remove both directories.
 
 ## Install with the router
 
@@ -85,13 +136,14 @@ there for it (`# osr-honcho-router`, replaced when the Honcho address or
 router port changes; every other line stays). Set `HONCHO_ROUTER_FIREWALL=false`
 to manage that file yourself. An embedding endpoint other than the router must
 be reachable from the Honcho CT too.
+
 The selection menu asks for the embedding model, dimensions and endpoint and
 offers `HONCHO_CT_ID`, `HONCHO_IP_CIDR`, `HONCHO_STORAGE`, and
 `HONCHO_TEMPLATE` presets. The CT defaults to 4 cores, 8 GiB RAM, and 48 GiB
-disk. Set `HONCHO_MODEL`, `HONCHO_EMBEDDING_MODEL`,
-`HONCHO_EMBEDDING_DIMENSIONS`, `HONCHO_EMBEDDING_BASE_URL`, or
-`HONCHO_REF`, `HONCHO_STRUCTURED_OUTPUT_MODE` or `HONCHO_SKIP_CHAT_PROBE` before
-launching the installer to override the guest defaults.
+disk. To override the guest defaults, set any of `HONCHO_MODEL`,
+`HONCHO_EMBEDDING_MODEL`, `HONCHO_EMBEDDING_DIMENSIONS`,
+`HONCHO_EMBEDDING_BASE_URL`, `HONCHO_REF`, `HONCHO_STRUCTURED_OUTPUT_MODE` and
+`HONCHO_SKIP_CHAT_PROBE` before launching the installer.
 An Open WebUI admin API key or JWT is required for the MCP registration; a
 run without one stops before it creates anything.
 

@@ -684,6 +684,11 @@ grep -q honcho-key-A "$honcho_cfg" || fail 'a failed run did not put the previou
 out=$(guest HONCHO_URL=) || fail "Honcho off: $out"
 [[ $(kv plugins.entries.openclaw-honcho.enabled "$config") == false ]] || fail 'HONCHO_URL= did not disable the plugin'
 [[ ! -e $honcho_cfg && ! -e $deploy/honcho-api-key ]] || fail 'HONCHO_URL= left the Honcho key behind'
+external_honcho_key=$tmp_root/external-honcho-key
+printf 'external-honcho-key\n' > "$external_honcho_key"
+out=$(guest HONCHO_URL=http://192.0.2.85:8000 HONCHO_API_KEY_FILE="$external_honcho_key") || fail "external Honcho on: $out"
+out=$(guest HONCHO_URL= HONCHO_API_KEY_FILE="$external_honcho_key") || fail "external Honcho off: $out"
+[[ $(<"$external_honcho_key") == external-honcho-key ]] || fail 'disabling Honcho deleted a caller-supplied key file'
 pass 'Honcho: the plugin installed once, enabled with the osr workspace; a failed run restores it; HONCHO_URL= disables it'
 
 printf '%s install cases passed. No system files, packages or services were touched.\n' "$passed"

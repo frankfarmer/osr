@@ -189,6 +189,8 @@ HERMES_DASHBOARD=${HERMES_DASHBOARD:-true}
 HERMES_SKIP_CHAT_PROBE=${HERMES_SKIP_CHAT_PROBE:-false}
 HONCHO_URL=${HONCHO_URL:-}
 HONCHO_API_KEY_FILE=${HONCHO_API_KEY_FILE:-$source_dir/honcho-api-key}
+honcho_key_owned=false
+[[ $HONCHO_API_KEY_FILE != "$source_dir/honcho-api-key" ]] || honcho_key_owned=true
 HERMES_HOME=$HERMES_USER_HOME/.hermes
 HERMES_BIN=$HERMES_USER_HOME/.local/bin/hermes
 UNIT=hermes-gateway.service
@@ -506,9 +508,11 @@ fi
 # Everything this run changes is set aside first; a failure puts it back.
 backup=$stage/backup
 install -d -m 0700 "$backup"
-for file in "$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$UNIT_DIR/$UNIT" \
+owned_files=("$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$UNIT_DIR/$UNIT" \
             "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings" "$HERMES_ETC/targets" \
-            "$HERMES_HOME/honcho.json" "$HONCHO_API_KEY_FILE"; do
+            "$HERMES_HOME/honcho.json")
+[[ $honcho_key_owned == false ]] || owned_files+=("$HONCHO_API_KEY_FILE")
+for file in "${owned_files[@]}"; do
   if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file").prev"; fi
 done
 gateway_was_active=0
@@ -520,9 +524,7 @@ if systemctl is-active --quiet "$DASHBOARD_UNIT" 2>/dev/null; then dashboard_was
 
 restore() {
   local file name
-  for file in "$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$UNIT_DIR/$UNIT" \
-              "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings" "$HERMES_ETC/targets" \
-            "$HERMES_HOME/honcho.json" "$HONCHO_API_KEY_FILE"; do
+  for file in "${owned_files[@]}"; do
     name=$(basename "$file")
     if [[ -f $backup/$name.prev ]]; then cp -a -- "$backup/$name.prev" "$file"; else rm -f -- "$file"; fi
   done
@@ -608,7 +610,8 @@ PY
 elif [[ -n $prev_honcho_url ]]; then
   # The last run set up Honcho; HONCHO_URL is now empty, so turn it off.
   run_hermes config set memory.provider builtin
-  rm -f -- "$HERMES_HOME/honcho.json" "$HONCHO_API_KEY_FILE"
+  rm -f -- "$HERMES_HOME/honcho.json"
+  [[ $honcho_key_owned == false ]] || rm -f -- "$HONCHO_API_KEY_FILE"
   note 'Honcho memory is off; Hermes uses its built-in memory.'
 fi
 

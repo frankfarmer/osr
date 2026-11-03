@@ -2,10 +2,10 @@
 # Run as root inside the dedicated Honcho LXC. The provisioner pushes the
 # router key in a root-only file before calling this script.
 #
-# A rerun on an installed CT sets the configuration, keys and units aside
-# first; when it moves to another Honcho commit it also stops the services and
-# dumps the database. Any failure after that point restores the previous
-# commit, database, configuration and units, and starts them again.
+# A rerun on an installed CT sets the configuration, keys and units aside,
+# stops the services and dumps the database before migrations. Any failure
+# after that point restores the previous commit, database, configuration and
+# units, and starts them again.
 set -Eeuo pipefail
 umask 077
 
@@ -56,7 +56,7 @@ note() { printf '%s\n' "$*" >&2; }
 [[ $embedding_dimensions =~ ^[1-9][0-9]{0,5}$ ]] || die 'Set HONCHO_EMBEDDING_DIMENSIONS to the model vector size.'
 [[ $embedding_url =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]] || die 'Set HONCHO_EMBEDDING_BASE_URL to an HTTP(S) host[:port]/v1 endpoint.'
 [[ $embedding_dimensions_mode =~ ^(never|auto|always)$ ]] || die 'HONCHO_EMBEDDING_DIMENSIONS_MODE must be never, auto or always.'
-[[ $structured_output_mode =~ ^(|json_schema|json_object)$ ]] || die 'HONCHO_STRUCTURED_OUTPUT_MODE must be json_schema or json_object.'
+[[ -z $structured_output_mode || $structured_output_mode =~ ^(json_schema|json_object)$ ]] || die 'HONCHO_STRUCTURED_OUTPUT_MODE must be json_schema or json_object.'
 [[ $skip_probe =~ ^(true|false)$ && $rotate_keys =~ ^(true|false)$ ]] || die 'HONCHO_SKIP_CHAT_PROBE and HONCHO_ROTATE_KEYS are true or false.'
 embedding_url=${embedding_url%/}
 [[ $ref =~ ^(main|v[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$ ]] || die 'HONCHO_REF must be main, a release tag or a full commit SHA.'
@@ -172,7 +172,14 @@ backup=$state/rollback
 if [[ -f $unit_dir/honcho-api.service && -d $opt/.git ]]; then
   existing=true
   prev_commit=$(git -C "$opt" rev-parse HEAD)
-  rm -rf -- "$backup"
+  if [[ -e $backup ]]; then
+    die "Previous rollback data remains in $backup: an earlier run's rollback did not complete.
+It holds what that run set aside: honcho.env, the keys, the units, Bun and, as honcho.dump, the
+database from before that run. Check Honcho (systemctl status honcho-api honcho-deriver honcho-mcp).
+If it is healthy, or after restoring from those copies (see 'When a rollback does not complete' in
+targets/honcho/README.md), remove the directory with: rm -r -- $backup
+Then run the reconfigure again. Nothing was changed by this run."
+  fi
   install -d -m 0700 "$backup"
   for file in "$etc/honcho.env" "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key" "$bun" \
               "$unit_dir/honcho-api.service" "$unit_dir/honcho-deriver.service" "$unit_dir/honcho-mcp.service"; do
@@ -188,10 +195,12 @@ rollback() {
   note 'Honcho setup failed; restoring the previous installation.'
   systemctl stop "${units[@]/%/.service}" >/dev/null 2>&1 || true
   for name in honcho.env jwt-secret api-key client-api-key; do
-    if [[ -f $backup/$name ]]; then cp -a -- "$backup/$name" "$etc/$name"; fi
+    if [[ -f $backup/$name ]]; then cp -a -- "$backup/$name" "$etc/$name"
+    else rm -f -- "$etc/$name"; fi
   done
   for name in "${units[@]}"; do
-    if [[ -f $backup/$name.service ]]; then cp -a -- "$backup/$name.service" "$unit_dir/$name.service"; fi
+    if [[ -f $backup/$name.service ]]; then cp -a -- "$backup/$name.service" "$unit_dir/$name.service"
+    else rm -f -- "$unit_dir/$name.service"; fi
   done
   if [[ -f $backup/bun ]]; then cp -a -- "$backup/bun" "$bun"; fi
   if [[ $(git -C "$opt" rev-parse HEAD 2>/dev/null) != "$prev_commit" ]]; then
@@ -227,9 +236,9 @@ git -C "$opt" fetch --tags origin
 target=$ref
 if [[ $ref == main ]]; then target=origin/main; fi
 new_commit=$(git -C "$opt" rev-parse --verify "${target}^{commit}")
-if $existing && [[ $new_commit != "$prev_commit" ]]; then
-  # Another commit may migrate the database: stop Honcho and dump it first.
-  note "Moving Honcho from ${prev_commit:0:12} to ${new_commit:0:12}; the database is dumped first."
+if $existing; then
+  # Even the same commit can change vector dimensions during reconfigure.
+  note "Reconfiguring Honcho from ${prev_commit:0:12} to ${new_commit:0:12}; the database is dumped first."
   systemctl stop "${units[@]/%/.service}"
   runuser -u postgres -- pg_dump -Fc honcho > "$backup/honcho.dump"
   dump_taken=true

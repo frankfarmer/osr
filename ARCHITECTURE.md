@@ -703,9 +703,11 @@ limited to the router (API and MCP) and the selected agents (API); the
 provisioner keeps one tagged rule in the router CT's firewall file so Honcho
 can reach the router API. The guest probes the chat model with a tool and a
 JSON schema before changing anything. A rerun sets aside the env file, keys,
-units and Bun, and, when the commit changes, stops Honcho and dumps the
-database; any failure restores all of them. `--rotate-keys` replaces the JWT
-secret and both keys.
+units and Bun, stops Honcho and dumps the database before migrations even if
+the commit is unchanged; any failure restores all of them. `--rotate-keys`
+replaces the JWT secret and both keys after checking Open WebUI admin access;
+if a later step fails after the rotation, the provisioner restores only the
+prior secret and keys (and that env line) and the saved Open WebUI connection.
 
 ## 18. Verification and CI
 
