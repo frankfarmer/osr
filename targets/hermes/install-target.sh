@@ -70,6 +70,7 @@ settings_record() {
   printf 'HERMES_API_PORT=%s\n' "$HERMES_API_PORT"
   printf 'HERMES_API_MODEL_NAME=%s\n' "$HERMES_API_MODEL_NAME"
   printf 'HERMES_DASHBOARD=%s\n' "$HERMES_DASHBOARD"
+  printf 'HONCHO_URL=%s\nHONCHO_KEY_SHA256=%s\n' "$HONCHO_URL" "$honcho_key_sha256"
   printf 'ROUTER_KEY_SHA256=%s\n' "$router_key_sha256"
   printf 'BACKEND_KEYS_SHA256=%s\n' "$backend_keys_sha256"
   printf 'TARGETS_SHA256=%s\n' "$targets_sha256"
@@ -186,6 +187,8 @@ HERMES_API_PORT=${HERMES_API_PORT:-8642}
 HERMES_API_MODEL_NAME=${HERMES_API_MODEL_NAME:-hermes-agent}
 HERMES_DASHBOARD=${HERMES_DASHBOARD:-true}
 HERMES_SKIP_CHAT_PROBE=${HERMES_SKIP_CHAT_PROBE:-false}
+HONCHO_URL=${HONCHO_URL:-}
+HONCHO_API_KEY_FILE=${HONCHO_API_KEY_FILE:-$source_dir/honcho-api-key}
 HERMES_HOME=$HERMES_USER_HOME/.hermes
 HERMES_BIN=$HERMES_USER_HOME/.local/bin/hermes
 UNIT=hermes-gateway.service
@@ -206,6 +209,7 @@ targets_source=$TARGETS_FILE
   die 'ROUTER_URL is unset. Resume from the Proxmox host with provision-lxc.sh --reconfigure; direct guest runs must set ROUTER_URL=http://router-address:8000.'
 [[ $ROUTER_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] ||
   die 'ROUTER_URL must be an HTTP(S) host and port, such as http://192.168.11.80:8000.'
+[[ -z $HONCHO_URL || $HONCHO_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] || die 'Invalid HONCHO_URL.'
 ROUTER_URL=${ROUTER_URL%/}
 [[ $HERMES_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HERMES_MODEL.'
 [[ $HERMES_CONTEXT_LENGTH =~ ^[1-9][0-9]{4,6}$ ]] && (( HERMES_CONTEXT_LENGTH >= MIN_CONTEXT )) ||
@@ -295,6 +299,11 @@ fi
 [[ -z $router_key || $router_key =~ ^[A-Za-z0-9._~+/=-]{8,512}$ ]] ||
   die "The router API key in ${ROUTER_API_KEY_FILE} has unexpected characters."
 router_key_sha256=none
+honcho_key_sha256=none
+if [[ -n $HONCHO_URL ]]; then
+  [[ -s $HONCHO_API_KEY_FILE ]] || die "HONCHO_URL needs $HONCHO_API_KEY_FILE."
+  honcho_key_sha256=$(sha256sum "$HONCHO_API_KEY_FILE" | cut -d' ' -f1)
+fi
 if [[ -n $router_key ]]; then
   router_key_sha256=$(printf '%s' "$router_key" | sha256sum | cut -d' ' -f1)
   # curl reads the header from this file, so the key never appears in argv.
@@ -564,6 +573,34 @@ while IFS= read -r name; do
     note "Could not remove provider $name from Hermes's config.yaml; delete it there by hand."
 done < <(target_names "$HERMES_ETC/targets")
 run_hermes config set model.provider custom:osr
+if [[ -n $HONCHO_URL ]]; then
+  if ! python3 - "$HERMES_HOME/plugins/.install-metadata.json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        metadata = json.load(source)
+except (OSError, ValueError):
+    metadata = {}
+sys.exit(0 if "honcho" in metadata else 1)
+PY
+  then
+    plugin_flags=(--enable --yes-deps)
+    [[ ! -d $HERMES_HOME/plugins/honcho ]] || plugin_flags+=(--force)
+    run_hermes plugins install honcho "${plugin_flags[@]}"
+  fi
+  python3 - "$HONCHO_API_KEY_FILE" "$HONCHO_URL" "$HERMES_HOME/honcho.json" <<'PY'
+import json, sys
+key = open(sys.argv[1], encoding="utf-8").read().strip()
+data = {"apiKey": key, "baseUrl": sys.argv[2], "hosts": {"hermes": {
+    "enabled": True, "aiPeer": "hermes", "peerName": "user", "workspace": "osr"}}}
+with open(sys.argv[3], "w", encoding="utf-8") as f:
+    json.dump(data, f)
+    f.write("\n")
+PY
+  chown "$HERMES_USER:$HERMES_USER" "$HERMES_HOME/honcho.json"
+  chmod 0600 "$HERMES_HOME/honcho.json"
+  run_hermes config set memory.provider honcho
+fi
 
 # .env: the API server settings; ROUTER_API_KEY keeps the key for reruns. The
 # placeholder OPENAI_API_KEY=no-key written by earlier versions is removed.

@@ -10,6 +10,10 @@ installer](https://hermes-agent.nousresearch.com/install.sh). Hermes's custom
 OpenAI-compatible provider points at `127.0.0.1:8765/v1` inside the CT. The
 local dispatcher reads the router's inventory and task ranking with
 `ROUTER_API_KEY`, then sends chat requests straight to the chosen model server.
+When the [Honcho target](../honcho/README.md) is selected, the installer also
+installs Hermes's Honcho memory plugin and configures the shared `osr`
+workspace. For a separately installed Honcho CT, set `HONCHO_URL` and
+`HONCHO_CT_ID` when provisioning Hermes.
 
 By default Hermes's **API server** also runs in the CT (`hermes-gateway.service`,
 TCP 8642). It is registered in the router's Open WebUI as a second OpenAI

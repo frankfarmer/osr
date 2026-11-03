@@ -84,6 +84,7 @@ settings_record() {
   printf 'OPENCLAW_API=%s\n' "$OPENCLAW_API"
   printf 'OPENCLAW_PORT=%s\n' "$OPENCLAW_PORT"
   printf 'OPENCLAW_DASHBOARD=%s\n' "$OPENCLAW_DASHBOARD"
+  printf 'HONCHO_URL=%s\nHONCHO_KEY_SHA256=%s\n' "$HONCHO_URL" "$honcho_key_sha256"
   printf 'ORIGINS=%s\n' "$origins"
   printf 'ROUTER_KEY_SHA256=%s\n' "$router_key_sha256"
   printf 'BACKEND_KEYS_SHA256=%s\n' "$backend_keys_sha256"
@@ -284,6 +285,8 @@ fi
 OPENCLAW_API=${OPENCLAW_API:-false}
 OPENCLAW_PORT=${OPENCLAW_PORT:-18789}
 OPENCLAW_DASHBOARD=${OPENCLAW_DASHBOARD:-true}
+HONCHO_URL=${HONCHO_URL:-}
+HONCHO_API_KEY_FILE=${HONCHO_API_KEY_FILE:-$source_dir/honcho-api-key}
 OPENCLAW_SKIP_CHAT_PROBE=${OPENCLAW_SKIP_CHAT_PROBE:-false}
 OC_STATE=$OC_USER_HOME/.openclaw
 OC_CONFIG=$OC_STATE/openclaw.json
@@ -312,6 +315,8 @@ bind=loopback
 [[ $ROUTER_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] ||
   die 'ROUTER_URL must be an HTTP(S) host and port, such as http://192.168.11.80:8000.'
 ROUTER_URL=${ROUTER_URL%/}
+[[ -z $HONCHO_URL || $HONCHO_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] || die 'Invalid HONCHO_URL.'
+HONCHO_URL=${HONCHO_URL%/}
 [[ $OPENCLAW_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid OPENCLAW_MODEL.'
 [[ $OPENCLAW_CONTEXT_LENGTH =~ ^[1-9][0-9]{4,6}$ ]] && (( OPENCLAW_CONTEXT_LENGTH >= MIN_CONTEXT )) ||
   die "OPENCLAW_CONTEXT_LENGTH must be at least $MIN_CONTEXT: OpenClaw's prompt, tools and history need it. The model's host must serve that much too."
@@ -405,6 +410,11 @@ fi
 [[ -z $router_key || $router_key =~ ^[A-Za-z0-9._~+/=-]{8,512}$ ]] ||
   die "The router API key in ${ROUTER_API_KEY_FILE} has unexpected characters."
 router_key_sha256=none
+honcho_key_sha256=none
+if [[ -n $HONCHO_URL ]]; then
+  [[ -s $HONCHO_API_KEY_FILE ]] || die "HONCHO_URL needs $HONCHO_API_KEY_FILE."
+  honcho_key_sha256=$(sha256sum "$HONCHO_API_KEY_FILE" | cut -d' ' -f1)
+fi
 if [[ -n $router_key ]]; then
   router_key_sha256=$(printf '%s' "$router_key" | sha256sum | cut -d' ' -f1)
   # curl reads the header from this file, so the key never appears in argv.
@@ -759,6 +769,29 @@ run_oc config set gateway.auth.token --ref-provider default --ref-source env --r
 run_oc config set gateway.bind "$bind"
 run_oc config set gateway.http.endpoints.chatCompletions.enabled "$OPENCLAW_API" --strict-json
 run_oc config set gateway.controlUi.enabled "$OPENCLAW_DASHBOARD" --strict-json
+if [[ -n $HONCHO_URL ]]; then
+  if ! run_oc plugins list --json | python3 -c 'import json,sys
+plugins=json.load(sys.stdin).get("plugins", [])
+sys.exit(0 if any(p.get("id") == "openclaw-honcho" for p in plugins) else 1)'; then
+    run_oc plugins install @honcho-ai/openclaw-honcho
+  fi
+  run_oc plugins enable openclaw-honcho
+  run_oc config set plugins.entries.openclaw-honcho.hooks.allowConversationAccess true --strict-json
+  run_oc config set plugins.entries.openclaw-honcho.config.baseUrl "$HONCHO_URL"
+  run_oc config set plugins.entries.openclaw-honcho.config.workspaceId osr
+  run_oc config set plugins.entries.openclaw-honcho.config.peerName user
+  install -d -m 0700 -o "$OC_USER" -g "$OC_USER" "$OC_USER_HOME/.honcho"
+  python3 - "$HONCHO_API_KEY_FILE" "$HONCHO_URL" "$OC_USER_HOME/.honcho/config.json" <<'PY'
+import json, sys
+data = {"apiKey": open(sys.argv[1], encoding="utf-8").read().strip(),
+        "baseUrl": sys.argv[2]}
+with open(sys.argv[3], "w", encoding="utf-8") as f:
+    json.dump(data, f)
+    f.write("\n")
+PY
+  chown "$OC_USER:$OC_USER" "$OC_USER_HOME/.honcho/config.json"
+  chmod 0600 "$OC_USER_HOME/.honcho/config.json"
+fi
 if [[ $OPENCLAW_DASHBOARD == true ]]; then
   run_oc config set gateway.controlUi.allowedOrigins "$origins" --strict-json
 fi

@@ -762,6 +762,13 @@ if [[ $mode != integrate && $model_egress == restricted ]]; then
   # An existing CT resolves model server host names now; a new one once it runs.
   if [[ $mode == create ]]; then model_rules_for ips; else model_rules_for all; fi
 fi
+add_honcho_rule() {
+  [[ -n ${HONCHO_URL:-} && $model_egress == restricted ]] || return 0
+  [[ $HONCHO_URL =~ ^http://([0-9]+(\.[0-9]+){3}):([0-9]{2,5})$ ]] ||
+    die 'HONCHO_URL must use an IPv4 address and port for restricted egress.'
+  model_rules+=("OUT ACCEPT -dest ${BASH_REMATCH[1]}/32 -p tcp -dport ${BASH_REMATCH[3]} -log nolog # ${FW_TAG}-model")
+}
+add_honcho_rule
 
 admin_token=''
 if [[ $OPENWEBUI == true ]] && (( ! dry_run )); then
@@ -825,6 +832,7 @@ if [[ $mode == create ]]; then
       printf '+ resolve model server host names inside CT %s and admit their addresses in %s\n' "$CT_ID" "$firewall_file"
     else
       model_rules_for all
+      add_honcho_rule
       write_if_changed "$firewall_file" "$(firewall_config "$EGRESS" "$ROUTER_IP" "$router_dest" "$fw_router_port" "$api_rule_port" "$dashboard_rule_port")" ||
         die "Could not write $firewall_file."
     fi
@@ -869,11 +877,24 @@ if [[ $mode != integrate ]]; then
   if (( dry_run )) || [[ -s $stage/router-api-key ]]; then
     run pct push "$CT_ID" "$stage/router-api-key" "$deploy/router-api-key" --perms 0600
   fi
+  if [[ -n ${HONCHO_URL:-} ]]; then
+    if (( ! dry_run )); then
+      if [[ -n ${HONCHO_CT_ID:-} ]]; then
+        pct exec "$HONCHO_CT_ID" -- cat /etc/honcho-target/api-key > "$stage/honcho-api-key"
+      elif [[ -n ${HONCHO_API_KEY_FILE:-} ]]; then
+        cp -- "$HONCHO_API_KEY_FILE" "$stage/honcho-api-key"
+      else
+        die 'Set HONCHO_CT_ID or HONCHO_API_KEY_FILE with HONCHO_URL.'
+      fi
+      [[ -s $stage/honcho-api-key ]] || die 'Honcho API key is empty.'
+    fi
+    run pct push "$CT_ID" "$stage/honcho-api-key" "$deploy/honcho-api-key" --perms 0600
+  fi
   run pct exec "$CT_ID" -- env "ROUTER_URL=$ROUTER_URL" "HERMES_MODEL=$HERMES_MODEL" \
     "HERMES_CONTEXT_LENGTH=$HERMES_CONTEXT_LENGTH" "HERMES_CHANNEL=$HERMES_CHANNEL" \
     "HERMES_COMMIT=$HERMES_COMMIT" "HERMES_INSTALLER_SHA256=$HERMES_INSTALLER_SHA256" \
     "HERMES_API_SERVER=$api_server" "HERMES_API_PORT=$HERMES_API_PORT" "HERMES_DASHBOARD=$HERMES_DASHBOARD" \
-    "HERMES_API_MODEL_NAME=$HERMES_API_MODEL_NAME" bash "$deploy/install-target.sh"
+    "HERMES_API_MODEL_NAME=$HERMES_API_MODEL_NAME" "HONCHO_URL=${HONCHO_URL:-}" bash "$deploy/install-target.sh"
 fi
 
 # The guest step succeeded: drop the old rules (a stale router address or API

@@ -999,8 +999,8 @@ require_companion_credentials() {
 # LXC, chosen at the start of an interactive install. Services (Gitea,
 # Mattermost) are created first, before the router is built, and give it their
 # URL, token or webhook. Model targets are added to the router's server list up
-# front and created after the router; companions need the router's Open WebUI,
-# so they come last.
+# front and created after the router. Memory infrastructure follows the model
+# servers, then companions that need the router's Open WebUI come last.
 #
 # One line per target: name|phase|label|router entry (@IP@ and @PORT@ filled
 # in)|key kind (Strata-style servers generate an API key the router needs)|
@@ -1012,17 +1012,18 @@ target_table() {
     'gitea|service|Gitea: the configuration repository (configured for OSR)|||' \
     'mattermost|service|Mattermost: health alerts (team, channel and webhook made for you)|||' \
     'ollama|model|Ollama from the PVE community script (NVIDIA, AMD or Intel Arc GPU when present)|http://@IP@:11434||optional:nvidia,amd,intel' \
-    'llamacpp|model|llama.cpp llama-server behind an Ollama bridge (CUDA, or Vulkan on AMD/Intel Arc)|http://@IP@:11434||required:nvidia,amd,intel' \
     'airllm|model|AirLLM: one model larger than RAM/VRAM, streamed from disk (slow)|http://@IP@:11434||:nvidia' \
+    'llamacpp|model|llama.cpp llama-server behind an Ollama bridge (CUDA, or Vulkan on AMD/Intel Arc)|http://@IP@:11434||required:nvidia,amd,intel' \
     'strata|model|Strata (Qwen3.8-Flash-Next) on an NVIDIA GPU|strata+http://@IP@:@PORT@|strata|required:nvidia' \
     'basalt|model|Basalt on a Blackwell GPU (CUDA 13)|basalt+http://@IP@:@PORT@|basalt|required:nvidia:rtx50' \
     'maya|model|Project Maya (GLM-5.3-Flash) on an NVIDIA GPU|maya+http://@IP@:@PORT@|maya|required:nvidia' \
     'xolotl|model|Xolotl (DeepSeek-V4.1-Flash, 552B) on a 24 GB NVIDIA GPU; ~372 GB download|xolotl+http://@IP@:@PORT@|xolotl|required:nvidia' \
     'avalon|model|Avalon (Qwen3.8-Flash-Next, llama.cpp fork) on a 16-20 GB AMD RX 7000 (ROCm) or NVIDIA GPU; ~90 GiB download|avalon+http://@IP@:@PORT@|avalon|required:amd,nvidia:rdna3,rtx20,rtx30,rtx40,rtx50' \
-    'open-terminal|companion|Open Terminal: a shell tool for Open WebUI|||' \
+    'honcho|companion|Honcho AI: shared agent memory and MCP tools; CPU, needs an embedding endpoint|||' \
     'hermes|companion|Hermes Agent: offered in Open WebUI as the model hermes-agent|||' \
-    'comfyui|companion|ComfyUI: image generation for Open WebUI (NVIDIA, AMD or Intel Arc GPU when present)|||optional:nvidia,amd,intel' \
-    'openclaw|companion|OpenClaw: agent offered in Open WebUI as the model openclaw|||'
+    'openclaw|companion|OpenClaw: agent offered in Open WebUI as the model openclaw|||' \
+    'open-terminal|companion|Open Terminal: a shell tool for Open WebUI|||' \
+    'comfyui|companion|ComfyUI: image generation for Open WebUI (NVIDIA, AMD or Intel Arc GPU when present)|||optional:nvidia,amd,intel'
 }
 # target_field NAME FIELD: one column of the table (phase, label, entry, key, gpu).
 target_field() {
@@ -1475,8 +1476,25 @@ normalize_target_selection() {
   printf '%s\n' "${picked[*]:-}"
 }
 
+target_menu_group() {
+  case "$1" in
+    gitea|mattermost) echo 'Services (CPU): configuration and alerts; created before OSR.' ;;
+    ollama|airllm) echo 'Model servers (CPU or optional GPU):' ;;
+    honcho) echo 'Memory infrastructure (CPU): created before agents.' ;;
+    *)
+      case "$(target_field "$1" phase)" in
+        model) echo 'Model servers (GPU required by default):' ;;
+        companion)
+          case "$1" in
+            hermes|openclaw) echo 'Agents (CPU): connected to Open WebUI and optional Honcho memory.' ;;
+            open-terminal) echo 'Open WebUI tools (CPU):' ;;
+            comfyui) echo 'Image generation (GPU optional):' ;;
+          esac ;;
+      esac ;;
+  esac
+}
 prompt_target_selection() {
-  local name phase label i=0 prev_phase=""
+  local name phase label group i=0 prev_group=""
   TARGETS=""
   # INSTALL_GITEA / INSTALL_MATTERMOST (the earlier yes/no questions) pre-select.
   [[ "$INSTALL_GITEA" != "true" ]] || INSTALL_TARGETS="gitea ${INSTALL_TARGETS:-}"
@@ -1497,15 +1515,10 @@ prompt_target_selection() {
   echo "--- Optional targets, each in its own LXC ---"
   while IFS='|' read -r name phase label _; do
     i=$((i + 1))
-    if [[ "$phase" != "$prev_phase" ]]; then
-      case "$phase" in
-        service) echo "Services: created now, before OSR, and connected to it." ;;
-        model) echo "Model servers: created after OSR and added to its server list." ;;
-        companion) echo "Companions: added to OSR's Open WebUI once it is running." ;;
-      esac
-    fi
+    group="$(target_menu_group "$name")"
+    [[ "$group" == "$prev_group" ]] || echo "$group"
     printf '  %d) %-14s %s\n' "$i" "$name" "$label"
-    prev_phase="$phase"
+    prev_group="$group"
   done < <(target_table)
   echo "Target-specific settings (GPU_DEVICES, BACKEND, STRATA_MODEL, HERMES_MODEL, OPENCLAW_MODEL, COMFYUI_MODEL_URL, ...) are read"
   echo "from the environment as each target's README describes."
@@ -1572,6 +1585,8 @@ show_strata_template_alternatives() {
   done < <(template_storages)
 }
 valid_comfyui_variant() { [[ $1 == klein-4b || $1 == klein-9b ]]; }
+valid_honcho_model() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; }
+valid_honcho_embedding_url() { [[ $1 =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/v1/?$ ]]; }
 valid_hf_token() { [[ $1 =~ ^hf_[A-Za-z0-9]{30,}$ ]]; }
 
 # host_gpu_cuda_arch: GPU 0's compute capability (86), from the GPU step or,
@@ -1667,6 +1682,13 @@ prompt_target_settings() {
       echo "    WARNING: gateway ${GATEWAY} is outside ${ip}." >&2
     fi
     prompt_until_valid "    Storage" "$storage_var" "${!storage_var:-$STORAGE}" valid_nonempty || return 1
+    if [[ $name == honcho ]]; then
+      echo "    Honcho needs an OpenAI-compatible embedding endpoint reachable from its CT."
+      echo "    For an Ollama CT, pull an embedding model there and use http://<ollama-ip>:11434/v1."
+      prompt_until_valid "    Embedding model" HONCHO_EMBEDDING_MODEL "${HONCHO_EMBEDDING_MODEL:-}" valid_honcho_model || return 1
+      prompt_until_valid "    Embedding dimensions" HONCHO_EMBEDDING_DIMENSIONS "${HONCHO_EMBEDDING_DIMENSIONS:-}" valid_positive_int || return 1
+      prompt_until_valid "    Embedding base URL" HONCHO_EMBEDDING_BASE_URL "${HONCHO_EMBEDDING_BASE_URL:-}" valid_honcho_embedding_url || return 1
+    fi
     if [[ $name == comfyui ]]; then
       echo "    Image model; the CT install downloads its diffusion model, text encoder and VAE:"
       echo "      klein-4b  FLUX.2 Klein 4B distilled: Apache 2.0, a 12.5 GB download"
@@ -1749,7 +1771,7 @@ preset_target_model_servers() {
 # and the like must not reach a target, and the admin token only reaches the
 # companions (as an environment variable, never an argument).
 run_target_provisioner() {
-  local name="$1" phase script id ip storage template image_variant hf_token="" gpu_env cuda_env
+  local name="$1" phase script id ip storage template image_variant hf_token="" gpu_env cuda_env client_ips="" client
   local -a flags=()
   phase="$(target_field "$name" phase)" || return 1
   script="${TARGETS_DIR}/${name}/provision-lxc.sh"
@@ -1761,11 +1783,22 @@ run_target_provisioner() {
   image_variant="$(target_setting "$name" IMAGE_VARIANT)"
   # Only ComfyUI's gated klein-9b weights need the Hugging Face token.
   if [[ $name == comfyui && $image_variant == klein-9b ]]; then hf_token="${TARGET_HF_TOKEN:-}"; fi
+  if [[ $name == honcho ]]; then
+    for client in hermes openclaw; do
+      if [[ " ${TARGETS:-} " == *" ${client} "* ]]; then
+        client_ips+="${client_ips:+ }$(target_setting "$client" IP_CIDR | cut -d/ -f1)"
+      fi
+    done
+  fi
   [[ -n "$id" && -n "$ip" ]] || { echo "${name}: no CT ID or address was chosen." >&2; return 1; }
   case "$name" in
     ollama|airllm) flags=(--install-target) ;;
     llamacpp) if llamacpp_model_given; then flags=(--install-target); fi ;;
     open-terminal|hermes|openclaw) template="${template:-${TEMPLATE_REF:-}}" ;;
+    honcho)
+      if [[ -z $template && ${TEMPLATE_REF:-} == *:vztmpl/debian-13-* ]]; then
+        template=$TEMPLATE_REF
+      fi ;;
   esac
   local script_url script_sha channel="${MATTERMOST_CHANNEL:-ollama-monitor}"
   script_url="$(target_setting "$name" COMMUNITY_SCRIPT_URL)"
@@ -1798,6 +1831,16 @@ run_target_provisioner() {
     [[ -z "$cuda_env" ]] || export "${cuda_env?}"
     if [[ "$phase" == companion ]]; then
       export ROUTER_CT_ID="$router_ct" OPENWEBUI_PORT="$webui_port"
+      if [[ "$name" == honcho ]]; then
+        export HONCHO_EMBEDDING_MODEL="${HONCHO_EMBEDDING_MODEL:-}" \
+          HONCHO_EMBEDDING_DIMENSIONS="${HONCHO_EMBEDDING_DIMENSIONS:-}" \
+          HONCHO_EMBEDDING_BASE_URL="${HONCHO_EMBEDDING_BASE_URL:-}"
+        [[ -z $client_ips ]] || export HONCHO_CLIENT_IPS="$client_ips"
+      fi
+      if [[ "$name" != honcho && "${HONCHO_READY:-false}" == true ]]; then
+        export HONCHO_URL="http://${HONCHO_IP_CIDR%/*}:8000"
+        export HONCHO_CT_ID="$(target_setting honcho CT_ID)"
+      fi
       OPENWEBUI_ADMIN_TOKEN="$admin_token" exec bash "$script" "${flags[@]}"
     fi
     exec bash "$script" "${flags[@]}"
@@ -1903,6 +1946,7 @@ provision_selected_targets() {
   local name id companions=false status=0
   local -a key_targets=()
   declare -A result=()
+  HONCHO_READY=false
   [[ -n "${TARGETS:-}" ]] || return 0
   for name in $TARGETS; do
     case "$(target_field "$name" phase)" in
@@ -1948,7 +1992,10 @@ provision_selected_targets() {
         [[ "$(target_field "$name" phase)" == companion ]] || continue
         echo
         echo "=== Target ${name} (CT $(target_setting "$name" CT_ID)) ==="
-        if run_target_provisioner "$name"; then result[$name]=ok; else result[$name]=failed; fi
+        if run_target_provisioner "$name"; then
+          result[$name]=ok
+          [[ "$name" != honcho ]] || HONCHO_READY=true
+        else result[$name]=failed; fi
       done
     else
       for name in $TARGETS; do
@@ -1968,7 +2015,7 @@ provision_selected_targets() {
       status=1
       if [[ "${result[$name]}" == "failed (OSR key apply)" ]]; then
         echo "                 run pct exec ${CT_ID} -- /usr/local/bin/manage-model-servers apply"
-      elif [[ ( "$name" == hermes || "$name" == openclaw ) && "${result[$name]}" == failed ]]; then
+      elif [[ ( "$name" == honcho || "$name" == hermes || "$name" == openclaw ) && "${result[$name]}" == failed ]]; then
         echo "                 see targets/${name}/README.md; if CT ${id} exists, resume on the Proxmox host with:"
         echo "                 CT_ID=${id} ROUTER_CT_ID=${CT_ID} bash targets/${name}/provision-lxc.sh --reconfigure"
       else

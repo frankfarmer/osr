@@ -34,7 +34,7 @@ bash ollama-smart-router-install.sh
 
 The installer asks which targets to create: Gitea and Mattermost services;
 Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl and Avalon model servers; and
-Open Terminal, Hermes, ComfyUI and OpenClaw companions. Enter comma-separated names or
+Honcho memory, Hermes and OpenClaw agents, and Open Terminal and ComfyUI tools. Enter comma-separated names or
 menu numbers, or press Enter for none. Gitea stores configuration history and
 Mattermost receives alerts; both are optional and can also be installed
 separately from [targets/gitea](targets/gitea/README.md) and
@@ -43,8 +43,8 @@ separately from [targets/gitea](targets/gitea/README.md) and
 For each selected target, provide a unique CT ID, static IP/CIDR and storage.
 Strata, Basalt, Maya, Xolotl and Avalon also ask for a template. The installer then
 checks the host GPU, creates selected service CTs, verifies the Gitea token,
-creates the router CT, provisions model targets, and finally connects selected
-companions to Open WebUI. Choose **Default** in the Gitea, Mattermost and
+creates the router CT, provisions model targets, then Honcho and the selected
+agents and tools. The menu groups CPU and GPU targets by purpose. Choose **Default** in the Gitea, Mattermost and
 ComfyUI community-script menus. Open WebUI companions require an admin API key:
 create the first admin account in the browser, enable API keys and create one
 when prompted. A failed service stops the install before the router is built;
@@ -63,6 +63,7 @@ Generated Gitea and Mattermost admin passwords are in
 |---|---|---|
 | Router, Gitea, ComfyUI | Debian 13 | — |
 | Open Terminal, Hermes, OpenClaw | Debian 13 | Debian 12 |
+| Honcho | Debian 13 | — |
 | Ollama | Debian 13 | Debian 12; Ubuntu 22.04, 24.04, 26.04 (`OLLAMA_CT_OS`, `OLLAMA_CT_VERSION`) |
 | Mattermost | Ubuntu 24.04 | Ubuntu 22.04 (`MATTERMOST_CT_VERSION`); Ubuntu only |
 | AirLLM | chosen at prompt | Debian 12/13; Ubuntu 24.04/26.04 (Python 3.11+) |
@@ -225,6 +226,11 @@ and recovery steps. Provisioners support `--dry-run`.
 
 [Gitea](targets/gitea/README.md) and
 [Mattermost](targets/mattermost/README.md) provide config history and alerts.
+[Honcho AI](targets/honcho/README.md) provides CPU-only agent memory and an
+MCP tool server for Open WebUI. Selecting it with Hermes or OpenClaw connects
+their native memory integrations to the same `osr` workspace. Honcho needs an
+OpenAI-compatible embedding model; the installer asks for its name, vector
+dimensions and `/v1` endpoint.
 [Open Terminal](targets/open-terminal/README.md) adds a terminal tool.
 [Hermes](targets/hermes/README.md) is an agent client, registered in Open
 WebUI as `hermes-agent`, not a pool model; it needs a tool-capable model with
@@ -249,7 +255,7 @@ servers, services and companions); the last tag names the target.
 |---|---|
 | Router (`ollama-smart-router-install.sh`) | `ai`, `ai-tools`, `osr-router`, `openwebui` |
 | Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl, Avalon, ComfyUI | `ai`, `ai-model`, `osr-target`, `<target>` |
-| Gitea, Mattermost, Open Terminal, Hermes, OpenClaw | `ai`, `ai-tools`, `osr-target`, `<target>` |
+| Gitea, Mattermost, Honcho, Open Terminal, Hermes, OpenClaw | `ai`, `ai-tools`, `osr-target`, `<target>` |
 
 `<target>` is the target's directory name under `targets/` (`ollama`,
 `llamacpp`, `open-terminal` and so on). The Proxmox community script that

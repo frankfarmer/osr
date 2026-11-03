@@ -10,6 +10,11 @@ does. OpenClaw's provider `osr` points at `127.0.0.1:8765/v1` inside the CT:
 the Hermes target's dispatcher (`targets/hermes/direct-dispatch.py`), run with
 this target's files. It reads the router's inventory and task ranking with
 `ROUTER_API_KEY`, then sends chat requests straight to the chosen model server.
+When the [Honcho target](../honcho/README.md) is selected, the installer also
+installs the official OpenClaw Honcho plugin with conversation access and the
+shared `osr` workspace. It runs alongside OpenClaw's own memory plugin. For a
+separately installed Honcho CT, set `HONCHO_URL` and `HONCHO_CT_ID` when
+provisioning OpenClaw.
 
 OpenClaw's **Gateway** (`openclaw-gateway.service`, TCP 18789) serves the
 agent, its Control UI and, with Open WebUI, its OpenAI-compatible

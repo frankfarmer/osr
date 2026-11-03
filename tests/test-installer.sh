@@ -162,7 +162,7 @@ unset MATTERMOST_WEBHOOK_URL CONFIG_SOURCE BRIDGE NAMESERVER MATTERMOST_CHANNEL 
 # and restored by re-sourcing the extracted functions at the end.
 _tt="$(mktemp -d)"
 TARGETS_DIR="$_tt/targets"
-for _name in gitea mattermost ollama llamacpp airllm strata basalt maya xolotl avalon open-terminal hermes comfyui openclaw; do
+for _name in gitea mattermost ollama airllm llamacpp strata basalt maya xolotl avalon honcho hermes openclaw open-terminal comfyui; do
   mkdir -p "$TARGETS_DIR/$_name"
   # The fake provisioner records what it was given: settings, flags, and
   # whether the admin token reached it (by value, compared to $EXPECT_TOKEN).
@@ -175,6 +175,10 @@ printf 'provision %s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$(basename "$(dirna
 [[ -z ${COMMUNITY_SCRIPT_URL:-}${COMMUNITY_SCRIPT_SHA256:-}${MATTERMOST_CHANNEL:-} ]] ||
   printf 'service-env %s|%s|%s\n' "${COMMUNITY_SCRIPT_URL:-}" "${COMMUNITY_SCRIPT_SHA256:-}" "${MATTERMOST_CHANNEL:-}" >> "$MOCK_LOG"
 [[ -z ${COMFYUI_IMAGE_VARIANT:-} ]] || printf 'image-variant %s\n' "$COMFYUI_IMAGE_VARIANT" >> "$MOCK_LOG"
+[[ -z ${HONCHO_CLIENT_IPS:-}${HONCHO_URL:-}${HONCHO_CT_ID:-} ]] ||
+  printf 'honcho-env %s|%s|%s\n' "${HONCHO_CLIENT_IPS:-}" "${HONCHO_URL:-}" "${HONCHO_CT_ID:-}" >> "$MOCK_LOG"
+[[ $(basename "$(dirname "$0")") != honcho ]] ||
+  printf 'embedding-env %s|%s|%s\n' "${HONCHO_EMBEDDING_MODEL:-}" "${HONCHO_EMBEDDING_DIMENSIONS:-}" "${HONCHO_EMBEDDING_BASE_URL:-}" >> "$MOCK_LOG"
 [[ -z ${GPU:-}${BACKEND:-}${GPU_DEVICES:-}${GPU_CARD:-} ]] ||
   printf 'gpu-env %s|%s|%s|%s\n' "${GPU:-}" "${BACKEND:-}" "${GPU_DEVICES:-}" "${GPU_CARD:-}" >> "$MOCK_LOG"
 [[ -z ${CUDA_VERSION:-}${MAYA_CUDA_VERSION:-}${XOLOTL_CUDA_VERSION:-}${AVALON_CUDA_VERSION:-} ]] ||
@@ -188,8 +192,8 @@ done
 unset _name
 
 describe target_table
-assert_eq "lists the fourteen targets in menu order" \
-  "gitea mattermost ollama llamacpp airllm strata basalt maya xolotl avalon open-terminal hermes comfyui openclaw" \
+assert_eq "lists the fifteen targets in menu order" \
+  "gitea mattermost ollama airllm llamacpp strata basalt maya xolotl avalon honcho hermes openclaw open-terminal comfyui" \
   "$(target_table | cut -d'|' -f1 | paste -sd' ')"
 
 describe target_field
@@ -198,6 +202,8 @@ assert_eq "companion phase" companion "$(target_field hermes phase)"
 assert_eq "ComfyUI is a companion of Open WebUI" companion "$(target_field comfyui phase)"
 assert_eq "and not a model server" "" "$(target_field comfyui entry)"
 assert_eq "OpenClaw is a companion" companion "$(target_field openclaw phase)"
+assert_eq "Honcho is a CPU memory companion" companion "$(target_field honcho phase)"
+assert_eq "and has no GPU requirement" "" "$(target_field honcho gpu)"
 assert_eq "and runs without a GPU" "" "$(target_field openclaw gpu)"
 assert_eq "service phase" service "$(target_field gitea phase)"
 assert_eq "router entry template" "strata+http://@IP@:@PORT@" "$(target_field strata entry)"
@@ -549,7 +555,7 @@ describe valid_target_selection
 for _sel in "" none "1,10" "ollama hermes" " 2 , strata " "8" "13" "14" "comfyui" "xolotl" "avalon" "openclaw"; do
   assert_ok "accepts '${_sel}'" valid_target_selection "$_sel"
 done
-for _sel in 0 15 bogus "ollama,bogus"; do
+for _sel in 0 16 bogus "ollama,bogus"; do
   assert_fail "rejects '${_sel}'" valid_target_selection "$_sel"
 done
 unset _sel
@@ -570,15 +576,17 @@ INSTALL_TARGETS=bogus
 assert_fail "an invalid preset is refused" prompt_target_selection
 NONINTERACTIVE=false; INSTALL_TARGETS=""
 _out="$(mktemp)"
-prompt_target_selection > "$_out" 2>&1 <<< $'15\n4,hermes\n'
+prompt_target_selection > "$_out" 2>&1 <<< $'16\n5,hermes\n'
 assert_eq "re-prompts until valid, then keeps the choice" "llamacpp hermes" "$TARGETS"
 assert_contains "the menu lists the model servers" "9) xolotl" "$(cat "$_out")"
 assert_contains "Avalon among them" "10) avalon" "$(cat "$_out")"
 assert_contains "the menu lists the companions" "12) hermes" "$(cat "$_out")"
-assert_contains "ComfyUI among them" "13) comfyui" "$(cat "$_out")"
-assert_contains "OpenClaw last, keeping the earlier numbers" "14) openclaw" "$(cat "$_out")"
-assert_contains "and separates them from the model servers" "Companions:" "$(cat "$_out")"
-assert_contains "the services come first" "Services: created now, before OSR" "$(cat "$_out")"
+assert_contains "ComfyUI among them" "15) comfyui" "$(cat "$_out")"
+assert_contains "OpenClaw is grouped with agents" "13) openclaw" "$(cat "$_out")"
+assert_contains "memory comes before agents" "Memory infrastructure (CPU)" "$(cat "$_out")"
+assert_contains "the GPU model group is explicit" "Model servers (GPU required by default)" "$(cat "$_out")"
+assert_contains "the CPU model group is explicit" "Model servers (CPU or optional GPU)" "$(cat "$_out")"
+assert_contains "the services come first" "Services (CPU): configuration and alerts" "$(cat "$_out")"
 assert_contains "starting with Gitea" "1) gitea" "$(cat "$_out")"
 INSTALL_TARGETS=""; INSTALL_GITEA=true; INSTALL_MATTERMOST=true
 prompt_target_selection > /dev/null 2>&1 <<< $'\n'
@@ -968,6 +976,15 @@ TARGET_HF_TOKEN="hf_A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5"; unset COMFYUI_IMA
 prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nklein-9b\n'
 assert_not_contains "a preset HF_TOKEN is not asked for" "Hugging Face token (hf_" "$(cat "$_out")"
 TARGET_HF_TOKEN=""; unset COMFYUI_IMAGE_VARIANT
+TARGETS=honcho
+HONCHO_CT_ID=934; HONCHO_IP_CIDR=192.0.2.101/24; HONCHO_STORAGE=router-store
+unset HONCHO_EMBEDDING_MODEL HONCHO_EMBEDDING_DIMENSIONS HONCHO_EMBEDDING_BASE_URL
+prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nnomic-embed-text\n768\nhttp://192.0.2.90:11434/v1\n'
+assert_eq "Honcho prompts for a real embedding model" nomic-embed-text "$HONCHO_EMBEDDING_MODEL"
+assert_eq "and its vector dimensions" 768 "$HONCHO_EMBEDDING_DIMENSIONS"
+assert_eq "and the embedding endpoint" http://192.0.2.90:11434/v1 "$HONCHO_EMBEDDING_BASE_URL"
+assert_contains "the prompt explains the endpoint" "Ollama CT" "$(cat "$_out")"
+TARGETS=""
 
 describe valid_comfyui_variant
 assert_ok "klein-4b" valid_comfyui_variant klein-4b
@@ -1016,6 +1033,7 @@ STRATA_CT_ID=912; STRATA_STORAGE=gpu-store; STRATA_TEMPLATE=local:vztmpl/ubuntu-
 LLAMACPP_CT_ID=913; LLAMACPP_IP_CIDR=192.0.2.93/24; LLAMACPP_STORAGE=t-store
 HERMES_CT_ID=914; HERMES_IP_CIDR=192.0.2.94/24; HERMES_STORAGE=t-store
 OPENCLAW_CT_ID=918; OPENCLAW_IP_CIDR=192.0.2.98/24; OPENCLAW_STORAGE=t-store
+HONCHO_CT_ID=920; HONCHO_IP_CIDR=192.0.2.100/24; HONCHO_STORAGE=t-store
 TARGET_ADMIN_TOKEN=owui-admin-secret; export EXPECT_TOKEN=owui-admin-secret
 mock_reset_log
 assert_ok "runs Ollama's provisioner" run_target_provisioner ollama
@@ -1069,6 +1087,21 @@ mock_reset_log
 run_target_provisioner openclaw
 assert_eq "OpenClaw too gets the router CT, the router's template and the token" \
   "provision openclaw|918|192.0.2.98/24|192.0.2.1|t-store|vmbr2|local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst|||910|8080|match|" "$(mock_calls)"
+TARGETS="honcho hermes openclaw"; HONCHO_READY=false
+mock_reset_log
+run_target_provisioner honcho
+assert_contains "Honcho reuses the router's Debian 13 template" \
+  "provision honcho|920|192.0.2.100/24|192.0.2.1|t-store|vmbr2|local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst" "$(mock_calls)"
+assert_contains "Honcho gets both selected agent addresses" \
+  "honcho-env 192.0.2.94 192.0.2.98||" "$(mock_calls)"
+assert_contains "Honcho gets the prompted embedding settings" \
+  "embedding-env nomic-embed-text|768|http://192.0.2.90:11434/v1" "$(mock_calls)"
+HONCHO_READY=true
+mock_reset_log
+run_target_provisioner hermes
+assert_contains "Hermes gets the provisioned Honcho endpoint and CT" \
+  "honcho-env |http://192.0.2.100:8000|920" "$(mock_calls)"
+HONCHO_READY=false; TARGETS=""
 COMFYUI_CT_ID=917; COMFYUI_IP_CIDR=192.0.2.97/24; COMFYUI_STORAGE=t-store
 COMFYUI_COMMUNITY_SCRIPT_SHA256=def456
 COMFYUI_IMAGE_VARIANT=klein-4b
@@ -1201,7 +1234,11 @@ TARGET_ADMIN_TOKEN=""
 assert_fail "blank skips the companions" prompt_openwebui_admin_token <<< $'\n'
 
 describe provision_selected_targets
-run_target_provisioner() { echo "run $1" >> "$MOCK_LOG"; [[ " ${FAKE_FAIL:-} " != *" $1 "* ]]; }
+run_target_provisioner() {
+  echo "run $1" >> "$MOCK_LOG"
+  [[ ${HONCHO_READY:-false} != true || $1 == honcho ]] || echo "honcho-ready $1" >> "$MOCK_LOG"
+  [[ " ${FAKE_FAIL:-} " != *" $1 "* ]]
+}
 register_target_key() { echo "key $1" >> "$MOCK_LOG"; [[ -n "$(target_field "$1" key)" ]] || return 0; [[ -z ${FAKE_KEY_FAIL:-} ]]; }
 ensure_target_template() { echo "template $1" >> "$MOCK_LOG"; }
 wait_for_openwebui() { echo "wait" >> "$MOCK_LOG"; }
@@ -1258,6 +1295,18 @@ assert_eq "ComfyUI is added once Open WebUI is up and the admin key is known" \
   "$(printf '%s\n' 'run ollama' wait token 'run comfyui')" "$(mock_calls)"
 assert_contains "and is in the summary" "comfyui        CT 917    ok" "$(cat "$_out")"
 assert_eq "and count as success" 0 "$_rc"
+TARGETS="honcho hermes openclaw"
+mock_reset_log
+provision_selected_targets > "$_out" 2>&1; _rc=$?
+assert_eq "Honcho and both agents provision successfully" 0 "$_rc"
+assert_eq "Honcho is installed before both agents use it" \
+  "$(printf '%s\n' wait token 'run honcho' 'run hermes' 'honcho-ready hermes' 'run openclaw' 'honcho-ready openclaw')" "$(mock_calls)"
+mock_reset_log
+FAKE_FAIL=honcho provision_selected_targets > "$_out" 2>&1; _rc=$?
+assert_eq "a failed Honcho target fails the run" 1 "$_rc"
+assert_not_contains "agents do not receive a failed Honcho instance" "honcho-ready" "$(mock_calls)"
+assert_contains "Honcho recovery uses reconfigure after partial creation" \
+  "CT_ID=920 ROUTER_CT_ID=910 bash targets/honcho/provision-lxc.sh --reconfigure" "$(cat "$_out")"
 SERVICES_DONE=""
 TARGETS=llamacpp; unset MODEL_ALIAS MODEL_PATH MODEL_DOWNLOAD_URL
 provision_selected_targets > "$_out" 2>&1; _rc=$?

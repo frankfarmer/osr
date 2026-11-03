@@ -76,6 +76,8 @@ add_suite hermes-integration        python "${ROOT}/targets/hermes/test-integrat
 add_suite hermes-direct-dispatch    python "${ROOT}/targets/hermes/test-direct-dispatch.py"    python3
 add_suite openclaw-integration      python "${ROOT}/targets/openclaw/test-integration.py"      python3
 add_suite comfyui-integration       python "${ROOT}/targets/comfyui/test-integration.py"       python3
+add_suite honcho-integration        python "${ROOT}/targets/honcho/test-integrate.py"          python3
+add_suite honcho-provision          bash   "${ROOT}/targets/honcho/test-provision.sh"          bash
 add_suite skip-report               python "${HERE}/test-skip-report.py"                       python3
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_bld=$'\033[1m'; c_off=$'\033[0m'
