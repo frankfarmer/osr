@@ -271,6 +271,18 @@ case $1 in
         mv "$cfg.new" "$cfg" ;;
       *) exit 2 ;;
     esac ;;
+  plugins)
+    marker=$HOME/.openclaw/plugin-$3
+    case $2 in
+      inspect) [[ -e $marker ]] ;;
+      install) [[ $3 == @honcho-ai/openclaw-honcho ]] || exit 2; touch "$HOME/.openclaw/plugin-openclaw-honcho" ;;
+      enable|disable)
+        [[ -e $marker ]] || exit 1
+        grep -v "^plugins.entries.$3.enabled=" "$cfg" > "$cfg.new" 2>/dev/null || true
+        printf 'plugins.entries.%s.enabled=%s\n' "$3" "$([[ $2 == enable ]] && echo true || echo false)" >> "$cfg.new"
+        mv "$cfg.new" "$cfg" ;;
+      *) exit 2 ;;
+    esac ;;
   *) exit 2 ;;
 esac
 OPENCLAW
@@ -649,5 +661,29 @@ for npm_version in 11.16.0 12.0.0; do
     fail "npm $npm_version did not allow OpenClaw's install scripts"
 done
 pass 'npm 11.16 and 12 allow OpenClaw lifecycle scripts; older npm keeps the compatible command'
+
+# Honcho memory: set up once, kept by a failed run, turned off again.
+reset_tree; push_key
+printf 'honcho-key-A\n' > "$deploy/honcho-api-key"
+out=$(guest HONCHO_URL=http://192.0.2.85:8000/) || fail "Honcho on: $out"
+[[ $(grep -c '^openclaw plugins install @honcho-ai/openclaw-honcho$' "$log") == 1 ]] || fail 'the plugin was not installed once'
+[[ $(kv plugins.entries.openclaw-honcho.enabled "$config") == true ]] || fail 'the plugin is not enabled'
+[[ $(kv plugins.entries.openclaw-honcho.hooks.allowConversationAccess "$config") == true ]] || fail 'no conversation access'
+[[ $(kv plugins.entries.openclaw-honcho.config.baseUrl "$config") == http://192.0.2.85:8000 ]] || fail 'baseUrl (trailing slash kept?)'
+[[ $(kv plugins.entries.openclaw-honcho.config.workspaceId "$config") == osr &&
+   $(kv plugins.entries.openclaw-honcho.config.peerName "$config") == user ]] || fail 'workspace or peer'
+honcho_cfg=$home/.honcho/config.json
+grep -q '"apiKey": "honcho-key-A"' "$honcho_cfg" || fail "Honcho key file: $(cat "$honcho_cfg")"
+[[ $(stat -c %a "$honcho_cfg") == 600 ]] || fail 'the Honcho key file is not private'
+: > "$log"
+out=$(guest HONCHO_URL=http://192.0.2.85:8000 OPENCLAW_DASHBOARD=false) || fail "Honcho rerun: $out"
+grep -q '^openclaw plugins install' "$log" && fail 'an installed plugin was installed again'
+printf 'honcho-key-B\n' > "$deploy/honcho-api-key"
+out=$(guest HONCHO_URL=http://192.0.2.85:8000 FAKE_CHAT_STATUS=400) && fail 'a failed probe was accepted'
+grep -q honcho-key-A "$honcho_cfg" || fail 'a failed run did not put the previous Honcho key file back'
+out=$(guest HONCHO_URL=) || fail "Honcho off: $out"
+[[ $(kv plugins.entries.openclaw-honcho.enabled "$config") == false ]] || fail 'HONCHO_URL= did not disable the plugin'
+[[ ! -e $honcho_cfg && ! -e $deploy/honcho-api-key ]] || fail 'HONCHO_URL= left the Honcho key behind'
+pass 'Honcho: the plugin installed once, enabled with the osr workspace; a failed run restores it; HONCHO_URL= disables it'
 
 printf '%s install cases passed. No system files, packages or services were touched.\n' "$passed"

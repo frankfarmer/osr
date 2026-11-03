@@ -300,6 +300,9 @@ fi
   die "The router API key in ${ROUTER_API_KEY_FILE} has unexpected characters."
 router_key_sha256=none
 honcho_key_sha256=none
+# The Honcho URL of the last completed run, read before this run rewrites the
+# settings: an empty HONCHO_URL turns off only a Honcho this target set up.
+prev_honcho_url=$(env_file_get "$HERMES_ETC/settings" HONCHO_URL 2>/dev/null || true)
 if [[ -n $HONCHO_URL ]]; then
   [[ -s $HONCHO_API_KEY_FILE ]] || die "HONCHO_URL needs $HONCHO_API_KEY_FILE."
   honcho_key_sha256=$(sha256sum "$HONCHO_API_KEY_FILE" | cut -d' ' -f1)
@@ -504,7 +507,8 @@ fi
 backup=$stage/backup
 install -d -m 0700 "$backup"
 for file in "$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$UNIT_DIR/$UNIT" \
-            "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings" "$HERMES_ETC/targets"; do
+            "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings" "$HERMES_ETC/targets" \
+            "$HERMES_HOME/honcho.json" "$HONCHO_API_KEY_FILE"; do
   if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file").prev"; fi
 done
 gateway_was_active=0
@@ -517,7 +521,8 @@ if systemctl is-active --quiet "$DASHBOARD_UNIT" 2>/dev/null; then dashboard_was
 restore() {
   local file name
   for file in "$HERMES_HOME/config.yaml" "$HERMES_HOME/.env" "$UNIT_DIR/$UNIT" \
-              "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings" "$HERMES_ETC/targets"; do
+              "$UNIT_DIR/$DIRECT_UNIT" "$UNIT_DIR/$DASHBOARD_UNIT" "$DIRECT_LIB" "$HERMES_ETC/backend-keys" "$HERMES_ETC/settings" "$HERMES_ETC/targets" \
+            "$HERMES_HOME/honcho.json" "$HONCHO_API_KEY_FILE"; do
     name=$(basename "$file")
     if [[ -f $backup/$name.prev ]]; then cp -a -- "$backup/$name.prev" "$file"; else rm -f -- "$file"; fi
   done
@@ -600,7 +605,7 @@ PY
   chown "$HERMES_USER:$HERMES_USER" "$HERMES_HOME/honcho.json"
   chmod 0600 "$HERMES_HOME/honcho.json"
   run_hermes config set memory.provider honcho
-elif [[ -n $(env_file_get "$HERMES_ETC/settings" HONCHO_URL 2>/dev/null) ]]; then
+elif [[ -n $prev_honcho_url ]]; then
   # The last run set up Honcho; HONCHO_URL is now empty, so turn it off.
   run_hermes config set memory.provider builtin
   rm -f -- "$HERMES_HOME/honcho.json" "$HONCHO_API_KEY_FILE"

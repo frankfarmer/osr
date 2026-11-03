@@ -699,7 +699,13 @@ scoped to the `osr` workspace and share the `user` peer. The installer
 provisions Honcho before the agents and passes its URL and CT only to them;
 an agent's later `--reconfigure` reads the URL back from its settings, so the
 egress rule and memory survive, and `HONCHO_URL=` turns them off. Inbound is
-limited to the router (API and MCP) and the selected agents (API).
+limited to the router (API and MCP) and the selected agents (API); the
+provisioner keeps one tagged rule in the router CT's firewall file so Honcho
+can reach the router API. The guest probes the chat model with a tool and a
+JSON schema before changing anything. A rerun sets aside the env file, keys,
+units and Bun, and, when the commit changes, stops Honcho and dumps the
+database; any failure restores all of them. `--rotate-keys` replaces the JWT
+secret and both keys.
 
 ## 18. Verification and CI
 

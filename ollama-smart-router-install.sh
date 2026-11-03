@@ -121,10 +121,12 @@ NONINTERACTIVE="${NONINTERACTIVE:-false}"
 INSTALL_GITEA="${INSTALL_GITEA:-false}"
 INSTALL_MATTERMOST="${INSTALL_MATTERMOST:-false}"
 # Optional targets from targets/ (the Gitea and Mattermost services, model
-# servers, and the Open Terminal / Hermes / ComfyUI / OpenClaw companions), each in its own LXC.
-# Interactive installs ask which to create;
-# names or menu numbers, comma-separated, e.g. INSTALL_TARGETS=ollama,hermes
-# to pre-fill the answer. Unattended installs refuse a non-empty list.
+# servers, Honcho memory, the Hermes / OpenClaw agents and the Open Terminal /
+# ComfyUI tools), each in its own LXC. Interactive installs ask which to create
+# (names or menu numbers). INSTALL_TARGETS pre-fills the answer with target
+# names, comma-separated, e.g. INSTALL_TARGETS=ollama,hermes; menu numbers are
+# refused there, because they follow the menu's grouping and can change.
+# Unattended installs refuse a non-empty list.
 INSTALL_TARGETS="${INSTALL_TARGETS:-}"
 TARGETS_DIR="${TARGETS_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/targets}"
 TARGETS=""
@@ -1496,6 +1498,17 @@ target_menu_group() {
 prompt_target_selection() {
   local name phase label group i=0 prev_group=""
   TARGETS=""
+  # A preset names its targets: menu numbers follow the menu's grouping and
+  # change when targets are added or regrouped, so a saved number could pick
+  # another target without a word.
+  local token
+  for token in ${INSTALL_TARGETS//,/ }; do
+    if [[ "$token" =~ ^[0-9]+$ ]]; then
+      echo "INSTALL_TARGETS takes target names (e.g. ollama,hermes), not menu numbers: '${token}'." >&2
+      echo "Menu numbers change when targets are added or regrouped; names do not." >&2
+      return 1
+    fi
+  done
   # INSTALL_GITEA / INSTALL_MATTERMOST (the earlier yes/no questions) pre-select.
   [[ "$INSTALL_GITEA" != "true" ]] || INSTALL_TARGETS="gitea ${INSTALL_TARGETS:-}"
   [[ "$INSTALL_MATTERMOST" != "true" ]] || INSTALL_TARGETS="mattermost ${INSTALL_TARGETS:-}"

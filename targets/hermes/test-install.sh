@@ -497,4 +497,31 @@ out=$(guest) && fail 'a second concurrent run was accepted'
 exec {held}>&-
 pass 'a second concurrent run is refused'
 
+# Honcho memory: set up, kept by a failed run, turned off again.
+reset_tree; push_key
+printf 'honcho-key-A\n' > "$deploy/honcho-api-key"
+out=$(guest HONCHO_URL=http://192.0.2.85:8000) || fail "Honcho on: $out"
+grep -q '^hermes plugins install honcho --enable --yes-deps' "$log" || fail 'the Honcho plugin was not installed'
+honcho_json=$home/.hermes/honcho.json
+python3 - "$honcho_json" <<'PY' || fail "honcho.json: $(cat "$honcho_json")"
+import json, sys
+data = json.load(open(sys.argv[1]))
+host = data["hosts"]["hermes"]
+assert data["apiKey"] == "honcho-key-A" and data["baseUrl"] == "http://192.0.2.85:8000"
+assert host["workspace"] == "osr" and host["peerName"] == "user" and host["enabled"] is True
+PY
+[[ $(stat -c %a "$honcho_json") == 600 ]] || fail 'honcho.json is not private'
+[[ $(kv memory.provider "$home/.hermes/config.kv") == honcho ]] || fail 'Honcho is not the memory provider'
+[[ $(kv HONCHO_URL "$etc/settings") == http://192.0.2.85:8000 ]] || fail 'the settings do not record HONCHO_URL'
+printf 'honcho-key-B\n' > "$deploy/honcho-api-key"
+out=$(guest HONCHO_URL=http://192.0.2.85:8000 FAKE_CHAT_STATUS=400) && fail 'a failed probe was accepted'
+grep -q honcho-key-A "$honcho_json" || fail 'a failed run did not put the previous honcho.json back'
+out=$(guest HONCHO_URL=) || fail "Honcho off: $out"
+[[ $(kv memory.provider "$home/.hermes/config.kv") == builtin ]] || fail 'HONCHO_URL= did not restore built-in memory'
+[[ ! -e $honcho_json && ! -e $deploy/honcho-api-key ]] || fail 'HONCHO_URL= left the Honcho config or key'
+: > "$log"
+out=$(guest) || fail "rerun without Honcho: $out"
+grep -q 'memory.provider' "$log" && fail 'a run that never had Honcho changed the memory provider'
+pass 'Honcho: plugin and osr config as a private file; a failed run restores it; HONCHO_URL= turns it off'
+
 printf '%s install cases passed. No system files, packages or services were touched.\n' "$passed"

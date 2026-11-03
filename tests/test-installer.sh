@@ -574,6 +574,12 @@ assert_fail "an unattended install refuses targets" prompt_target_selection
 assert_contains "and says what to do instead" "targets/<name>/provision-lxc.sh" "$(prompt_target_selection 2>&1)"
 INSTALL_TARGETS=bogus
 assert_fail "an invalid preset is refused" prompt_target_selection
+INSTALL_TARGETS="ollama,13"
+assert_fail "a preset with a menu number is refused" prompt_target_selection
+assert_contains "and says to use names" "not menu numbers: '13'" "$(prompt_target_selection 2>&1)"
+NONINTERACTIVE=false
+assert_fail "also when the menu would be shown" prompt_target_selection <<< $'\n'
+NONINTERACTIVE=true
 NONINTERACTIVE=false; INSTALL_TARGETS=""
 _out="$(mktemp)"
 prompt_target_selection > "$_out" 2>&1 <<< $'16\n5,hermes\n'

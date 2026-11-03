@@ -4,12 +4,24 @@ set -Eeuo pipefail
 umask 077
 
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+# Router firewall helper
+# router_fw_with_honcho FILE IP PORT: FILE with this target's one rule (IP to
+# the router API PORT) first in [RULES]; an older one is dropped, the rest kept.
+router_fw_with_honcho() {
+  awk -v rule="IN ACCEPT -source $2/32 -p tcp -dport $3 -log nolog # osr-honcho-router" '
+    / # osr-honcho-router$/ { next }
+    $0 == "[RULES]" && !seen { print; print rule; seen=1; next }
+    { print }
+    END { if (!seen) { print ""; print "[RULES]"; print rule } }
+  ' "$1"
+}
+# End router firewall helper.
 source "$(dirname -- "${BASH_SOURCE[0]}")/pve-select.sh"
 usage() {
   cat <<'USAGE'
 Usage: CT_ID=285 ROUTER_CT_ID=280 TEMPLATE=local:vztmpl/debian-13-standard_..._amd64.tar.zst \
        STORAGE=local-lvm IP_CIDR=192.168.11.85/24 GATEWAY=192.168.11.1 \
-       OPENWEBUI_ADMIN_TOKEN=... bash provision-lxc.sh [--dry-run|--reconfigure]
+       OPENWEBUI_ADMIN_TOKEN=... bash provision-lxc.sh [--dry-run] [--reconfigure [--rotate-keys]]
 
 Creates an unprivileged Debian 13 LXC with native PostgreSQL/pgvector,
 Honcho API and deriver services, and Honcho's Streamable HTTP MCP server. The
@@ -20,15 +32,27 @@ endpoint; by default Honcho asks the router /v1/embeddings. HONCHO_REF
 (default v3.5.0) may select another upstream tag, main, or a commit. HONCHO_CLIENT_IPS is a space-separated list of agent CT addresses to
 allow through the Proxmox firewall. The router CT is always allowed.
 
+HONCHO_STRUCTURED_OUTPUT_MODE=json_object is for a router model whose backend
+lacks JSON-schema output; the install probes the model with tools and
+structured output first (HONCHO_SKIP_CHAT_PROBE=true skips that). Another Bun
+than 1.4.4 needs HONCHO_BUN_VERSION with HONCHO_BUN_SHA256 (bun-linux-x64.zip)
+or HONCHO_BUN_BASELINE_SHA256 (CPUs without AVX2). If the router CT has a
+Proxmox firewall file, a rule admitting this CT to the router API is kept in
+it (HONCHO_ROUTER_FIREWALL=false leaves that file alone).
+
 This target registers the MCP server in Open WebUI. --reconfigure updates an
-existing Honcho CT and the registration without deleting its PostgreSQL data.
+existing Honcho CT and the registration without deleting its PostgreSQL data;
+moving to another HONCHO_REF dumps the database first and restores it if the
+upgrade fails. --rotate-keys (with --reconfigure) replaces the JWT secret and
+both keys; reconfigure Hermes and OpenClaw with HONCHO_CT_ID afterwards.
 USAGE
 }
-mode=create; dry_run=0
+mode=create; dry_run=0; rotate_keys=false
 for arg in "$@"; do
   case $arg in
     --dry-run) dry_run=1 ;;
     --reconfigure) mode=reconfigure ;;
+    --rotate-keys) rotate_keys=true ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -55,6 +79,12 @@ HONCHO_EMBEDDING_MODEL=${HONCHO_EMBEDDING_MODEL:-}
 HONCHO_EMBEDDING_DIMENSIONS=${HONCHO_EMBEDDING_DIMENSIONS:-}
 HONCHO_EMBEDDING_BASE_URL=${HONCHO_EMBEDDING_BASE_URL:-}
 HONCHO_EMBEDDING_DIMENSIONS_MODE=${HONCHO_EMBEDDING_DIMENSIONS_MODE:-never}
+HONCHO_STRUCTURED_OUTPUT_MODE=${HONCHO_STRUCTURED_OUTPUT_MODE:-}
+HONCHO_SKIP_CHAT_PROBE=${HONCHO_SKIP_CHAT_PROBE:-false}
+HONCHO_ROUTER_FIREWALL=${HONCHO_ROUTER_FIREWALL:-true}
+HONCHO_BUN_VERSION=${HONCHO_BUN_VERSION:-}
+HONCHO_BUN_SHA256=${HONCHO_BUN_SHA256:-}
+HONCHO_BUN_BASELINE_SHA256=${HONCHO_BUN_BASELINE_SHA256:-}
 honcho_clients_explicit=${HONCHO_CLIENT_IPS+x}
 HONCHO_CLIENT_IPS=${HONCHO_CLIENT_IPS:-}
 [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ && $ROUTER_CT_ID =~ ^[1-9][0-9]{2,8}$ ]] ||
@@ -74,6 +104,17 @@ fi
 [[ $HONCHO_EMBEDDING_DIMENSIONS =~ ^[1-9][0-9]{0,5}$ ]] || die 'Set HONCHO_EMBEDDING_DIMENSIONS.'
 [[ -z $HONCHO_EMBEDDING_BASE_URL || $HONCHO_EMBEDDING_BASE_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]] || die 'Invalid HONCHO_EMBEDDING_BASE_URL; use http(s)://host[:port]/v1.'
 [[ $HONCHO_EMBEDDING_DIMENSIONS_MODE =~ ^(never|auto|always)$ ]] || die 'Invalid HONCHO_EMBEDDING_DIMENSIONS_MODE.'
+[[ $HONCHO_STRUCTURED_OUTPUT_MODE =~ ^(|json_schema|json_object)$ ]] || die 'HONCHO_STRUCTURED_OUTPUT_MODE must be json_schema or json_object.'
+[[ $HONCHO_SKIP_CHAT_PROBE =~ ^(true|false)$ ]] || die 'HONCHO_SKIP_CHAT_PROBE must be true or false.'
+[[ $HONCHO_ROUTER_FIREWALL =~ ^(true|false)$ ]] || die 'HONCHO_ROUTER_FIREWALL must be true or false.'
+[[ -z $HONCHO_BUN_VERSION || $HONCHO_BUN_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Invalid HONCHO_BUN_VERSION.'
+for sha in "$HONCHO_BUN_SHA256" "$HONCHO_BUN_BASELINE_SHA256"; do
+  [[ -z $sha || $sha =~ ^[0-9a-f]{64}$ ]] || die 'HONCHO_BUN_SHA256 and HONCHO_BUN_BASELINE_SHA256 are SHA-256 hex digests.'
+done
+if [[ -n $HONCHO_BUN_VERSION && $HONCHO_BUN_VERSION != 1.4.4 && -z $HONCHO_BUN_SHA256$HONCHO_BUN_BASELINE_SHA256 ]]; then
+  die 'HONCHO_BUN_VERSION needs HONCHO_BUN_SHA256 (bun-linux-x64.zip) or HONCHO_BUN_BASELINE_SHA256 (no AVX2).'
+fi
+[[ $rotate_keys == false || $mode == reconfigure ]] || die '--rotate-keys needs --reconfigure: a new CT gets new keys anyway.'
 [[ $HONCHO_REF =~ ^(main|v[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$ ]] || die 'Invalid HONCHO_REF.'
 [[ $BRIDGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid BRIDGE.'
 if [[ $mode == create ]]; then [[ $STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid STORAGE.'; fi
@@ -108,6 +149,9 @@ trap cleanup EXIT
 if (( dry_run )); then
   printf 'Would %s Honcho CT %s at %s with %s, then register MCP in router CT %s.\n' \
     "$mode" "$CT_ID" "$honcho_ip" "$HONCHO_REF" "$ROUTER_CT_ID"
+  [[ $HONCHO_ROUTER_FIREWALL == false ]] ||
+    printf 'Would admit %s to the router API in /etc/pve/firewall/%s.fw, if that file exists.\n' "$honcho_ip" "$ROUTER_CT_ID"
+  [[ $rotate_keys == false ]] || printf 'Would replace the JWT secret and both Honcho keys.\n'
   exit 0
 fi
 [[ $(id -u) == 0 ]] || die 'Run as root on the Proxmox host.'
@@ -175,6 +219,18 @@ else
   printf '[OPTIONS]\nenable: 1\npolicy_in: DROP\npolicy_out: ACCEPT\n\n[RULES]\n%s\n' "$rules" > "$fw_file"
 fi
 
+# The router CT's own firewall must let Honcho reach the router API. One owned
+# rule, replaced when the Honcho address or router port changes; everything
+# else in that file stays as it is.
+router_fw="/etc/pve/firewall/${ROUTER_CT_ID}.fw"
+if [[ $HONCHO_ROUTER_FIREWALL == true && -f $router_fw ]]; then
+  router_fw_with_honcho "$router_fw" "$honcho_ip" "$router_port" > "$stage/router.fw"
+  if ! cmp -s "$stage/router.fw" "$router_fw"; then
+    cat "$stage/router.fw" > "$router_fw"
+    printf 'Router CT %s firewall: admitted Honcho %s to port %s.\n' "$ROUTER_CT_ID" "$honcho_ip" "$router_port"
+  fi
+fi
+
 for attempt in {1..60}; do
   if pct exec "$CT_ID" -- sh -c 'test -d /run/systemd/system && ip route show default | grep -q . && getent hosts github.com >/dev/null' 2>/dev/null; then break; fi
   (( attempt < 60 )) || die 'Honcho CT did not get network and systemd readiness.'
@@ -190,6 +246,11 @@ pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" "HONCHO_MODEL=$HONCHO_MODEL" \
   "HONCHO_EMBEDDING_DIMENSIONS=$HONCHO_EMBEDDING_DIMENSIONS" \
   "HONCHO_EMBEDDING_BASE_URL=$HONCHO_EMBEDDING_BASE_URL" \
   "HONCHO_EMBEDDING_DIMENSIONS_MODE=$HONCHO_EMBEDDING_DIMENSIONS_MODE" \
+  "HONCHO_STRUCTURED_OUTPUT_MODE=$HONCHO_STRUCTURED_OUTPUT_MODE" \
+  "HONCHO_SKIP_CHAT_PROBE=$HONCHO_SKIP_CHAT_PROBE" "HONCHO_ROTATE_KEYS=$rotate_keys" \
+  ${HONCHO_BUN_VERSION:+"HONCHO_BUN_VERSION=$HONCHO_BUN_VERSION"} \
+  ${HONCHO_BUN_SHA256:+"HONCHO_BUN_SHA256=$HONCHO_BUN_SHA256"} \
+  ${HONCHO_BUN_BASELINE_SHA256:+"HONCHO_BUN_BASELINE_SHA256=$HONCHO_BUN_BASELINE_SHA256"} \
   bash /root/honcho-deploy/install-target.sh
 pct exec "$ROUTER_CT_ID" -- curl -fsS --max-time 10 "http://${honcho_ip}:3000/health" >/dev/null ||
   die 'Router CT cannot reach Honcho MCP; check the CT firewall.'
@@ -206,3 +267,8 @@ pct exec "$ROUTER_CT_ID" -- python3 "$router_stage/integrate-webui.py" \
   "http://127.0.0.1:$OPENWEBUI_PORT" "$router_stage/admin-token" "$router_stage/honcho-api-key" \
   "http://${honcho_ip}:3000"
 printf 'Honcho API: http://%s:8000; MCP: http://%s:3000/mcp\n' "$honcho_ip" "$honcho_ip"
+if [[ $rotate_keys == true ]]; then
+  printf 'The keys changed: Hermes and OpenClaw lose Honcho until each is reconfigured, e.g.\n'
+  printf '  CT_ID=<agent CT> ROUTER_CT_ID=%s HONCHO_CT_ID=%s bash targets/hermes/provision-lxc.sh --reconfigure\n' "$ROUTER_CT_ID" "$CT_ID"
+  printf '  CT_ID=<agent CT> ROUTER_CT_ID=%s HONCHO_CT_ID=%s bash targets/openclaw/provision-lxc.sh --reconfigure\n' "$ROUTER_CT_ID" "$CT_ID"
+fi

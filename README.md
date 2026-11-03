@@ -152,7 +152,7 @@ Settings can be preset as environment variables:
 | Tiers | `TIER_FAST_SERVERS` … `TIER_XLARGE_SERVERS` (e.g. `1,3`), `MODEL_FAST` … `MODEL_XLARGE`, `OLLAMA_KEEP_ALIVE` |
 | Gitea | `GITEA_SERVER_URL`, `GITEA_ADMIN_USER`, `GITEA_DEPLOY_TOKEN`, `GITEA_REPO_NAME` (`ollama-smart-router`), `GITEA_REPO_OWNER` (auto), `GITEA_REPO_PRIVATE` |
 | Mattermost | `MATTERMOST_WEBHOOK_URL`, `MATTERMOST_MONITOR_USER`, `MATTERMOST_CHANNEL` (`ollama-monitor`) |
-| Targets | `INSTALL_TARGETS` (comma-separated, pre-fills menu), `INSTALL_GITEA` / `INSTALL_MATTERMOST` (pre-select), `<NAME>_CT_ID`, `<NAME>_IP_CIDR`, `<NAME>_STORAGE`, `<NAME>_TEMPLATE`, `COMFYUI_IMAGE_VARIANT` (`klein-4b` or `klein-9b`), `HF_TOKEN`, `OPENWEBUI_ADMIN_TOKEN`, `OPENWEBUI_WAIT_SECONDS` (900), `TARGETS_DIR`; see target READMEs for engine options, script pins and ports |
+| Targets | `INSTALL_TARGETS` (comma-separated target names, pre-fills the menu; menu numbers are refused there because they change when targets are regrouped), `INSTALL_GITEA` / `INSTALL_MATTERMOST` (pre-select), `<NAME>_CT_ID`, `<NAME>_IP_CIDR`, `<NAME>_STORAGE`, `<NAME>_TEMPLATE`, `COMFYUI_IMAGE_VARIANT` (`klein-4b` or `klein-9b`), `HF_TOKEN`, `OPENWEBUI_ADMIN_TOKEN`, `OPENWEBUI_WAIT_SECONDS` (900), `TARGETS_DIR`; see target READMEs for engine options, script pins and ports |
 
 `NONINTERACTIVE=true` accepts router defaults without prompts but refuses
 selected targets: community-script menus, GPU selection and the Open WebUI

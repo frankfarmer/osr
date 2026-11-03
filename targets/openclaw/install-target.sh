@@ -411,6 +411,9 @@ fi
   die "The router API key in ${ROUTER_API_KEY_FILE} has unexpected characters."
 router_key_sha256=none
 honcho_key_sha256=none
+# The Honcho URL of the last completed run, read before this run rewrites the
+# settings: an empty HONCHO_URL turns off only a Honcho this target set up.
+prev_honcho_url=$(env_file_get "$OC_ETC/settings" HONCHO_URL 2>/dev/null || true)
 if [[ -n $HONCHO_URL ]]; then
   [[ -s $HONCHO_API_KEY_FILE ]] || die "HONCHO_URL needs $HONCHO_API_KEY_FILE."
   honcho_key_sha256=$(sha256sum "$HONCHO_API_KEY_FILE" | cut -d' ' -f1)
@@ -656,7 +659,8 @@ fi
 backup=$stage/backup
 install -d -m 0700 "$backup"
 owned_files=("$OC_CONFIG" "$OC_ENV" "$UNIT_DIR/$UNIT" "$UNIT_DIR/$DIRECT_UNIT" "$DIRECT_LIB"
-  "$OC_ETC/backend-keys" "$OC_ETC/router.env" "$OC_ETC/settings" "$OC_ETC/targets" "$OC_ETC/providers.json")
+  "$OC_ETC/backend-keys" "$OC_ETC/router.env" "$OC_ETC/settings" "$OC_ETC/targets" "$OC_ETC/providers.json"
+  "$OC_USER_HOME/.honcho/config.json" "$HONCHO_API_KEY_FILE")
 for file in "${owned_files[@]}"; do
   if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file").prev"; fi
 done
@@ -770,9 +774,9 @@ run_oc config set gateway.bind "$bind"
 run_oc config set gateway.http.endpoints.chatCompletions.enabled "$OPENCLAW_API" --strict-json
 run_oc config set gateway.controlUi.enabled "$OPENCLAW_DASHBOARD" --strict-json
 if [[ -n $HONCHO_URL ]]; then
-  if ! run_oc plugins list --json | python3 -c 'import json,sys
-plugins=json.load(sys.stdin).get("plugins", [])
-sys.exit(0 if any(p.get("id") == "openclaw-honcho" for p in plugins) else 1)'; then
+  # `plugins inspect` is how the plugin's own README checks it; it fails for a
+  # plugin OpenClaw does not know.
+  if ! run_oc plugins inspect openclaw-honcho >/dev/null 2>&1; then
     run_oc plugins install @honcho-ai/openclaw-honcho
   fi
   run_oc plugins enable openclaw-honcho
@@ -791,7 +795,7 @@ with open(sys.argv[3], "w", encoding="utf-8") as f:
 PY
   chown "$OC_USER:$OC_USER" "$OC_USER_HOME/.honcho/config.json"
   chmod 0600 "$OC_USER_HOME/.honcho/config.json"
-elif [[ -n $(env_file_get "$OC_ETC/settings" HONCHO_URL 2>/dev/null) ]]; then
+elif [[ -n $prev_honcho_url ]]; then
   # The last run set up Honcho; HONCHO_URL is now empty, so turn it off.
   run_oc plugins disable openclaw-honcho
   rm -f -- "$OC_USER_HOME/.honcho/config.json" "$HONCHO_API_KEY_FILE"
