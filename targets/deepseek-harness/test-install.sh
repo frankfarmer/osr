@@ -107,7 +107,8 @@ stub curl 'if [[ -e $FAKE_DIR/active ]]; then printf 401; else printf 000; exit 
 # npm: view answers $FAKE_DIR/latest; install writes a stub release (unless
 # $FAKE_DIR/npm-fail exists) whose bin.js fails --dump-config when
 # $FAKE_DIR/dump-fail exists.
-stub npm 'case $1 in
+stub npm 'echo "npm umask $(umask)" >> "$FAKE_LOG"
+case $1 in
   --version) echo 11.16.0 ;;
   view) cat "$FAKE_DIR/latest" ;;
   install)
@@ -191,6 +192,11 @@ assert_contains "the service was restarted" "systemctl restart deepseek-harness.
 assert_ok "the pushed keys are removed from the deploy directory" test ! -e "$deploy/router-api-key"
 assert_ok "and the router key is kept in /etc" test -s "$DSH_ETC_DIR/router-api-key"
 assert_ok "no snapshot is left" test ! -e "$DSH_ROLLBACK_DIR"
+# The release belongs to root after install; the service reads it as "other".
+pkg=$(readlink -f "$DSH_OPT_DIR/current")/node_modules/@deepseek-ai/dsh
+assert_eq "the release's code is readable by the service user" 644 "$(stat -c %a "$pkg/lib/bin.js")"
+assert_eq "and its directories can be entered" 755 "$(stat -c %a "$pkg/lib")"
+assert_contains "npm runs under umask 022" "npm umask 0022" "$(calls)"
 first_release=$(link)
 
 describe install_unchanged
@@ -207,6 +213,12 @@ assert_contains "and keeps the installed release" "Keeping the installed @deepse
 assert_eq "the same release still runs" "$first_release" "$(link)"
 assert_file_contains "the overlay has the new model" 'model: "auto"' "$DSH_ETC_DIR/osr.patch.yml"
 assert_contains "an alias is flagged for checking" "Selected OSR alias" "$out"
+chmod -R go-rwx "$(readlink -f "$DSH_OPT_DIR/current")"
+push_deploy
+assert_ok "a reconfigure over an owner-only release (an earlier run's) succeeds" install_run DSH_MODEL=code-model
+assert_eq "and makes it readable again" 644 "$(stat -c %a "$(readlink -f "$DSH_OPT_DIR/current")/node_modules/@deepseek-ai/dsh/lib/bin.js")"
+push_deploy
+assert_ok "back to the alias" install_run DSH_MODEL=auto
 push_deploy
 run_fails "a model the router does not advertise is refused" DSH_MODEL=missing-model
 assert_contains "before anything is restarted" "DeepSeek Harness was not stopped or changed" "$out"

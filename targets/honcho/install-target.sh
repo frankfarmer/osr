@@ -301,10 +301,14 @@ install -m 0640 -o root -g honcho-proxy "$deploy/backend-keys" "$etc/backend-key
 opt_git checkout --detach "$new_commit"
 chown -R honcho:honcho "$opt"
 
+# The services and as_honcho run uv as honcho, so its venv must be readable by
+# others. Under this script's umask 077 it would be root-only ("env:
+# '/opt/honcho-uv/bin/uv': Permission denied"), and root could still run it, so
+# a venv left that way by an earlier run is repaired here too.
 if [[ ! -x $uv ]]; then
-  python3 -m venv "$uv_dir"
-  "$uv_dir/bin/pip" install --no-cache-dir uv
+  (umask 022; python3 -m venv "$uv_dir" && "$uv_dir/bin/pip" install --no-cache-dir uv)
 fi
+chmod -R go+rX,go-w -- "$uv_dir"
 as_honcho "$uv" --directory "$opt" sync --frozen --no-dev --python 3.13
 
 if [[ ! -s $etc/db-password ]]; then openssl rand -hex 32 > "$etc/db-password"; fi

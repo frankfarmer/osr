@@ -238,7 +238,9 @@ else
   new_release=$release
   install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$release"
   note "Installing $PACKAGE@$resolved as $SERVICE_USER."
-  if ! as_service npm install --prefix "$release" --no-audit --no-fund --save-exact "$PACKAGE@$resolved" ||
+  # npm inherits this script's umask 077: without 022 the release would be
+  # owner-only, and unreadable by the service once it is handed to root below.
+  if ! (umask 022; as_service npm install --prefix "$release" --no-audit --no-fund --save-exact "$PACKAGE@$resolved") ||
      [[ $(release_version "$release" 2>/dev/null || true) != "$resolved" ]]; then
     rm -rf -- "$release"
     die "npm could not install $PACKAGE@$resolved. DeepSeek Harness was not stopped or changed."
@@ -246,6 +248,9 @@ else
   # The agent runs as the service user; it must not be able to edit its code.
   chown -R root:root "$release"
 fi
+# It must read it, as "other" (the release belongs to root). Also repairs a
+# reused release installed owner-only by an earlier run.
+chmod -R a+rX,go-w -- "$release"
 
 # --- snapshot, then change -------------------------------------------------
 # Everything below is put back on failure when a previous install exists.

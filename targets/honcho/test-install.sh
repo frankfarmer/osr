@@ -496,4 +496,38 @@ assert_contains "the default Bun takes the baseline build here" "bun-v1.4.4/bun-
 assert_ne "and is held to its built-in checksum (the fake zip is not Bun 1.4.4)" 0 "$rc"
 assert_contains "which it reports" "does not match its pinned SHA-256" "$out"
 
+describe honcho_uv_venv
+# The services run uv as honcho. A venv this script builds must be readable by
+# others although the script runs under umask 077, and a root-only venv left by
+# an earlier run is repaired (root could still run it, so it is not rebuilt).
+fresh
+cp "$tmp/uv/bin/uv" "$tmp/uv-template"
+rm -rf -- "$tmp/uv"
+real_python3=$(command -v python3)
+cat > "$bin/python3" <<STUB
+#!/usr/bin/env bash
+if [[ \$1 == -m && \$2 == venv ]]; then
+  echo "venv umask \$(umask)" >> "\$FAKE_LOG"
+  mkdir -p "\$3/bin"
+  printf '#!/usr/bin/env bash\\nmkdir -p "%s/bin"; cp "%s" "%s/bin/uv"\\n' "\$3" "$tmp/uv-template" "\$3" > "\$3/bin/pip"
+  chmod +x "\$3/bin/pip"
+  exit 0
+fi
+exec "$real_python3" "\$@"
+STUB
+chmod +x "$bin/python3"
+out=$(guest) && rc=0 || rc=$?
+rm -f "$bin/python3"
+assert_eq "an install that builds the uv venv succeeds" 0 "$rc"
+assert_contains "the venv is built under umask 022" "venv umask 0022" "$(calls)"
+assert_eq "its directory is open to the honcho user" 755 "$(stat -c %a "$tmp/uv")"
+assert_eq "and uv is executable by it" 755 "$(stat -c %a "$tmp/uv/bin/uv")"
+chmod -R go-rwx "$tmp/uv"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "a rerun over a root-only venv succeeds" 0 "$rc"
+assert_eq "and repairs the directory" 755 "$(stat -c %a "$tmp/uv")"
+assert_eq "and uv" 755 "$(stat -c %a "$tmp/uv/bin/uv")"
+assert_not_contains "without rebuilding it" "venv umask" "$(calls)"
+rm -f "$tmp/uv-template"
+
 summary
