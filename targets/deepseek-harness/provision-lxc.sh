@@ -297,7 +297,10 @@ if [[ $mode == create ]]; then
     --tags 'ai;ai-tools;osr-target;deepseek-harness'
     --description 'DeepSeek Harness for Ollama Smart Router')
   [[ -z $NAMESERVER ]] || create+=(--nameserver "$NAMESERVER")
-  run "${create[@]}"
+  # Proxmox extracts an unprivileged template as the mapped root user, with
+  # this process's umask: under 077 the rootfs path is 0700 and tar cannot
+  # open it. Scope 022 to pct create only; keys and staging stay private.
+  (umask 022; run "${create[@]}")
   firewall_file="/etc/pve/firewall/${CT_ID}.fw"
   firewall=$(printf '[OPTIONS]\nenable: 1\npolicy_in: DROP\npolicy_out: ACCEPT\n\n[RULES]\nIN ACCEPT -source %s -p tcp -dport %s -log nolog # osr-deepseek-harness\n' \
     "$DSH_ACCESS_CIDR" "$DSH_PORT")

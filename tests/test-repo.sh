@@ -215,6 +215,19 @@ for dir in "${ROOT}"/targets/*/; do
   assert_ok "${name}: and a test checks it" bash -c "grep -lq 'nothing to do' '${dir}'test-*.sh"
 done
 
+describe pct_create_umask
+# Proxmox extracts an unprivileged CT template with the caller's umask; under a
+# script-wide umask 077 the mapped root user cannot open the rootfs and
+# pct create fails ("tar: /var/lib/lxc/<id>/rootfs: Cannot open: Permission
+# denied"). Every provisioner that creates a CT scopes umask 022 to it.
+for p in "${ROOT}"/targets/*/provision-lxc.sh; do
+  name=$(basename "$(dirname "$p")")
+  grep -vE '^[[:space:]]*#' "$p" | grep -qE 'pct create|create=\(pct create' || continue
+  assert_ok "${name}: pct create runs under umask 022" grep -qE 'umask 022' "$p"
+  assert_fail "${name}: never runs the create command under the script's umask" \
+    grep -qE '^[[:space:]]*(run )?"\$\{create\[@\]\}"[[:space:]]*$' "$p"
+done
+
 describe maya_update_switch
 # Maya's dashboard can fast-forward its own checkout (About > Updates) when the
 # server was started through maya.py, which maya.service does. That would move
