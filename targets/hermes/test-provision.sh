@@ -265,13 +265,13 @@ lacks '+ pct create'; lacks 'install-target.sh'; has 'pct pull 282 /etc/hermes-t
 pass '--reconfigure reruns the installer and registration; --integrate-only only registers'
 
 reject 'CT_ID must be numeric' CT_ID=99
-reject 'Set CT_ID for an unattended run' CT_ID=
-reject 'Set CT_ID for an unattended run' --reconfigure CT_ID=
-reject 'Set CT_ID for an unattended run' --integrate-only CT_ID=
-reject 'Set TEMPLATE for an unattended run' TEMPLATE=
-reject 'Set STORAGE for an unattended run' STORAGE=
-reject 'Set IP_CIDR for an unattended run' IP_CIDR=
-reject 'Set GATEWAY for an unattended run' GATEWAY=
+reject 'Set CT_ID for unattended provisioning' CT_ID=
+reject 'Set CT_ID for unattended provisioning' --reconfigure CT_ID=
+reject 'Set CT_ID for unattended provisioning' --integrate-only CT_ID=
+reject 'Set TEMPLATE for unattended provisioning' TEMPLATE=
+reject 'Set STORAGE for unattended provisioning' STORAGE=
+reject 'Set IP_CIDR for unattended provisioning' IP_CIDR=
+reject 'Set GATEWAY for unattended provisioning' GATEWAY=
 reject 'Hermes and router CT IDs must differ' CT_ID=280
 reject 'at least 64000' HERMES_CONTEXT_LENGTH=32768
 reject 'IP_CIDR' IP_CIDR=192.0.2.999/24
@@ -360,6 +360,7 @@ case $cmd in
         env\ *install-target.sh)
           cp "$FAKE_DIR/pve/firewall/$id.fw" "$FAKE_DIR/fw-at-guest" 2>/dev/null || : > "$FAKE_DIR/fw-at-guest"
           [[ -z ${FAKE_FW_EDIT:-} ]] || printf '[RULES]\n' >> "$FAKE_DIR/pve/firewall/$id.fw"
+          [[ -z ${FAKE_SWAP_EDIT_AT_GUEST:-} ]] || touch "$FAKE_DIR/swap-edit"
           [[ ${FAKE_GUEST_RC:-0} == 0 ]] || exit "$FAKE_GUEST_RC"
           touch "$FAKE_DIR/ct$id/installed"
           if [[ $all =~ HONCHO_URL=([^\ ]*) ]]; then printf '%s\n' "${BASH_REMATCH[1]}" > "$FAKE_DIR/ct$id/honcho-url"; fi
@@ -536,7 +537,10 @@ api80='IN ACCEPT -source 192.0.2.80/32 -p tcp -dport 8642 -log nolog # ollama-sm
 reset_fake
 out=$(real OPENWEBUI=false OPENWEBUI_ADMIN_TOKEN=) || fail "CLI-only run: $out"
 : > "$log"
-out=$(real --reconfigure) || fail "CLI-only to Open WebUI: $out"
+out=$(real --reconfigure) || fail "plain reconfigure of a CLI-only CT: $out"
+grep -q 'integrate-webui.py' "$log" && fail 'a plain --reconfigure turned on the Open WebUI the CT records as off'
+: > "$log"
+out=$(real --reconfigure OPENWEBUI=true) || fail "CLI-only to Open WebUI: $out"
 grep -qxF "$api80" "$fake/fw-at-integrate" || fail "the router was not admitted before Open WebUI checked Hermes: $(cat "$fake/fw-at-integrate")"
 [[ $(grep -c 'hermes-api$' "$fwfile") == 1 && $(grep -c 'hermes-dashboard$' "$fwfile") == 1 ]] || fail "API or dashboard rule count: $(cat "$fwfile")"
 pass '--reconfigure of a CLI-only CT with OPENWEBUI=true opens the API port to the router before Open WebUI checks it'
@@ -560,6 +564,24 @@ out=$(real --reconfigure ROUTER_IP=192.0.2.90 HERMES_API_PORT=8643 FAKE_FW_EDIT=
 [[ $out == *'changed meanwhile'* ]] || fail "edited firewall message: $out"
 grep -q 'integrate-webui.py' "$log" && fail 'Open WebUI registration ran after the firewall update failed'
 cp "$fwfile.clean" "$fwfile"
+# Every firewall write goes through targets/pve-firewall-swap.pl: an edit made
+# between reading the file and replacing it is kept, never overwritten.
+: > "$log"; touch "$fake/swap-edit"
+out=$(real --reconfigure ROUTER_IP=192.0.2.90 HERMES_API_PORT=8643 OSR_FW_SWAP_TEST_EDIT_FILE="$fake/swap-edit") &&
+  fail 'an edit racing the first firewall update was overwritten'
+[[ $out == *'Nothing was changed'* ]] || fail "racing first update message: $out"
+grep -q 'install-target.sh' "$log" && fail 'the guest ran after the first firewall update was refused'
+grep -q '# edited meanwhile' "$fwfile" || fail 'the racing edit was lost'
+cmp -s "$fwfile" <(cat "$fwfile.clean"; printf '# edited meanwhile\n') || fail "the file should be the racing edit alone: $(cat "$fwfile")"
+cp "$fwfile.clean" "$fwfile"; rm -f -- "$fake/swap-edit"; : > "$log"
+out=$(real --reconfigure ROUTER_IP=192.0.2.90 HERMES_API_PORT=8643 FAKE_SWAP_EDIT_AT_GUEST=1 OSR_FW_SWAP_TEST_EDIT_FILE="$fake/swap-edit") &&
+  fail 'an edit racing the final firewall update was overwritten'
+[[ $out == *'still admits the old and new rules'* ]] || fail "racing final update message: $out"
+grep -q '# edited meanwhile' "$fwfile" || fail 'the edit racing the final update was lost'
+[[ -z $(grep -vxFf "$fwfile" "$fwfile.clean") ]] || fail "the old rules should remain: $(cat "$fwfile")"
+grep -q 'dport 8643 ' "$fwfile" || fail "the new rule should remain next to them: $(cat "$fwfile")"
+cp "$fwfile.clean" "$fwfile"; rm -f -- "$fake/swap-edit"
+pass 'firewall updates go through the locked swap: a racing edit stops the run and is kept'
 pass '--reconfigure follows a router move and port change in both directions; a failed guest step keeps the old rules'
 
 printf 'IN ACCEPT -source 198.51.100.7/32 -p tcp -dport 8642 -log nolog\n' >> "$fwfile"
@@ -666,5 +688,30 @@ pass 'a run without root, or without its bridge, is refused before anything is c
 [[ $(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'hermes-setup.*' | wc -l) == "$stages_before" ]] ||
   fail 'a run left its host staging directory (it can hold the router key) behind'
 pass 'every run, failed or not, removes its host staging directory'
+
+# Guided prompts: Router first, then the Hermes container, then its settings
+# and Honcho; a reconfigure starts with the CT to change. Offers come from the
+# PVE configs (the router's tag and gateway, the Honcho CT's tag).
+lxc=$(mktemp -d)
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.80/24\ntags: osr-router\n' > "$lxc/280.conf"
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.85/24\ntags: osr-target;honcho\n' > "$lxc/285.conf"
+answers=$'\n282\nlocal:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst\nlocal-lvm\n192.0.2.82/24\n\n\n\n\n\n\n'
+out=$(env -i "PATH=$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR="$lxc" OPENWEBUI_ADMIN_TOKEN=x bash "$provision" --dry-run 2>&1 <<< "$answers") ||
+  fail "guided create: $out"
+order=$(sed '/== Hermes: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|Router CT ID or address|New Hermes CT ID|amd64 template|Root disk storage|Hermes IP/CIDR|Hermes gateway|OSR model or tier|Context window|Offer Hermes in Open WebUI|Run the Hermes dashboard|Honcho API URL' | paste -sd'|')
+[[ $order == '== Router ==|Router CT ID or address|== Hermes container ==|New Hermes CT ID|amd64 template|Root disk storage|Hermes IP/CIDR|Hermes gateway|== Hermes settings ==|OSR model or tier|Context window|Offer Hermes in Open WebUI|Run the Hermes dashboard|== Honcho memory ==|Honcho API URL|== Hermes: create ==' ]] ||
+  fail "create prompts out of order: $order"
+[[ $out == *'Router CT ID or address [280]'* && $out == *'Hermes gateway [192.0.2.1]'* ]] || fail "router offers: $out"
+[[ $out == *'Honcho API URL (none to skip) [http://192.0.2.85:8000]'* && $out == *'HONCHO_URL=http://192.0.2.85:8000'* ]] ||
+  fail "the Honcho CT on this host was not offered or taken: $out"
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.82/24\ntags: osr-target;hermes\n' > "$lxc/282.conf"
+out=$(env -i "PATH=$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR="$lxc" OPENWEBUI_ADMIN_TOKEN=x HONCHO_URL= bash "$provision" --dry-run --reconfigure 2>&1 <<< $'\n\n\n\n\n\n') ||
+  fail "guided reconfigure: $out"
+order=$(sed '/== Hermes: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|Hermes CT ID|Router CT ID or address' | paste -sd'|')
+[[ $order == '== Hermes container to reconfigure ==|Hermes CT ID|== Router ==|Router CT ID or address|== Hermes settings ==|== Hermes: reconfigure ==' ]] ||
+  fail "reconfigure prompts out of order: $order"
+[[ $out == *'Hermes CT ID [282]'* && $out != *'Hermes IP/CIDR'* ]] || fail "reconfigure CT offer: $out"
+rm -rf -- "$lxc"
+pass 'guided prompts: router, container, settings, Honcho; a reconfigure starts with the CT, offered by its tag'
 
 printf '%s provision cases passed. No CT was created.\n' "$passed"

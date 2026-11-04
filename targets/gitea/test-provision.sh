@@ -96,7 +96,7 @@ lacks '+ curl -fsSL'; lacks '+ env var_'
 has '+ pct exec 275 -- env GITEA_DOMAIN=192.0.2.75'
 pass '--reconfigure reruns the guest setup in the existing CT only'
 
-refuse 'needs the existing CT_ID' --reconfigure CT_ID=
+refuse 'Set CT_ID for unattended provisioning' --reconfigure CT_ID=
 refuse 'Use only one of' --create-only --reconfigure
 refuse 'not a usable Gitea user name' GITEA_ROUTER_USER=admin
 refuse 'must not be the administrator' GITEA_SITE_ADMIN=ollama-router

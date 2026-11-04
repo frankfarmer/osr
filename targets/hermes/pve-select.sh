@@ -141,3 +141,246 @@ pve_select_storage() {
         fi
     done
 }
+
+# --- Guided prompts -----------------------------------------------------------
+# Every provisioner asks in the same order, one titled section at a time:
+#   create:      Router (companions) -> <target> container -> <target> settings
+#   reconfigure: <target> container to change -> Router -> <target> settings
+# then pve_summary and pve_confirm. A value set in the environment is never
+# asked again. On --reconfigure the caller passes the CT's recorded value as the
+# default, so Enter keeps it. A new CT ID or address is never filled in:
+# pve_suggest offers one in brackets, but only a person can accept it.
+
+# pve_interactive: prompts may be shown. PVE_INTERACTIVE=true|false overrides
+# the terminal check (tests feed answers on stdin).
+pve_interactive() {
+    case ${PVE_INTERACTIVE:-} in
+        true) return 0 ;;
+        false) return 1 ;;
+    esac
+    [[ ${NONINTERACTIVE:-false} != true && -t 0 ]]
+}
+
+# pve_section TITLE: the heading of the next group of prompts. It is printed
+# with the group's first prompt, so a section with nothing to ask stays silent.
+_PVE_SECTION='' _PVE_NOTES=()
+pve_section() { _PVE_SECTION=$1; _PVE_NOTES=(); }
+
+# pve_note TEXT: one line of guidance under the section heading.
+pve_note() { _PVE_NOTES+=("$1"); }
+
+# _pve_heading: the pending heading and notes, once.
+_pve_heading() {
+    local line
+    [[ -n $_PVE_SECTION ]] || return 0
+    printf '\n== %s ==\n' "$_PVE_SECTION" >&2
+    for line in "${_PVE_NOTES[@]}"; do printf '  %s\n' "$line" >&2; done
+    _PVE_SECTION='' _PVE_NOTES=()
+}
+
+# pve_asks: settings with a default are asked. The OSR installer sets
+# PVE_ACCEPT_DEFAULTS=true: it asked its own questions, so a run under it takes
+# defaults and skips offers, and only a missing required value is asked.
+pve_asks() { [[ ${PVE_ACCEPT_DEFAULTS:-false} != true ]] && pve_interactive; }
+
+# _pve_read VAR LABEL SHOWN VALIDATOR HINT: ask until VALIDATOR accepts the
+# answer (Enter takes SHOWN). Without a validator, anything but empty passes.
+_pve_read() {
+    local variable=$1 label=$2 shown=$3 validator=$4 hint=$5 answer
+    _pve_heading
+    while true; do
+        printf '  %s%s: ' "$label" "${shown:+ [$shown]}" >&2
+        IFS= read -r answer || { printf '\n' >&2; die "Input ended while reading $variable."; }
+        answer=${answer:-$shown}
+        # "none" clears an optional setting that has a suggestion.
+        if [[ ${answer,,} == none && -n $validator ]] && "$validator" ''; then answer=''; break; fi
+        if [[ -n $validator ]]; then
+            "$validator" "$answer" && break
+            printf '    %s\n' "${hint:-Not a valid $label: ${answer:-(empty)}.}" >&2
+        else
+            [[ -n $answer ]] && break
+            printf '    %s is required.\n' "$label" >&2
+        fi
+    done
+    printf -v "$variable" '%s' "$answer"
+}
+
+# pve_ask VAR LABEL [DEFAULT] [VALIDATOR] [HINT]: a setting with a default (the
+# built-in one, or on --reconfigure the CT's recorded value). Kept when VAR is
+# already set; asked with [DEFAULT] when interactive; DEFAULT when unattended.
+# A VALIDATOR that accepts '' makes the setting optional.
+pve_ask() {
+    local variable=$1 label=$2 default=${3-} validator=${4:-} hint=${5:-}
+    [[ -z ${!variable:-} ]] || return 0
+    if pve_asks || { pve_interactive && [[ -z $default ]] && ! { [[ -n $validator ]] && "$validator" ''; }; }; then
+        _pve_read "$variable" "$label" "$default" "$validator" "$hint"
+        return 0
+    fi
+    if [[ -z $default ]] && ! { [[ -n $validator ]] && "$validator" ''; }; then
+        die "Set $variable for unattended provisioning, or run interactively on the PVE host."
+    fi
+    printf -v "$variable" '%s' "$default"
+}
+
+# pve_suggest VAR LABEL SUGGESTION [VALIDATOR] [HINT]: a value that must be
+# chosen (a CT ID, an address, a gateway). SUGGESTION is offered in brackets to
+# a person; an unattended run needs VAR preset and never takes it.
+pve_suggest() {
+    local variable=$1 label=$2 suggestion=${3-} validator=${4:-} hint=${5:-}
+    [[ -z ${!variable:-} ]] || return 0
+    pve_interactive ||
+        die "Set $variable for unattended provisioning, or run interactively on the PVE host."
+    _pve_read "$variable" "$label" "$suggestion" "$validator" "$hint"
+}
+
+# pve_offer VAR LABEL SUGGESTION VALIDATOR [HINT]: an optional setting with a
+# suggestion a person can take (Enter) or refuse ("none"). Unattended runs
+# leave it empty unless VAR is preset. VALIDATOR must accept ''.
+pve_offer() {
+    local variable=$1 label=$2 suggestion=${3-} validator=$4 hint=${5:-}
+    [[ -z ${!variable:-} ]] || return 0
+    pve_asks || return 0
+    _pve_read "$variable" "$label${suggestion:+ (none to skip)}" "$suggestion" "$validator" "$hint"
+}
+
+# pve_ask_yes_no VAR LABEL DEFAULT(true|false): a true/false setting.
+pve_ask_yes_no() {
+    local variable=$1 label=$2 default=$3 answer
+    [[ -z ${!variable:-} ]] || return 0
+    if ! pve_asks; then printf -v "$variable" '%s' "$default"; return 0; fi
+    _pve_heading
+    while true; do
+        if [[ $default == true ]]; then printf '  %s [Y/n]: ' "$label" >&2; else printf '  %s [y/N]: ' "$label" >&2; fi
+        IFS= read -r answer || { printf '\n' >&2; die "Input ended while reading $variable."; }
+        case ${answer,,} in
+            '') printf -v "$variable" '%s' "$default"; return 0 ;;
+            y|yes) printf -v "$variable" true; return 0 ;;
+            n|no) printf -v "$variable" false; return 0 ;;
+        esac
+        printf '    Answer y or n.\n' >&2
+    done
+}
+
+# pve_summary TITLE: the heading of the plan; pve_row LABEL VALUE: one line of
+# it. Printed for every run, so a log shows what was used.
+pve_summary() { _PVE_SECTION=''; printf '\n== %s ==\n' "$1" >&2; }
+pve_row() { printf '  %-26s %s\n' "$1" "${2:-(none)}" >&2; }
+
+# pve_confirm QUESTION: an interactive run confirms the plan before anything
+# changes. Unattended runs, dry runs and PVE_CONFIRM=false (the OSR installer,
+# which already confirmed its plan) go ahead.
+pve_confirm() {
+    local answer
+    [[ ${PVE_CONFIRM:-true} == true && ${dry_run:-0} == 0 ]] && pve_interactive || return 0
+    printf '\n%s [Y/n]: ' "$1" >&2
+    IFS= read -r answer || { printf '\n' >&2; die 'Input ended; nothing was changed.'; }
+    [[ ${answer,,} =~ ^(|y|yes)$ ]] || die 'Stopped at your request; nothing was changed.'
+}
+
+# pve_tagged_ct TAG: the ID of the one CT on this node tagged TAG (the router
+# is tagged osr-router, each target with its name), or nothing when there is
+# none or more than one.
+pve_tagged_ct() {
+    local tag=$1 dir=${PVE_LXC_DIR:-/etc/pve/lxc} file found=''
+    [[ -d $dir ]] || return 0
+    for file in "$dir"/*.conf; do
+        [[ -f $file ]] || continue
+        # The first section only: later [snapshot] sections repeat old settings.
+        if awk -v tag="$tag" '
+            /^\[/ { exit }
+            /^tags:/ { sub(/^tags:[[:space:]]*/, ""); n = split($0, t, /[;, ]+/)
+                       for (i = 1; i <= n; i++) if (t[i] == tag) found = 1 }
+            END { exit !found }' "$file"; then
+            [[ -z $found ]] || return 0
+            found=$(basename "$file" .conf)
+        fi
+    done
+    [[ -z $found ]] || printf '%s\n' "$found"
+}
+
+# pve_ct_with_ip IP: the ID of the CT on this node whose net0 has IP, or nothing.
+pve_ct_with_ip() {
+    local dir=${PVE_LXC_DIR:-/etc/pve/lxc} file
+    [[ -n $1 && -d $dir ]] || return 0
+    for file in "$dir"/*.conf; do
+        [[ -f $file ]] || continue
+        if awk -v ip="$1" '/^\[/ { exit } /^net0:/ && index($0, "ip=" ip "/") { found = 1 } END { exit !found }' "$file"; then
+            basename "$file" .conf; return 0
+        fi
+    done
+}
+
+# pve_ct_net ID ip|gw|cidr|bridge: one field of a CT's net0 on this node (ip
+# without its prefix), or nothing.
+pve_ct_net() {
+    local file=${PVE_LXC_DIR:-/etc/pve/lxc}/$1.conf value
+    [[ -r $file ]] || return 0
+    value=$(awk '/^\[/ { exit } /^net0:/ { print; exit }' "$file")
+    case $2 in
+        ip) value=$(sed -nE 's/.*[ ,:]ip=([0-9.]+)\/[0-9]+.*/\1/p' <<< "$value") ;;
+        cidr) value=$(sed -nE 's/.*[ ,:]ip=([0-9.]+\/[0-9]+).*/\1/p' <<< "$value") ;;
+        gw) value=$(sed -nE 's/.*[ ,:]gw=([0-9.]+).*/\1/p' <<< "$value") ;;
+        bridge) value=$(sed -nE 's/.*[ ,:]bridge=([^,]+).*/\1/p' <<< "$value") ;;
+        *) return 1 ;;
+    esac
+    [[ -z $value ]] || printf '%s\n' "$value"
+}
+
+# Validators for the shared prompts.
+pve_valid_ct_id() { [[ $1 =~ ^[1-9][0-9]{2,8}$ ]]; }
+pve_valid_ipv4() {
+    local octet
+    [[ $1 =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    for octet in "${BASH_REMATCH[@]:1}"; do (( 10#$octet <= 255 )) || return 1; done
+}
+pve_valid_cidr() {
+    local address prefix
+    [[ $1 =~ ^([0-9.]+)/([0-9]{1,2})$ ]] || return 1
+    address=${BASH_REMATCH[1]} prefix=${BASH_REMATCH[2]}
+    pve_valid_ipv4 "$address" && (( 10#$prefix >= 1 && 10#$prefix <= 32 ))
+}
+pve_valid_cidr_or_dhcp() { [[ $1 == dhcp ]] || pve_valid_cidr "$1"; }
+pve_valid_optional_ipv4() { [[ -z $1 ]] || pve_valid_ipv4 "$1"; }
+
+# pve_ask_router [ip]: the Router section for a companion. ROUTER_CT_ID is
+# offered from PVE_ROUTER_SUGGESTION, else the one CT tagged osr-router; with
+# "ip", ROUTER_IP (the address this target reaches the router at) from that
+# CT's net0.
+pve_ask_router() {
+    local suggestion
+    pve_section 'Router'
+    # A reconfigure offers the router the CT recorded (PVE_ROUTER_SUGGESTION).
+    suggestion=${PVE_ROUTER_SUGGESTION:-$(pve_tagged_ct osr-router)}
+    pve_suggest ROUTER_CT_ID 'Router CT ID' "$suggestion" pve_valid_ct_id 'Use the router CT ID (100 or more).'
+    if [[ ${1:-} == ip ]]; then
+        suggestion=$(pve_ct_net "$ROUTER_CT_ID" ip)
+        pve_suggest ROUTER_IP 'Router IP' "$suggestion" pve_valid_ipv4 'Use the IPv4 address the router answers on.'
+    fi
+}
+
+# pve_ask_existing_ct TAG NAME [VERB]: the CT a --reconfigure (VERB) changes,
+# offered from the one CT tagged TAG.
+pve_ask_existing_ct() {
+    pve_section "$2 container to ${3:-reconfigure}"
+    pve_suggest CT_ID "$2 CT ID" "$(pve_tagged_ct "$1")" pve_valid_ct_id 'Use the existing CT ID (100 or more).'
+}
+
+# pve_ask_new_ct NAME: the new CT's ID, first in the NAME container section.
+pve_ask_new_ct() {
+    pve_section "$1 container"
+    pve_suggest CT_ID "New $1 CT ID (unused)" '' pve_valid_ct_id 'Use a free numeric ID of 100 or more.'
+}
+
+# pve_ask_network NAME [dhcp]: IP_CIDR, then GATEWAY (skipped for dhcp, which
+# "dhcp" allows). The gateway is offered from the router CT, or else the one
+# CT tagged osr-router: targets usually share its network.
+pve_ask_network() {
+    local validator=pve_valid_cidr hint='Use a.b.c.d/nn.' router suggestion
+    if [[ ${2:-} == dhcp ]]; then validator=pve_valid_cidr_or_dhcp hint='Use a.b.c.d/nn or dhcp.'; fi
+    pve_suggest IP_CIDR "$1 IP/CIDR${2:+ (or dhcp)}" '' "$validator" "$hint"
+    [[ $IP_CIDR != dhcp ]] || return 0
+    router=${ROUTER_CT_ID:-$(pve_tagged_ct osr-router)}
+    suggestion=''
+    [[ -z $router ]] || suggestion=$(pve_ct_net "$router" gw)
+    pve_suggest GATEWAY "$1 gateway" "$suggestion" pve_valid_ipv4 'Use an IPv4 address.'
+}

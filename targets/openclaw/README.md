@@ -221,7 +221,10 @@ openclaw-api`, `-dashboard`, `-router` and `-model`. `--reconfigure` replaces
 only those, puts them first in `[RULES]` and keeps every other line. Before
 the guest step the new rules are added next to the old ones; once it has
 succeeded, the old ones are removed. The egress mode is read from the file's
-`policy_out` and never changed. A missing firewall file is left missing.
+`policy_out` and never changed. A missing firewall file is left missing. Each write goes through
+`targets/pve-firewall-swap.pl`: under the CT's Proxmox firewall lock, and only
+if the file still holds what the run read, so an edit made meanwhile (the GUI,
+another provisioner) stops the run and is kept, never overwritten.
 
 ## Use and maintain OpenClaw
 

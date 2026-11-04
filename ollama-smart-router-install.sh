@@ -1981,8 +1981,11 @@ run_target_provisioner() {
       CORES MEMORY MEMORY_MB SWAP SWAP_MB ROOTFS_GB ONBOOT TEMPLATE FIREWALL NONINTERACTIVE \
       ROUTER ROUTER_CT_ID ROUTER_SSH_HOST ROUTER_IP ROUTER_URL ROUTER_API_KEY \
       OPENWEBUI_PORT OPENWEBUI_ADMIN_TOKEN TARGET_ADMIN_TOKEN COMFYUI_IMAGE_VARIANT \
-      HF_TOKEN TARGET_HF_TOKEN
+      HF_TOKEN TARGET_HF_TOKEN PVE_INTERACTIVE PVE_ROUTER_SUGGESTION
     export CT_ID="$id" IP_CIDR="$ip" GATEWAY="$gateway" STORAGE="$storage" BRIDGE="$bridge"
+    # The installer already asked its questions and showed one summary: the
+    # provisioner takes the defaults for the rest and does not ask to confirm.
+    export PVE_ACCEPT_DEFAULTS=true PVE_CONFIRM=false
     [[ -z "$nameserver" ]] || export NAMESERVER="$nameserver"
     [[ -z "$template" ]] || export TEMPLATE="$template"
     # GITEA_COMMUNITY_SCRIPT_URL / _SHA256 (and MATTERMOST_*) select and pin a

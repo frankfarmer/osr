@@ -5,7 +5,11 @@ IP/CIDR (or `dhcp`), and a gateway for a static IP. It lists eligible template
 and `rootdir` storage. Preset `CT_ID`, `IP_CIDR`, `GATEWAY`,
 `TEMPLATE_STORAGE`, and `STORAGE` to skip those prompts. No CT ID or IP is
 selected automatically. The community script chooses or downloads its Debian
-template. `--reconfigure` and dry runs skip these Proxmox queries.
+template. `--reconfigure` and dry runs skip these Proxmox queries;
+`--reconfigure` instead asks which Gitea CT to reconfigure (offering the one
+tagged `gitea`) and offers each account setting from what the running CT
+recorded, so Enter keeps it. A summary is shown to confirm before anything
+changes.
 
 Gitea holds the router's **configuration repository**. The router clones it at
 provisioning, and `manage-model-servers commit` pushes every change to it (see

@@ -202,6 +202,8 @@ case $* in
   'alembic upgrade head')
     echo "alembic dims=${EMBEDDING_VECTOR_DIMENSIONS:-from-env-file} $head" >> "$FAKE_LOG"
     echo "half-migrated $head" > "$FAKE_DIR/db-data"
+    # A signal test interrupts this migration halfway.
+    if [[ $head == "${FAKE_SLOW_MIGRATE_COMMIT:-none}" ]]; then : > "$FAKE_DIR/migrating"; /bin/sleep 2; fi
     [[ $head != "${FAKE_MIGRATE_FAIL_COMMIT:-none}" ]] || exit 1
     echo "migrated $head" > "$FAKE_DIR/db-data" ;;
   'python scripts/configure_embeddings.py --yes') echo 'configure_embeddings' >> "$FAKE_LOG" ;;
@@ -232,9 +234,10 @@ fresh() {
   make_uv; make_bun
   : > "$FAKE_LOG"
 }
+guest_prefix=() guest_exec=''
 guest() {
   : > "$FAKE_LOG"
-  env PATH="$bin:$PATH" FAKE_OPT="$tmp/ct/opt" \
+  ${guest_exec:+exec} "${guest_prefix[@]}" env PATH="$bin:$PATH" FAKE_OPT="$tmp/ct/opt" \
     HONCHO_DEPLOY_DIR="$tmp/ct/deploy" HONCHO_OPT="$tmp/ct/opt" HONCHO_ETC="$tmp/ct/etc" \
     HONCHO_STATE_DIR="$tmp/ct/state" HONCHO_HOME="$tmp/ct/home" HONCHO_UV_DIR="$tmp/uv" \
     HONCHO_BUN_DIR="$tmp/bun" HONCHO_UNIT_DIR="$tmp/ct/units" HONCHO_CPUINFO="$tmp/ct/cpuinfo" \
@@ -347,6 +350,31 @@ out=$(guest HONCHO_REF=v3.7.0 FAKE_MIGRATE_FAIL_COMMIT="$(printf 'd%.0s' {1..40}
 assert_ne "a failed migration fails the run" 0 "$rc"
 assert_eq "and the half-migrated database is replaced by the dump" "migrated $(printf 'b%.0s' {1..40})" "$(cat "$fake/db-data")"
 assert_fail "nothing set aside remains after a clean rollback" test -e "$tmp/ct/state/rollback"
+
+describe honcho_signal_rollback
+# A signal halfway through a migration (Ctrl-C, a closed SSH session, kill)
+# rolls back like a failure: without the signal traps bash would run the EXIT
+# trap with status 0 and leave the half-migrated database. perl restores
+# SIGINT, which a background job otherwise starts with ignored.
+guest_prefix=(perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die "exec: $!"' --)
+for signal in TERM INT HUP; do
+  rm -f -- "$fake/migrating"
+  # The background subshell execs the installer, so $! is the installer.
+  ( guest_exec=1 guest HONCHO_REF=v3.7.0 FAKE_SLOW_MIGRATE_COMMIT="$(printf 'd%.0s' {1..40})" \
+      OSR_INTERRUPT_LOG="$fake/interrupt.log" > "$fake/signal-out" ) &
+  pid=$!
+  for _ in {1..100}; do [[ -e $fake/migrating ]] && break; /bin/sleep 0.1; done
+  kill -"$signal" "$pid"
+  rc=0; wait "$pid" || rc=$?
+  out=$(cat "$fake/signal-out" "$fake/interrupt.log" 2>/dev/null || true)
+  assert_ne "SIG$signal halfway through a migration fails the run" 0 "$rc"
+  assert_contains "and puts the previous release back" "The previous Honcho (bbbbbbbbbbbb) is running again." "$out"
+  assert_eq "with the database from the dump" "migrated $(printf 'b%.0s' {1..40})" "$(cat "$fake/db-data")"
+  assert_eq "at its commit" "$(printf 'b%.0s' {1..40})" "$(cat "$tmp/ct/opt/.git/FAKE_HEAD")"
+  assert_fail "and nothing set aside remains" test -e "$tmp/ct/state/rollback"
+  rm -f -- "$fake/interrupt.log"
+done
+guest_prefix=()
 
 describe honcho_rotate_keys
 secret=$(<"$etc/jwt-secret")

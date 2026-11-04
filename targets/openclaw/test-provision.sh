@@ -189,12 +189,12 @@ lacks '+ pct create'; lacks 'install-target.sh'; has 'pct pull 283 /etc/openclaw
 pass '--reconfigure reruns the installer and registration; --integrate-only only registers'
 
 reject 'CT_ID must be numeric' CT_ID=99
-reject 'Set CT_ID for an unattended run' CT_ID=
-reject 'Set CT_ID for an unattended run' --reconfigure CT_ID=
-reject 'Set TEMPLATE for an unattended run' TEMPLATE=
-reject 'Set STORAGE for an unattended run' STORAGE=
-reject 'Set IP_CIDR for an unattended run' IP_CIDR=
-reject 'Set GATEWAY for an unattended run' GATEWAY=
+reject 'Set CT_ID for unattended provisioning' CT_ID=
+reject 'Set CT_ID for unattended provisioning' --reconfigure CT_ID=
+reject 'Set TEMPLATE for unattended provisioning' TEMPLATE=
+reject 'Set STORAGE for unattended provisioning' STORAGE=
+reject 'Set IP_CIDR for unattended provisioning' IP_CIDR=
+reject 'Set GATEWAY for unattended provisioning' GATEWAY=
 reject 'OpenClaw and router CT IDs must differ' CT_ID=280
 reject 'at least 32768' OPENCLAW_CONTEXT_LENGTH=16384
 reject 'OPENCLAW_MAX_TOKENS must be' OPENCLAW_MAX_TOKENS=40000
@@ -285,6 +285,7 @@ case $cmd in
           printf '%s\n' "$all" > "$FAKE_DIR/guest-env"
           cp "$FAKE_DIR/pve/firewall/$id.fw" "$FAKE_DIR/fw-at-guest" 2>/dev/null || : > "$FAKE_DIR/fw-at-guest"
           [[ -z ${FAKE_FW_EDIT:-} ]] || printf '[RULES]\n' >> "$FAKE_DIR/pve/firewall/$id.fw"
+          [[ -z ${FAKE_SWAP_EDIT_AT_GUEST:-} ]] || touch "$FAKE_DIR/swap-edit"
           [[ ${FAKE_GUEST_RC:-0} == 0 ]] || exit "$FAKE_GUEST_RC"
           touch "$FAKE_DIR/ct$id/installed"
           if [[ $all =~ HONCHO_URL=([^\ ]*) ]]; then printf '%s\n' "${BASH_REMATCH[1]}" > "$FAKE_DIR/ct$id/honcho-url"; fi
@@ -481,6 +482,24 @@ out=$(real --reconfigure ROUTER_IP=192.0.2.90 OPENCLAW_PORT=18790 FAKE_FW_EDIT=1
 [[ $out == *'changed meanwhile'* ]] || fail "edited firewall message: $out"
 grep -q 'integrate-webui.py' "$log" && fail 'Open WebUI registration ran after the firewall update failed'
 cp "$fwfile.clean" "$fwfile"
+# Every firewall write goes through targets/pve-firewall-swap.pl: an edit made
+# between reading the file and replacing it is kept, never overwritten.
+: > "$log"; touch "$fake/swap-edit"
+out=$(real --reconfigure ROUTER_IP=192.0.2.90 OPENCLAW_PORT=18790 OSR_FW_SWAP_TEST_EDIT_FILE="$fake/swap-edit") &&
+  fail 'an edit racing the first firewall update was overwritten'
+[[ $out == *'Nothing was changed'* ]] || fail "racing first update message: $out"
+grep -q 'install-target.sh' "$log" && fail 'the guest ran after the first firewall update was refused'
+grep -q '# edited meanwhile' "$fwfile" || fail 'the racing edit was lost'
+cmp -s "$fwfile" <(cat "$fwfile.clean"; printf '# edited meanwhile\n') || fail "the file should be the racing edit alone: $(cat "$fwfile")"
+cp "$fwfile.clean" "$fwfile"; rm -f -- "$fake/swap-edit"; : > "$log"
+out=$(real --reconfigure ROUTER_IP=192.0.2.90 OPENCLAW_PORT=18790 FAKE_SWAP_EDIT_AT_GUEST=1 OSR_FW_SWAP_TEST_EDIT_FILE="$fake/swap-edit") &&
+  fail 'an edit racing the final firewall update was overwritten'
+[[ $out == *'still admits the old and new rules'* ]] || fail "racing final update message: $out"
+grep -q '# edited meanwhile' "$fwfile" || fail 'the edit racing the final update was lost'
+[[ -z $(grep -vxFf "$fwfile" "$fwfile.clean") ]] || fail "the old rules should remain: $(cat "$fwfile")"
+grep -q 'dport 18790 ' "$fwfile" || fail "the new rule should remain next to them: $(cat "$fwfile")"
+cp "$fwfile.clean" "$fwfile"; rm -f -- "$fake/swap-edit"
+pass 'firewall updates go through the locked swap: a racing edit stops the run and is kept'
 rm -f -- "$fwfile"
 : > "$log"
 out=$(real --reconfigure ROUTER_IP=192.0.2.90 OPENCLAW_PORT=18790) || fail "missing firewall file: $out"
@@ -529,5 +548,30 @@ pass 'a run without root, or without its bridge, is refused before anything is c
 [[ $(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'openclaw-setup.*' | wc -l) == "$stages_before" ]] ||
   fail 'a run left its host staging directory (it can hold the router key) behind'
 pass 'every run, failed or not, removes its host staging directory'
+
+# Guided prompts: Router first, then the OpenClaw container, then its settings
+# and Honcho; a reconfigure starts with the CT to change. Offers come from the
+# PVE configs (the router's tag and gateway, the Honcho CT's tag).
+lxc=$(mktemp -d)
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.80/24\ntags: osr-router\n' > "$lxc/280.conf"
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.85/24\ntags: osr-target;honcho\n' > "$lxc/285.conf"
+answers=$'\n282\nlocal:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst\nlocal-lvm\n192.0.2.82/24\n\n\n\n\n\n\n\n'
+out=$(env -i "PATH=$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR="$lxc" OPENWEBUI_ADMIN_TOKEN=x bash "$provision" --dry-run 2>&1 <<< "$answers") ||
+  fail "guided create: $out"
+order=$(sed '/== OpenClaw: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|Router CT ID or address|New OpenClaw CT ID|amd64 template|Root disk storage|OpenClaw IP/CIDR|OpenClaw gateway|OSR model or tier|Context window|Max reply tokens|Offer OpenClaw in Open WebUI|Run the OpenClaw Control UI|Honcho API URL' | paste -sd'|')
+[[ $order == '== Router ==|Router CT ID or address|== OpenClaw container ==|New OpenClaw CT ID|amd64 template|Root disk storage|OpenClaw IP/CIDR|OpenClaw gateway|== OpenClaw settings ==|OSR model or tier|Context window|Max reply tokens|Offer OpenClaw in Open WebUI|Run the OpenClaw Control UI|== Honcho memory ==|Honcho API URL|== OpenClaw: create ==' ]] ||
+  fail "create prompts out of order: $order"
+[[ $out == *'Router CT ID or address [280]'* && $out == *'OpenClaw gateway [192.0.2.1]'* ]] || fail "router offers: $out"
+[[ $out == *'Honcho API URL (none to skip) [http://192.0.2.85:8000]'* && $out == *'HONCHO_URL=http://192.0.2.85:8000'* ]] ||
+  fail "the Honcho CT on this host was not offered or taken: $out"
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.82/24\ntags: osr-target;openclaw\n' > "$lxc/282.conf"
+out=$(env -i "PATH=$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR="$lxc" OPENWEBUI_ADMIN_TOKEN=x HONCHO_URL= bash "$provision" --dry-run --reconfigure 2>&1 <<< $'\n\n\n\n\n\n\n') ||
+  fail "guided reconfigure: $out"
+order=$(sed '/== OpenClaw: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|OpenClaw CT ID|Router CT ID or address' | paste -sd'|')
+[[ $order == '== OpenClaw container to reconfigure ==|OpenClaw CT ID|== Router ==|Router CT ID or address|== OpenClaw settings ==|== OpenClaw: reconfigure ==' ]] ||
+  fail "reconfigure prompts out of order: $order"
+[[ $out == *'OpenClaw CT ID [282]'* && $out != *'OpenClaw IP/CIDR'* ]] || fail "reconfigure CT offer: $out"
+rm -rf -- "$lxc"
+pass 'guided prompts: router, container, settings, Honcho; a reconfigure starts with the CT, offered by its tag'
 
 printf '%s provision cases passed. No CT was created.\n' "$passed"

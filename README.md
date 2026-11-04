@@ -304,6 +304,75 @@ existing CT, run `pct set <CT_ID> --tags '<tag>;<tag>'` on the host. The tag
 lists are in each `provision-lxc.sh` (the router's in
 `ollama-smart-router-install.sh`); keep this table in step when changing them.
 
+### Provisioner questions
+
+Run on a terminal, every `targets/<target>/provision-lxc.sh` asks its
+questions in sections, one subject at a time, and shows a summary to confirm
+before it changes anything:
+
+```
+== Router ==
+  Router CT ID or address [280]:
+
+== Hermes container ==
+  New Hermes CT ID (unused): 282
+  (numbered template and storage menus)
+  Hermes IP/CIDR: 192.0.2.82/24
+  Hermes gateway [192.0.2.1]:
+
+== Hermes settings ==
+  OSR model or tier [auto]:
+  Context window the model serves (tokens) [65536]:
+  Offer Hermes in Open WebUI (as hermes-agent)? [Y/n]:
+  Run the Hermes dashboard? [Y/n]:
+
+== Honcho memory ==
+  Honcho API URL (none to skip) [http://192.0.2.85:8000]:
+
+== Hermes: create ==
+  Router                     CT 280, http://192.0.2.80:8000
+  Hermes CT                  282 (hermes-target), ...
+Create Hermes CT 282? [Y/n]:
+```
+
+A `--reconfigure` of the same CT starts with the CT and offers what it has:
+
+```
+== Hermes container to reconfigure ==
+  Hermes CT ID [282]:
+== Router ==
+  Router CT ID or address [280]:
+== Hermes settings ==
+  OSR model or tier [auto]:
+  ...
+```
+
+- **Router first, then the target.** Targets that talk to the router ask
+  for it in a *Router* section, offered from the CT tagged `osr-router`. The
+  new CT's ID, template, storage, address and gateway follow together; the
+  gateway is offered from the router CT's network. The target's own settings
+  come last.
+- **Enter takes the value in brackets.** A new install offers defaults; a
+  CT ID or address is only ever *offered* to a person (the cluster's next free
+  ID, the router's gateway), never chosen for an unattended run. Optional
+  settings accept `none` to leave them off.
+- **`--reconfigure` starts from what is installed.** It first asks which CT
+  to reconfigure (offering the one with the target's tag), then the router
+  (offering the one the target already uses), and every setting shows the
+  CT's recorded value, so pressing Enter all the way keeps the install as it
+  is. Recorded values are read only from a running CT.
+- **Environment variables still win.** A preset variable is not asked, and
+  without a terminal (or with `NONINTERACTIVE=true`) nothing is asked: missing
+  required settings stop the run with the variable to set, and
+  `--reconfigure` keeps the recorded settings. `PVE_CONFIRM=false` skips the
+  confirmation. The router installer runs provisioners with
+  `PVE_ACCEPT_DEFAULTS=true PVE_CONFIRM=false`, since it has already asked
+  its questions and shown its own summary.
+
+The shared helpers are `targets/pve-select.sh`; each target directory keeps an
+identical copy (`targets/test-pve-select.sh` checks them). llama.cpp and
+AirLLM keep their own container prompts with the same order.
+
 ## How routing works
 
 The router polls configured hosts every 60 seconds and inventories their
@@ -586,7 +655,11 @@ Target upgrades check readiness and restore the prior code and settings on
 failure. Strata, Basalt, Maya, Xolotl and Avalon need disk for one runtime snapshot;
 their existing installation settings carry forward unless explicitly
 overridden. See the target README and [architecture upgrade contract](ARCHITECTURE.md#16-inference-targets-targets)
-before upgrading.
+before upgrading. Interrupting an upgrade (Ctrl-C, a closed SSH session)
+rolls it back like a failure; after a hangup its output is in the CT's
+`/var/log/osr-install-interrupted.log`. If a model target's rollback fails
+too, its next run stops at `/var/lib/<target>-target/rollback-failed` until
+you have inspected the kept snapshot and deleted that file.
 
 ### GPU drivers
 

@@ -220,6 +220,9 @@ restores the previous commit and that snapshot at their original paths,
 without building or downloading anything, and health-checks the previous
 service. The snapshot is deleted after a successful upgrade or rollback and
 kept only when the rollback fails too.
+When the rollback fails too, a `rollback-failed` file is left in `/var/lib/avalon-target/`
+and every later run stops there, changing nothing, so the last good runtime is
+not overwritten: inspect or restore the snapshot, then delete that file and rerun.
 
 ROCm releases replace each other in place (one repository per release), so a
 new `AVALON_ROCM_VERSION` cannot be rolled back to the old one by the snapshot;

@@ -623,7 +623,15 @@ service interruption. An unchanged healthy target is left alone. Successful
 upgrades require a target-specific readiness check; on failure, code and
 configuration are restored and the old runtime is health-checked. llama.cpp,
 AirLLM, Ollama and ComfyUI preserve an intentionally stopped service. The
-target README describes its snapshot or side-by-side release strategy.
+target README describes its snapshot or side-by-side release strategy. A
+signal (Ctrl-C, a closed SSH session, `kill`) during an upgrade rolls back
+like a failure: installers that roll back from an ERR trap carry
+`targets/signal-rollback.sh`, which runs that trap's rollback and ignores
+further signals meanwhile; those that run the upgrade in a subshell carry
+`targets/upgrade-guard.sh`, which records the signal so the failed subshell
+takes the rollback path; DeepSeek Harness and Honcho turn a signal into a
+failing exit for their EXIT-trap rollback. After a hangup the output goes to
+`/var/log/osr-install-interrupted.log` (`OSR_INTERRUPT_LOG`).
 
 Strata, Basalt, Maya, Xolotl and Avalon save the last good settings and use them on
 rerun unless non-empty environment overrides are given. An interrupted first
@@ -632,8 +640,11 @@ readable settings record require explicit values rather than fresh-install
 defaults. Their upgrades take an exclusive lock, snapshot the runnable tree
 and unit to `/var/lib/<target>-target/`, then remove the snapshot after a
 successful upgrade or rollback. Leave disk for one snapshot; it can contain
-secrets and is retained if rollback fails. Model data outside the checkout
-is not copied. Individual target tests exercise these guarantees.
+secrets and is retained if rollback fails, with a `rollback-failed` marker
+beside it: every later run stops at that marker (an upgrade would snapshot
+over the last good runtime, an unchanged run would hide it) until it is
+deleted. Model data outside the checkout is not copied. Individual target
+tests exercise these guarantees.
 
 ## 17. Companions and services (`targets/`)
 

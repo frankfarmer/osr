@@ -461,6 +461,24 @@ contains 'the snapshot is kept in' "$tmp_root/out"
 [[ -s $tree/var/lib/avalon-target/rollback-runtime.tar ]] || fail 'a failed rollback removed the snapshot'
 pass 'an upgrade is not healthy until /health answers and /v1/models lists the model; a failed rollback keeps its snapshot'
 
+# The kept snapshot is the last good runtime: the next run must not snapshot
+# over it or call an unchanged install healthy until someone has looked.
+[[ -e $tree/var/lib/avalon-target/rollback-failed ]] || fail 'a failed rollback left no marker'
+cp "$tree/var/lib/avalon-target/rollback-runtime.tar" "$tmp_root/kept.tar"
+: > "$log"
+if AVALON_COMMIT=$next run_target --upgrade > "$tmp_root/out" 2>&1; then
+    fail 'an upgrade over a failed rollback went ahead'
+fi
+contains 'A rollback failed earlier' "$tmp_root/out"
+if grep -qE '^(systemctl stop|git .* fetch )' "$log"; then fail 'a refused run stopped or fetched anything'; fi
+cmp -s "$tmp_root/kept.tar" "$tree/var/lib/avalon-target/rollback-runtime.tar" || fail 'a refused run changed the kept snapshot'
+if AVALON_COMMIT=$next run_target > "$tmp_root/out" 2>&1; then
+    fail 'an install over a failed rollback went ahead'
+fi
+contains 'A rollback failed earlier' "$tmp_root/out"
+rm -f -- "$tree/var/lib/avalon-target/rollback-failed" "$tmp_root/kept.tar"
+pass 'after a failed rollback the next run stops, changing nothing, until its marker is removed'
+
 : > "$log"
 AVALON_COMMIT=$next run_target > "$tmp_root/out" 2>&1 || { cat "$tmp_root/out"; fail 'reset to a healthy install'; }
 cp "$unit" "$tmp_root/good.service"; cp "$envfile" "$tmp_root/good.env"

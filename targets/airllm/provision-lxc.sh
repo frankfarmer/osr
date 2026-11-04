@@ -151,7 +151,11 @@ AIRLLM_MODEL_ALIAS=${AIRLLM_MODEL_ALIAS:-}
 min_disk=$(model_disk_gb "$AIRLLM_MODEL_ID")
 ROOTFS_GB=${ROOTFS_GB:-$min_disk}
 
-prompt_container_setting CT_ID 'CT ID (required)' '' valid_container_id 'Use a free numeric ID of 100 or more.'
+# --- Questions: the container, one section ----------------------------------
+if container_prompt_available && [[ -z ${CT_ID:-} || -z ${TEMPLATE:-} || -z ${STORAGE:-} || -z ${IP_CIDR:-} ]]; then
+    printf '\n== AirLLM container ==\n' >&2
+fi
+prompt_container_setting CT_ID 'New AirLLM CT ID (unused)' '' valid_container_id 'Use a free numeric ID of 100 or more.'
 pve_select_template TEMPLATE '^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/(debian-1[23]|ubuntu-2[46]\.04)-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
 positive_int ROOTFS_GB "$ROOTFS_GB"
 pve_select_storage STORAGE rootdir "$ROOTFS_GB"
@@ -165,10 +169,16 @@ prompt_container_setting TEMPLATE 'Template volume (Debian 12/13 or Ubuntu 24.04
     'Use <storage>:vztmpl/<debian-12|debian-13|ubuntu-24.04|ubuntu-26.04>-..._amd64.tar.zst (pveam download first).'
 prompt_container_setting STORAGE 'Root disk storage' "$storage_default" valid_container_storage \
     'Use an active storage ID that supports rootdir content.'
-prompt_container_setting IP_CIDR 'IPv4 address/CIDR or dhcp' '' valid_container_ip 'Use a.b.c.d/nn or dhcp.'
+prompt_container_setting IP_CIDR 'AirLLM IP/CIDR (or dhcp)' '' valid_container_ip 'Use a.b.c.d/nn or dhcp.'
 GATEWAY=${GATEWAY:-}
 if [[ $IP_CIDR != dhcp ]]; then
-    prompt_container_setting GATEWAY 'Gateway' '' valid_container_gateway 'Use an IPv4 address.'
+    # Offered (to a person only) from the router CT: targets share its network.
+    gateway_offer=''
+    if container_prompt_available; then
+        router_ct=$(pve_tagged_ct osr-router)
+        [[ -z $router_ct ]] || gateway_offer=$(pve_ct_net "$router_ct" gw)
+    fi
+    prompt_container_setting GATEWAY 'AirLLM gateway' "$gateway_offer" valid_container_gateway 'Use an IPv4 address.'
 fi
 
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die 'CT_HOSTNAME must be a DNS label.'
@@ -249,6 +259,12 @@ if (( ${#devices[@]} )); then
 fi
 
 trap 'printf "Provisioning stopped at line %s. Any newly created CT is kept for inspection.\n" "$LINENO" >&2' ERR
+pve_summary "AirLLM: create"
+pve_row 'AirLLM CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on $STORAGE"
+pve_row 'Template' "$TEMPLATE"
+pve_row 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+pve_row 'Model' "$AIRLLM_MODEL_ID"
+pve_confirm "Create AirLLM CT $CT_ID?"
 (umask 022; run "${create[@]}")
 run pct start "$CT_ID"
 if (( ! dry_run )); then

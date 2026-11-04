@@ -208,9 +208,25 @@ openclaw_fw_update() {
   fi
 }
 
-# write_if_changed FILE CONTENT: replace FILE's content, unless it is the same.
-write_if_changed() {
-  [[ "$(cat -- "$1")" == "$2" ]] || printf '%s\n' "$2" > "$1"
+# fw_replace FILE SEEN CONTENT: FILE becomes CONTENT through the shared
+# targets/pve-firewall-swap.pl (the CT's Proxmox firewall lock and a staged
+# rename), only while FILE still holds SEEN, the copy CONTENT was built from.
+# An edit made meanwhile (the GUI, another provisioner) is never overwritten.
+# 0: replaced or unchanged; 1: FILE changed meanwhile, left as it is; 2: failed.
+fw_replace() {
+  local vmid=${1##*/} new
+  vmid=${vmid%.fw}
+  new=$(mktemp "$stage/firewall.new.XXXXXX") || return 2
+  printf '%s\n' "$3" > "$new" || { rm -f -- "$new"; return 2; }
+  local status=0
+  perl "$source_dir/../pve-firewall-swap.pl" "$1" "$2" "$new" "$vmid" "$PVE_ETC" || status=$?
+  rm -f -- "$new"
+  return "$status"
+}
+# fw_snapshot FILE: a private copy of FILE in the stage, to build its update from.
+fw_snapshot() {
+  cp -- "$1" "$stage/firewall.seen" || die "Could not read $1."
+  printf '%s\n' "$stage/firewall.seen"
 }
 # inventory_endpoints FILE: one host and port per registered model server. A
 # URL without a port uses its scheme's default (80 for http, 443 for https).
@@ -338,14 +354,6 @@ run() {
   printf '+'; printf ' %q' "$@"; printf '\n'
   if (( ! dry_run )); then "$@"; fi
 }
-prompt_required() {
-  local name=$1 label=$2
-  [[ -n ${!name} ]] && return 0
-  [[ -t 0 ]] || die "Set ${name} for an unattended run (or run interactively to be prompted)."
-  # shellcheck disable=SC2229  # reads into the variable that $name names
-  read -r -p "$label" "$name" || die "No ${name} was entered."
-  [[ -n ${!name} ]] || die "${name} is required."
-}
 
 dry_run=0
 mode=create
@@ -382,36 +390,71 @@ ONBOOT=${ONBOOT:-1}
 NAMESERVER=${NAMESERVER:-}
 VLAN_TAG=${VLAN_TAG:-}
 EGRESS=${EGRESS:-restricted}
-OPENWEBUI=${OPENWEBUI:-true}
+OPENWEBUI=${OPENWEBUI:-}
 OPENWEBUI_PORT=${OPENWEBUI_PORT:-}
 TASK_MODEL=${TASK_MODEL-fast}
-OPENCLAW_MODEL=${OPENCLAW_MODEL:-auto}
-OPENCLAW_CONTEXT_LENGTH=${OPENCLAW_CONTEXT_LENGTH:-65536}
-OPENCLAW_MAX_TOKENS=${OPENCLAW_MAX_TOKENS:-8192}
+OPENCLAW_MODEL=${OPENCLAW_MODEL:-}
+OPENCLAW_CONTEXT_LENGTH=${OPENCLAW_CONTEXT_LENGTH:-}
+OPENCLAW_MAX_TOKENS=${OPENCLAW_MAX_TOKENS:-}
 OPENCLAW_VERSION=${OPENCLAW_VERSION:-latest}
 OPENCLAW_NODE_VERSION=${OPENCLAW_NODE_VERSION:-24}
 NVM_VERSION=${NVM_VERSION:-v0.40.4}
 nvm_sha_set=${NVM_INSTALLER_SHA256+set}
 NVM_INSTALLER_SHA256=${NVM_INSTALLER_SHA256-}
 OPENCLAW_PORT=${OPENCLAW_PORT:-18789}
-OPENCLAW_DASHBOARD=${OPENCLAW_DASHBOARD:-true}
+OPENCLAW_DASHBOARD=${OPENCLAW_DASHBOARD:-}
 # Taken out of the environment at once so no child process (pct, ssh) inherits it.
 saved_admin_token=${OPENWEBUI_ADMIN_TOKEN:-}
 unset OPENWEBUI_ADMIN_TOKEN
 
-# --- which router -------------------------------------------------------------------
+# --- Questions, one section at a time -----------------------------------------
+template_re='^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/debian-(12|13)-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
+valid_template() { [[ $1 =~ $template_re ]]; }
+valid_storage() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+valid_router() { classify_router "$1" >/dev/null; }
+valid_model() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; }
+valid_context() { [[ $1 =~ ^[1-9][0-9]{4,6}$ ]] && (( $1 >= 32768 )); }
+valid_tokens() { [[ $1 =~ ^[1-9][0-9]{2,6}$ ]]; }
+valid_honcho_url() { [[ -z $1 || $1 =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]]; }
+# recorded_or KEY DEFAULT: the CT's recorded KEY (a reconfigure), else DEFAULT.
+openclaw_recorded=''
+recorded_or() {
+  local value
+  value=$(awk -v key="$1" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' <<< "$openclaw_recorded")
+  printf '%s\n' "${value:-$2}"
+}
 if [[ -n $ROUTER_CT_ID && -n $ROUTER_SSH_HOST ]] ||
    [[ -n $ROUTER && ( -n $ROUTER_CT_ID || -n $ROUTER_SSH_HOST ) ]]; then
   die 'Set only one of ROUTER, ROUTER_CT_ID, or ROUTER_SSH_HOST.'
 fi
-if [[ -z $ROUTER_CT_ID && -z $ROUTER_SSH_HOST ]]; then
-  if [[ -z $ROUTER ]]; then
-    [[ -t 0 ]] || die 'Set ROUTER to the router CT ID on this host, or the IP/hostname of the router LXC/VM (root SSH login).'
-    printf 'Existing ollama-smart-router:\n' >&2
-    printf '  a CT ID on this Proxmox host (e.g. 280), or\n' >&2
-    printf '  the IP address or hostname of its LXC/VM, reached as %s over SSH\n' "$ROUTER_SSH_USER" >&2
-    read -r -p 'Router CT ID or IP address: ' ROUTER || die 'No router location was entered.'
+# ask_router: the Router section. A CT ID on this host, or the IP/hostname
+# of the router's LXC/VM, reached as root over SSH.
+ask_router() {
+  [[ -z $ROUTER_CT_ID && -z $ROUTER_SSH_HOST ]] || return 0
+  [[ -n $ROUTER ]] || pve_interactive ||
+    die 'Set ROUTER to the router CT ID on this host, or the IP/hostname of the router LXC/VM (root SSH login).'
+  pve_section 'Router'
+  pve_note "A router CT ID on this Proxmox host, or the IP/hostname of its LXC/VM (reached as $ROUTER_SSH_USER over SSH)."
+  pve_suggest ROUTER 'Router CT ID or address' "${PVE_ROUTER_SUGGESTION:-$(pve_tagged_ct osr-router)}" valid_router \
+    'Use a CT ID (100 or more), an IPv4 address or a hostname.'
+}
+if [[ $mode == create ]]; then
+  ask_router
+else
+  if [[ $mode == integrate ]]; then pve_ask_existing_ct openclaw OpenClaw register; else pve_ask_existing_ct openclaw OpenClaw; fi
+  [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] || die 'OpenClaw CT_ID must be numeric and at least 100; it is separate from the router CT ID or IP.'
+  if (( ! dry_run )) && command -v pct >/dev/null && pct status "$CT_ID" 2>/dev/null | grep -q 'status: running'; then
+    # What the CT records: the defaults for every question below.
+    openclaw_recorded=$(pct exec "$CT_ID" -- cat /etc/openclaw-target/settings 2>/dev/null | tr -d '\r' || true)
+    if [[ $(recorded_or ROUTER_URL '') =~ ^https?://([0-9.]+): ]]; then
+      # shellcheck disable=SC2034  # read by ask_router
+      PVE_ROUTER_SUGGESTION=$(pve_ct_with_ip "${BASH_REMATCH[1]}")
+    fi
   fi
+  ask_router
+fi
+if [[ -z $ROUTER_CT_ID && -z $ROUTER_SSH_HOST ]]; then
+  [[ -n $ROUTER ]] || die 'Set ROUTER to the router CT ID on this host, or the IP/hostname of the router LXC/VM (root SSH login).'
   router_spec=$(classify_router "$ROUTER") ||
     die "ROUTER '$ROUTER' is neither a CT ID (100 or more) nor an IPv4 address or hostname."
   case $router_spec in
@@ -431,24 +474,57 @@ else
   router_kind=ssh
   router_label="router ${ROUTER_SSH_USER}@${ROUTER_SSH_HOST}"
 fi
-
-# --- validation, before anything is touched ---------------------------------------
 if [[ $mode == create ]]; then
-  prompt_required CT_ID 'New OpenClaw CT ID on this Proxmox host (unused, at least 100): '
-else
-  prompt_required CT_ID 'Existing OpenClaw CT ID on this Proxmox host: '
-fi
-[[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] || die 'OpenClaw CT_ID must be numeric and at least 100; it is separate from the router CT ID or IP.'
-[[ $router_kind == ssh || $CT_ID != "$ROUTER_CT_ID" ]] || die 'OpenClaw and router CT IDs must differ.'
-if [[ $mode == create ]]; then
-  pve_select_template TEMPLATE '^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/debian-(12|13)-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
+  pve_ask_new_ct OpenClaw
+  [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] || die 'OpenClaw CT_ID must be numeric and at least 100; it is separate from the router CT ID or IP.'
+  pve_select_template TEMPLATE "$template_re"
   positive ROOTFS_GB "$ROOTFS_GB"
   pve_select_storage STORAGE rootdir "$ROOTFS_GB"
-  prompt_required TEMPLATE 'Downloaded Debian 12/13 amd64 template (e.g. local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst): '
-  prompt_required STORAGE 'Storage for the new OpenClaw CT root disk (e.g. local-lvm): '
-  prompt_required IP_CIDR 'Static IP/CIDR for the new OpenClaw CT: '
-  prompt_required GATEWAY 'Gateway for the new OpenClaw CT: '
+  pve_suggest TEMPLATE 'Debian 12/13 amd64 template' '' valid_template 'Use a downloaded Debian 12/13 amd64 template (storage:vztmpl/...).'
+  pve_suggest STORAGE 'Root disk storage' '' valid_storage
+  pve_ask_network OpenClaw
 fi
+[[ $router_kind == ssh || $CT_ID != "$ROUTER_CT_ID" ]] || die 'OpenClaw and router CT IDs must differ.'
+
+if [[ $mode != integrate ]]; then
+  pve_section 'OpenClaw settings'
+  pve_note 'OpenClaw needs an OSR model that calls tools, with 32768 tokens of context or more.'
+  pve_ask OPENCLAW_MODEL 'OSR model or tier' "$(recorded_or OPENCLAW_MODEL auto)" valid_model
+  pve_ask OPENCLAW_CONTEXT_LENGTH 'Context window the model serves (tokens)' "$(recorded_or OPENCLAW_CONTEXT_LENGTH 65536)" valid_context \
+    'Use a whole number of tokens, 32768 or more.'
+  pve_ask OPENCLAW_MAX_TOKENS 'Max reply tokens' "$(recorded_or OPENCLAW_MAX_TOKENS 8192)" valid_tokens 'Use a whole number of tokens.'
+  pve_ask_yes_no OPENWEBUI 'Offer OpenClaw in Open WebUI (as openclaw)?' "$(recorded_or OPENCLAW_API true)"
+  pve_ask_yes_no OPENCLAW_DASHBOARD 'Run the OpenClaw Control UI?' "$(recorded_or OPENCLAW_DASHBOARD true)"
+  # Honcho memory: on a reconfigure the recorded one ("none" turns it off); on
+  # a create the Honcho CT on this host is offered. Unattended creates never
+  # turn it on by themselves.
+  if [[ -z ${HONCHO_URL+set} ]]; then
+    pve_section 'Honcho memory'
+    pve_note 'Shared long-term memory with Hermes and DeepSeek Harness (the osr workspace).'
+    honcho_recorded=$(recorded_or HONCHO_URL '')
+    if [[ -n $honcho_recorded ]]; then
+      pve_ask HONCHO_URL 'Honcho API URL (none to turn off)' "$honcho_recorded" valid_honcho_url
+    elif [[ $mode == create ]]; then
+      honcho_ct_here=$(pve_tagged_ct honcho) honcho_offer=''
+      [[ -z $honcho_ct_here ]] || honcho_offer="http://$(pve_ct_net "$honcho_ct_here" ip):8000"
+      [[ $honcho_offer != 'http://:8000' ]] || honcho_offer=''
+      HONCHO_URL=''
+      pve_offer HONCHO_URL 'Honcho API URL' "$honcho_offer" valid_honcho_url
+      [[ -n $HONCHO_URL ]] || unset HONCHO_URL
+    fi
+  fi
+  if [[ -n ${HONCHO_URL:-} && -z ${HONCHO_CT_ID:-} && -z ${HONCHO_API_KEY_FILE:-} &&
+        $HONCHO_URL =~ ^https?://([0-9.]+): ]]; then
+    # The workspace key comes from the Honcho CT at that address, when it is here.
+    HONCHO_CT_ID=$(pve_ct_with_ip "${BASH_REMATCH[1]}")
+    [[ -n $HONCHO_CT_ID ]] || unset HONCHO_CT_ID
+  fi
+fi
+OPENWEBUI=${OPENWEBUI:-true}
+OPENCLAW_MODEL=${OPENCLAW_MODEL:-auto}
+OPENCLAW_CONTEXT_LENGTH=${OPENCLAW_CONTEXT_LENGTH:-65536}
+OPENCLAW_MAX_TOKENS=${OPENCLAW_MAX_TOKENS:-8192}
+OPENCLAW_DASHBOARD=${OPENCLAW_DASHBOARD:-true}
 for name in CORES MEMORY_MB ROOTFS_GB OPENCLAW_PORT; do positive "$name" "${!name}"; done
 (( OPENCLAW_PORT <= 65535 )) || die 'OPENCLAW_PORT must be <=65535.'
 (( OPENCLAW_PORT != 8765 )) || die 'OPENCLAW_PORT 8765 is the local dispatcher.'
@@ -503,13 +579,14 @@ source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # the dispatcher is the Hermes target's, run with this target's files.
 verify_webui=$source_dir/../open-terminal/verify-webui.py
 direct_dispatch=$source_dir/../hermes/direct-dispatch.py
-for file in "$source_dir/install-target.sh" "$source_dir/openclaw-gateway.service" \
+for file in "$source_dir/../pve-firewall-swap.pl" "$source_dir/install-target.sh" "$source_dir/openclaw-gateway.service" \
             "$source_dir/openclaw-direct.service" "$direct_dispatch" \
             "$source_dir/integrate-webui.py" "$verify_webui"; do
   [[ -r $file ]] || die "Deployment file is missing: $file"
 done
 # Overridable for tests only.
 PVE_ETC=${PVE_ETC:-/etc/pve}
+[[ $PVE_ETC == / ]] || PVE_ETC=${PVE_ETC%/}
 SYS_NET_DIR=${SYS_NET_DIR:-/sys/class/net}
 firewall_file=$PVE_ETC/firewall/${CT_ID}.fw
 deploy=/root/openclaw-deploy
@@ -722,6 +799,29 @@ add_honcho_rule() {
 }
 add_honcho_rule
 
+pve_summary "OpenClaw: $mode"
+pve_row 'Router' "$router_label, $ROUTER_URL"
+if [[ $mode == create ]]; then
+  pve_row 'OpenClaw CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on $STORAGE"
+  pve_row 'Template' "$TEMPLATE"
+  pve_row 'Network' "$IP_CIDR via $GATEWAY on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+else
+  pve_row 'OpenClaw CT' "$CT_ID at $OPENCLAW_IP"
+fi
+if [[ $mode != integrate ]]; then
+  pve_row 'Model' "$OPENCLAW_MODEL (context $OPENCLAW_CONTEXT_LENGTH, replies up to $OPENCLAW_MAX_TOKENS tokens)"
+  pve_row 'OpenClaw release' "$OPENCLAW_VERSION (Node.js $OPENCLAW_NODE_VERSION)"
+  pve_row 'Open WebUI' "$( [[ $OPENWEBUI == true ]] && printf 'offered as openclaw' || printf 'not offered')"
+  pve_row 'Control UI' "$( [[ $OPENCLAW_DASHBOARD == true ]] && printf 'on (port %s)' "$OPENCLAW_PORT" || printf 'off')"
+  pve_row 'Egress' "$model_egress"
+  pve_row 'Honcho memory' "${HONCHO_URL:-off}"
+fi
+case $mode in
+  create) pve_confirm "Create OpenClaw CT $CT_ID?" ;;
+  reconfigure) pve_confirm "Reconfigure OpenClaw CT $CT_ID?" ;;
+  *) pve_confirm "Register OpenClaw CT $CT_ID in Open WebUI?" ;;
+esac
+
 admin_token=''
 if [[ $OPENWEBUI == true ]] && (( ! dry_run )); then
   note "Verifying Open WebUI on ${router_label} (localhost:${OPENWEBUI_PORT})..."
@@ -731,7 +831,8 @@ if [[ $OPENWEBUI == true ]] && (( ! dry_run )); then
   admin_token=$saved_admin_token
   if [[ -z $admin_token ]]; then
     [[ -t 0 ]] || die 'Set OPENWEBUI_ADMIN_TOKEN to an Open WebUI admin API key or JWT for unattended use (or OPENWEBUI=false).'
-    read -r -s -p 'Open WebUI admin API key or JWT: ' admin_token
+    printf '\n== Open WebUI ==\n' >&2
+    read -r -s -p '  Open WebUI admin API key or JWT (not shown): ' admin_token
     printf '\n'
   fi
   [[ -n $admin_token ]] || die 'An Open WebUI admin API key or JWT is required.'
@@ -783,8 +884,9 @@ if [[ $mode == create ]]; then
     else
       model_rules_for all
       add_honcho_rule
-      write_if_changed "$firewall_file" "$(firewall_config "$EGRESS" "$ROUTER_IP" "$router_dest" "$fw_router_port" "$api_rule_port" "$dashboard_rule_port")" ||
-        die "Could not write $firewall_file."
+      fw_seen=$(fw_snapshot "$firewall_file")
+      fw_replace "$firewall_file" "$fw_seen" "$(firewall_config "$EGRESS" "$ROUTER_IP" "$router_dest" "$fw_router_port" "$api_rule_port" "$dashboard_rule_port")" ||
+        die "Could not update $firewall_file (it changed meanwhile, or the write failed). CT $CT_ID is kept: fix the file, then rerun --reconfigure."
     fi
   fi
 fi
@@ -799,9 +901,11 @@ if [[ $mode == reconfigure ]]; then
   if (( dry_run )); then
     printf '+ check the OpenClaw rules in %s, and admit the new router address and port next to the old ones\n' "$firewall_file"
   elif [[ -e $firewall_file ]]; then
-    fw_new=$(openclaw_fw_update "$firewall_file" keep "$ROUTER_IP" "$api_rule_port" "$router_dest" "$fw_router_port" "$dashboard_rule_port") ||
+    fw_seen=$(fw_snapshot "$firewall_file")
+    fw_new=$(openclaw_fw_update "$fw_seen" keep "$ROUTER_IP" "$api_rule_port" "$router_dest" "$fw_router_port" "$dashboard_rule_port") ||
       die "Nothing was changed. Fix $firewall_file (or move it aside), then rerun --reconfigure."
-    write_if_changed "$firewall_file" "$fw_new" || die "Could not write $firewall_file."
+    fw_replace "$firewall_file" "$fw_seen" "$fw_new" ||
+      die "Nothing was changed: $firewall_file changed while it was read, or could not be written. Rerun --reconfigure."
   else
     note "Warning: $firewall_file does not exist, so CT $CT_ID's traffic is not filtered by Proxmox. Leaving it that way; a new OpenClaw CT gets one."
   fi
@@ -857,9 +961,11 @@ if [[ $mode == reconfigure ]]; then
     printf '+ sync OpenClaw rules in %s (router %s, API port %s, Control UI %s)\n' "$firewall_file" "$ROUTER_IP" \
       "${api_rule_port:-closed}" "${dashboard_rule_port:-closed}"
   elif [[ -e $firewall_file ]]; then
-    fw_new=$(openclaw_fw_update "$firewall_file" replace "$ROUTER_IP" "$api_rule_port" "$router_dest" "$fw_router_port" "$dashboard_rule_port") ||
+    fw_seen=$(fw_snapshot "$firewall_file")
+    fw_new=$(openclaw_fw_update "$fw_seen" replace "$ROUTER_IP" "$api_rule_port" "$router_dest" "$fw_router_port" "$dashboard_rule_port") ||
       die "OpenClaw is reconfigured, but $firewall_file changed meanwhile and still admits the old router address or port. Fix it, then rerun --reconfigure."
-    write_if_changed "$firewall_file" "$fw_new" || die "Could not write $firewall_file."
+    fw_replace "$firewall_file" "$fw_seen" "$fw_new" ||
+      die "OpenClaw is reconfigured, but $firewall_file changed while its old rules were being removed (or could not be written); it still admits the old and new rules. Check it, then rerun --reconfigure."
   fi
 fi
 

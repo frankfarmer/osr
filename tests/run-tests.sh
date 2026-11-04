@@ -58,6 +58,8 @@ for _t in "${ROOT}"/targets/*/test-*.sh; do
   add_suite "${_target}-$(basename "$_t" .sh | sed 's/^test-//')" shell "$_t"
 done
 add_suite pve-select shell "${ROOT}/targets/test-pve-select.sh"
+add_suite pve-firewall-swap shell "${ROOT}/targets/test-pve-firewall-swap.sh"
+add_suite signal-rollback shell "${HERE}/test-signal-rollback.sh"
 add_suite nvidia-lxc shell "${ROOT}/targets/test-nvidia-lxc.sh"
 # The router and the llama.cpp bridge pin different fastapi versions, so each
 # pytest suite can run under its own interpreter (CI builds one venv per

@@ -5,7 +5,11 @@ ID, IP/CIDR (or `dhcp`), and a gateway for a static IP. It lists eligible
 template and `rootdir` storage. Preset `CT_ID`, `IP_CIDR`, `GATEWAY`,
 `TEMPLATE_STORAGE`, and `STORAGE` to skip those prompts. No CT ID or IP is
 selected automatically. The community script chooses or downloads its Ubuntu
-template. `--reconfigure` and dry runs skip these Proxmox queries.
+template. `--reconfigure` and dry runs skip these Proxmox queries;
+`--reconfigure` instead asks which Mattermost CT to reconfigure (offering the one
+tagged `mattermost`) and offers each account setting from what the running CT
+recorded, so Enter keeps it. A summary is shown to confirm before anything
+changes.
 
 Mattermost receives the router's **health alerts**. The `ollama-monitor`
 service posts host and service state changes to an incoming webhook (see the

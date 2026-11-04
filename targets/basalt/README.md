@@ -137,6 +137,9 @@ health check require the target host.
 The root-only `/var/lib/basalt-target/` holds the runtime snapshot (including any
 configuration secrets) during an upgrade. It is deleted once the upgrade or the
 rollback succeeds, and kept for inspection only when the rollback fails too.
+When the rollback fails too, a `rollback-failed` file is left in `/var/lib/basalt-target/`
+and every later run stops there, changing nothing, so the last good runtime is
+not overwritten: inspect or restore the snapshot, then delete that file and rerun.
 Allow disk space for one copy of the checkout, in addition to the model and
 build. The default `/var/lib/basalt` model store is outside the snapshot; weights
 placed inside `/opt/basalt` are copied with that checkout.

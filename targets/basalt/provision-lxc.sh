@@ -130,13 +130,18 @@ BASALT_PORT=${BASALT_PORT:-8080}
 BASALT_READY_TIMEOUT=${BASALT_READY_TIMEOUT:-3600}
 BASALT_ALLOW_NO_KEY=${BASALT_ALLOW_NO_KEY:-false}
 
-pve_prompt_required CT_ID 'New Basalt CT ID (unused, at least 100)'
-pve_prompt_required IP_CIDR 'Basalt IP/CIDR (or dhcp)'
-if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'Basalt gateway IP'; fi
+# --- Questions: the container, one section ----------------------------------
+valid_template_volume() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/[A-Za-z0-9._-]+$ ]]; }
+valid_storage_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+pve_ask_new_ct Basalt
 [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] || die 'CT_ID must be an unused numeric ID of 100 or more.'
+if pve_interactive && (( ! dry_run )); then _pve_heading; fi
 pve_select_template TEMPLATE '^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/(ubuntu-(22\.04|24\.04|26\.04)|debian-(12|13))-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
 positive_int ROOTFS_GB "$ROOTFS_GB"
 pve_select_storage STORAGE rootdir "$ROOTFS_GB"
+pve_suggest TEMPLATE 'Template (storage:vztmpl/...)' '' valid_template_volume 'Use a downloaded LXC template volume (storage:vztmpl/...).'
+pve_suggest STORAGE 'Root disk storage' '' valid_storage_id
+pve_ask_network Basalt dhcp
 [[ $TEMPLATE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/(ubuntu-(22\.04|24\.04|26\.04)|debian-(12|13))-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$ ]] || \
     die 'TEMPLATE must be a downloaded Ubuntu 22.04/24.04/26.04 or Debian 12/13 amd64 LXC template.'
 [[ $STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'STORAGE must be a Proxmox rootdir storage ID.'
@@ -246,6 +251,12 @@ else
 fi
 
 trap 'printf "Provisioning stopped at line %s. CT %s is kept for inspection.\n" "$LINENO" "$CT_ID" >&2' ERR
+pve_summary "Basalt: create"
+pve_row 'Basalt CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on $STORAGE"
+pve_row 'Template' "$TEMPLATE"
+pve_row 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+pve_row 'Model' "${BASALT_MODEL} (context ${BASALT_CONTEXT}, port ${BASALT_PORT})"
+pve_confirm "Create Basalt CT $CT_ID?"
 (umask 022; run "${create[@]}")
 # Basalt pins tens of GiB of expert memory. systemd's LimitMEMLOCK must be
 # allowed by the outer LXC hard limit too.

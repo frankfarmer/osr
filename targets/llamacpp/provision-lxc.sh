@@ -414,10 +414,44 @@ configure_gpu_devices() {
     done
 }
 # End GPU configuration helpers.
+# The router CT's gateway, offered to a person: targets share its network.
+router_gateway() {
+    local conf line
+    container_prompt_available || return 0
+    for conf in "${PVE_LXC_DIR:-/etc/pve/lxc}"/*.conf; do
+        [[ -r $conf ]] || continue
+        grep -Eq '^tags:.*(^|[ ;,])osr-router([ ;,]|$)' <(sed '/^\[/q' "$conf") || continue
+        line=$(sed '/^\[/q' "$conf" | grep -m1 '^net0:') || continue
+        [[ $line =~ [,\ ]gw=([0-9.]+) ]] && printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    done
+}
+# Ask once before anything is created; unattended and dry runs go straight on.
+confirm_create() {
+    local answer
+    (( ! dry_run )) && container_prompt_available && [[ ${PVE_CONFIRM:-true} == true ]] || return 0
+    printf '\n== llama.cpp: create ==\n' >&2
+    printf '  %-26s %s\n' 'llama.cpp CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, $MEMORY_MB MiB, $ROOTFS_GB GiB on $STORAGE" \
+        'Template' "$TEMPLATE" 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE" \
+        'Backend' "$BACKEND${GPU_DEVICES:+ ($GPU_DEVICES)}" 'Model' "${MODEL_ALIAS:-chosen inside the CT later}" >&2
+    printf 'Create llama.cpp CT %s? [Y/n]: ' "$CT_ID" >&2
+    IFS= read -r answer || die 'Input ended at the confirmation.'
+    [[ $answer != [nN]* ]] || die 'Stopped at your request; nothing was changed.'
+}
 configure_container() {
     NONINTERACTIVE=${NONINTERACTIVE:-false}
     [[ $NONINTERACTIVE == true || $NONINTERACTIVE == false ]] || die 'NONINTERACTIVE must be true or false.'
-    prompt_container_setting CT_ID 'Container ID (required)' '' valid_container_id 'Enter an unused CT ID from 100 to 999999999.'
+    # One section, in the order a person thinks about a new CT: identity,
+    # template and disk, size, then the network it joins.
+    if container_prompt_available; then printf '\n== llama.cpp container ==\n' >&2; fi
+    # The cluster's next free ID is offered to a person, never taken unattended.
+    local id_offer=''
+    if container_prompt_available && [[ -z ${CT_ID:-} ]]; then
+        id_offer=$(pvesh get /cluster/nextid 2>/dev/null) || id_offer=''
+        valid_container_id "$id_offer" || id_offer=''
+    fi
+    prompt_container_setting CT_ID 'New llama.cpp CT ID (unused)' "$id_offer" valid_container_id 'Enter an unused CT ID from 100 to 999999999.'
+    prompt_container_setting CT_HOSTNAME 'Container name' llama-target valid_container_name 'Enter a DNS hostname label, up to 63 characters.'
     if [[ $(template_release) == 13 ]]; then
         select_container_setting TEMPLATE 'CT template volume' valid_container_template \
             'Enter an existing Debian 13 template volume (Vulkan needs Debian 13), e.g. local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst.' list_container_templates
@@ -425,22 +459,19 @@ configure_container() {
         select_container_setting TEMPLATE 'CT template volume' valid_container_template \
             'Enter an existing Debian 13 or 12 template volume, e.g. local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst.' list_container_templates
     fi
-    prompt_container_setting CT_HOSTNAME 'Container name' llama-target valid_container_name 'Enter a DNS hostname label, up to 63 characters.'
-    prompt_container_setting IP_CIDR 'IPv4 address/CIDR or dhcp' '' valid_container_ip 'Enter a valid IPv4/CIDR (e.g. 192.0.2.30/24), or dhcp.'
+    select_container_setting STORAGE 'Root disk storage ID' valid_container_storage \
+        'Enter a Proxmox rootdir storage ID, e.g. local-lvm (not a filesystem path).' list_container_storage
+    prompt_container_setting ROOTFS_GB 'Root disk size in GiB' 64 valid_container_disk 'Enter a positive whole number of GiB.'
+    prompt_container_setting CORES 'CPU cores' 4 valid_container_cores 'Enter a whole number from 1 to 8192.'
+    prompt_container_setting MEMORY_MB 'RAM in MiB (16384 = 16 GiB)' 16384 valid_container_memory 'Enter a whole number of MiB, at least 1024.'
     prompt_container_setting BRIDGE 'Network bridge' vmbr0 valid_container_bridge 'Enter a Proxmox bridge name, e.g. vmbr0.'
+    prompt_container_setting IP_CIDR 'llama.cpp IP/CIDR (or dhcp)' '' valid_container_ip 'Enter a valid IPv4/CIDR (e.g. 192.0.2.30/24), or dhcp.'
     if [[ $IP_CIDR == dhcp ]]; then
         [[ -z ${GATEWAY:-} ]] || die 'Do not set GATEWAY with IP_CIDR=dhcp.'
         GATEWAY=''
     else
-        prompt_container_setting GATEWAY 'IPv4 gateway (blank for none)' '' valid_container_gateway 'Enter an IPv4 gateway or leave it blank.' true
+        prompt_container_setting GATEWAY 'llama.cpp gateway' "$(router_gateway)" valid_container_gateway 'Enter an IPv4 gateway, or leave it blank for none.' true
     fi
-    prompt_container_setting CORES 'CPU cores' 4 valid_container_cores 'Enter a whole number from 1 to 8192.'
-    prompt_container_setting MEMORY_MB 'RAM in MiB (16384 = 16 GiB)' 16384 valid_container_memory 'Enter a whole number of MiB, at least 1024.'
-    select_container_setting STORAGE 'Root disk storage ID' valid_container_storage \
-        'Enter a Proxmox rootdir storage ID, e.g. local-lvm (not a filesystem path).' list_container_storage
-    prompt_container_setting ROOTFS_GB 'Root disk size in GiB' 64 valid_container_disk 'Enter a positive whole number of GiB.'
-    printf '\nContainer: %s (%s)\nTemplate: %s\nNetwork: %s on %s\nCPU: %s cores | RAM: %s MiB | Disk: %s:%s GiB\n' \
-        "$CT_HOSTNAME" "$CT_ID" "$TEMPLATE" "$IP_CIDR" "$BRIDGE" "$CORES" "$MEMORY_MB" "$STORAGE" "$ROOTFS_GB"
 }
 # End container configuration helpers.
 
@@ -597,6 +628,7 @@ if [[ $BACKEND == cuda ]]; then
 fi
 
 trap 'printf "Provisioning stopped at line %s. Any newly created CT is retained for inspection; no CT is deleted automatically.\n" "$LINENO" >&2' ERR
+confirm_create
 (umask 022; run "${create[@]}")
 run pct start "$CT_ID"
 if (( ! dry_run )); then

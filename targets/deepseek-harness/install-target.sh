@@ -105,13 +105,13 @@ current_release() {
   elif [[ -d $OPT_DIR/node_modules ]]; then printf '%s\n' "$OPT_DIR"
   else return 1; fi
 }
-# healthy: the unit is active and the Web UI answers HTTP (401 without its
-# launch token is an answer).
+# healthy: the unit is active and the Web UI answers normally. The unauthenticated
+# root request returns 401; 200 is possible when a local session is accepted.
 healthy() {
   local code
   systemctl is-active --quiet deepseek-harness.service || return 1
   code=$(curl --silent --max-time 2 --output /dev/null --write-out '%{http_code}' "http://$BIND_IP:$PORT/" 2>/dev/null) || true
-  [[ -n $code && $code != 000 ]]
+  [[ $code == 200 || $code == 401 ]]
 }
 wait_healthy() {
   local attempt
@@ -143,6 +143,21 @@ fi
 install -d -m 0750 "$ETC_DIR"
 exec {lock_fd}> "$ETC_DIR/.install.lock"
 flock -n "$lock_fd" || die 'Another install-target.sh run holds the lock.'
+# The pushed copies are one-shot inputs: gone after this run, whatever happens,
+# also when the snapshot check below refuses it. Set after the lock, so a run
+# refused by the lock cannot remove keys a running install is about to read.
+trap 'rm -f -- "$SOURCE_DIR/router-api-key" "$SOURCE_DIR/honcho-api-key"' EXIT
+# A signal (Ctrl-C, a closed SSH session, kill) must reach the EXIT trap as a
+# failure so it rolls back: after a signal bash runs it with $? = 0. After a
+# hangup the output goes to OSR_INTERRUPT_LOG, so writes to the closed
+# terminal cannot fail the rollback.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exec >>"${OSR_INTERRUPT_LOG:-/var/log/osr-install-interrupted.log}" 2>&1 || exec >/dev/null 2>&1; exit 129' HUP
+# A failed rollback snapshot takes precedence over the unchanged shortcut.
+# Even a service that became healthy later must not hide manual recovery work.
+[[ ! -e $ROLLBACK_DIR ]] ||
+  die "A snapshot from a failed rollback is kept in $ROLLBACK_DIR; see targets/deepseek-harness/README.md before rerunning."
 
 # Keys: a fresh copy pushed next to this script wins; otherwise the one this
 # target installed before (a reconfigure that did not fetch it again).
@@ -151,8 +166,6 @@ key_source() {
   elif [[ -f $ETC_DIR/$1 ]]; then printf '%s\n' "$ETC_DIR/$1"
   else return 1; fi
 }
-# The pushed copies are one-shot inputs: gone after this run, whatever happens.
-trap 'rm -f -- "$SOURCE_DIR/router-api-key" "$SOURCE_DIR/honcho-api-key"' EXIT
 router_key_file=$(key_source router-api-key) || die 'Missing router-api-key (an empty file means a keyless OSR).'
 router_key=$(tr -d '\r\n' < "$router_key_file")
 [[ -z $router_key || $router_key =~ ^[A-Za-z0-9._~+/=-]+$ ]] || die 'Router key has unsupported characters.'
@@ -224,10 +237,6 @@ else
   resolved=$VERSION
 fi
 
-# A failed snapshot restore must not be overwritten by the next run.
-[[ ! -e $ROLLBACK_DIR ]] ||
-  die "A snapshot from a failed rollback is kept in $ROLLBACK_DIR; see targets/deepseek-harness/README.md before rerunning."
-
 # --- the new release, built beside the running one -----------------------
 new_release=''
 if [[ $previous_version == "$resolved" && $previous_release == "$OPT_DIR/releases/"* ]]; then
@@ -289,6 +298,7 @@ phase=prepare restarted=false
 on_exit() {
   local status=$1
   trap - EXIT
+  trap '' INT TERM HUP  # the rollback below must finish
   rm -f -- "$SOURCE_DIR/router-api-key" "$SOURCE_DIR/honcho-api-key"
   if (( status == 0 )); then return 0; fi
   # A failed upgrade goes back to the previous release; a failed first

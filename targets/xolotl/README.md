@@ -275,6 +275,9 @@ building or downloading anything, and health-checks the previous service. The
 snapshot is deleted after a successful upgrade or rollback and kept only when
 the rollback fails too. Allow disk space for one copy of the checkout and its
 build; the models are outside it.
+When the rollback fails too, a `rollback-failed` file is left in `/var/lib/xolotl-target/`
+and every later run stops there, changing nothing, so the last good runtime is
+not overwritten: inspect or restore the snapshot, then delete that file and rerun.
 
 `fetch-llama.sh` keeps any llama.cpp tree that already carries its patch, even
 when a new Xolotl commit pins another llama.cpp commit, so the installer fetches

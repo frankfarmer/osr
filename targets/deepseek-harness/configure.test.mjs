@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 
 const script = fileURLToPath(new URL('./configure.mjs', import.meta.url));
 
-async function withRouter(run) {
+async function withRouter(run, onMcp) {
   const server = createServer((request, response) => {
     if (request.headers.authorization !== 'Bearer test-secret') {
       response.writeHead(401).end(); return;
@@ -22,6 +22,8 @@ async function withRouter(run) {
         { name: 'code-model', tools: true, context_length: 65536 },
         { name: 'chat-only', tools: false, context_length: 65536 },
       ] }));
+    } else if (request.url === '/mcp' && request.method === 'POST' && onMcp) {
+      onMcp(request, response);
     } else {
       response.writeHead(404).end();
     }
@@ -108,4 +110,51 @@ test('the managed AGENTS.md block is replaced or removed, the rest kept', () => 
   assert.equal(withBlock(once, ''), mine);
   assert.equal(withBlock('', block), block);
   assert.equal(withBlock(block, ''), '');
+});
+
+test('Honcho initialize requires a JSON-RPC success, including over SSE', async () => {
+  let payload = { jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'workspace unavailable' } };
+  let eventStream = false;
+  await withRouter(async (router, dir) => {
+    const args = ['--router-url', router, '--model', 'code-model', '--output', join(dir, 'honcho.yml'),
+      '--honcho-mcp-url', `${router}/mcp`, '--force'];
+    const env = { HONCHO_API_KEY: 'test-secret' };
+    let result = await invoke(args, env);
+    assert.equal(result.code, 1, 'HTTP 200 with a JSON-RPC error must fail');
+    assert.match(result.stderr, /workspace unavailable/);
+    payload = { jsonrpc: '2.0', id: 1, result: {} };
+    result = await invoke(args, env);
+    assert.equal(result.code, 1, 'a result without a protocol is not initialized');
+    assert.match(result.stderr, /no negotiated protocol/);
+    payload = { jsonrpc: '2.0', id: 1, result: { protocolVersion: '2025-06-18' } };
+    result = await invoke(args, env);
+    assert.equal(result.code, 0, result.stderr);
+    payload = { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'missing workspace header' } };
+    result = await invoke(args, env);
+    assert.equal(result.code, 1, 'an error with id null must fail');
+    assert.match(result.stderr, /missing workspace header/);
+    payload = { jsonrpc: '2.0', id: 7, result: { protocolVersion: '2025-06-18' } };
+    result = await invoke(args, env);
+    assert.equal(result.code, 1, 'a response to another request is not ours');
+    assert.match(result.stderr, /unexpected JSON-RPC response/);
+    eventStream = true;
+    payload = { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'missing workspace header' } };
+    result = await invoke(args, env);
+    assert.equal(result.code, 1, 'an SSE error with id null must fail');
+    assert.match(result.stderr, /missing workspace header/);
+    payload = { jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'workspace unavailable' } };
+    result = await invoke(args, env);
+    assert.equal(result.code, 1, 'an SSE JSON-RPC error must fail');
+    assert.match(result.stderr, /workspace unavailable/);
+    payload = { jsonrpc: '2.0', id: 1, result: { protocolVersion: '2025-06-18' } };
+    result = await invoke(args, env);
+    assert.equal(result.code, 0, `SSE initialize failed: ${result.stderr}`);
+  }, (_request, response) => {
+    if (eventStream) {
+      response.setHeader('Content-Type', 'text/event-stream');
+      response.end(`event: message\ndata: ${JSON.stringify(payload)}\n\n`);
+    } else {
+      response.end(JSON.stringify(payload));
+    }
+  });
 });

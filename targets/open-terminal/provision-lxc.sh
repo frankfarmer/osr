@@ -230,14 +230,9 @@ run_pct_create() (
 # End provision helpers. --------------------------------------------------------
 
 positive() { [[ $2 =~ ^[1-9][0-9]{0,8}$ ]] || die "$1 must be a positive integer."; }
-prompt_required() {
-  local name=$1 label=$2
-  [[ -n ${!name} ]] && return 0
-  [[ -t 0 ]] || die "Set ${name} for an unattended run (or run interactively to be prompted)."
-  # shellcheck disable=SC2229  # reads into the variable that $name names
-  read -r -p "$label" "$name" || die "No ${name} was entered."
-  [[ -n ${!name} ]] || die "${name} is required."
-}
+# The shared guided prompts (pve_ask, pve_suggest, ...); this target keeps its
+# own template and storage menus above.
+source "$(dirname -- "${BASH_SOURCE[0]}")/pve-select.sh"
 run() {
   printf '+'; printf ' %q' "$@"; printf '\n'
   if (( ! dry_run )); then "$@"; fi
@@ -276,7 +271,7 @@ NAMESERVER=${NAMESERVER:-}
 VLAN_TAG=${VLAN_TAG:-}
 ROUTER_IP=${ROUTER_IP:-}
 OPENWEBUI_PORT=${OPENWEBUI_PORT:-}
-OPEN_TERMINAL_PORT=${OPEN_TERMINAL_PORT:-8000}
+OPEN_TERMINAL_PORT=${OPEN_TERMINAL_PORT:-}
 OPEN_TERMINAL_VERSION=${OPEN_TERMINAL_VERSION:-v0.14.0}
 OPEN_TERMINAL_COMMIT=${OPEN_TERMINAL_COMMIT:-}
 CONNECTION_NAME=${CONNECTION_NAME:-Open Terminal LXC}
@@ -284,19 +279,32 @@ CONNECTION_NAME=${CONNECTION_NAME:-Open Terminal LXC}
 saved_admin_token=${OPENWEBUI_ADMIN_TOKEN:-}
 unset OPENWEBUI_ADMIN_TOKEN
 
-# --- which Open WebUI to integrate with ----------------------------------------
+# --- Questions, one section at a time -----------------------------------------
+valid_template() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/debian-(12|13)-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$ ]]; }
+valid_storage() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+valid_router() { classify_router "$1" >/dev/null; }
+valid_port() { [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && (( $1 <= 65535 )); }
 if [[ -n $ROUTER_CT_ID && -n $ROUTER_SSH_HOST ]] ||
    [[ -n $ROUTER && ( -n $ROUTER_CT_ID || -n $ROUTER_SSH_HOST ) ]]; then
   die 'Set only one of ROUTER, ROUTER_CT_ID, or ROUTER_SSH_HOST.'
 fi
+# ask_router: the Router section (Open WebUI runs in the router CT). A CT ID on
+# this host, or the IP/hostname of the router's LXC/VM, reached as root over SSH.
+ask_router() {
+  [[ -z $ROUTER_CT_ID && -z $ROUTER_SSH_HOST ]] || return 0
+  [[ -n $ROUTER ]] || pve_interactive ||
+    die 'Set ROUTER to the router CT ID on this host, or the IP/hostname of the router LXC/VM (root SSH login).'
+  pve_section 'Router (Open WebUI)'
+  pve_note "A router CT ID on this Proxmox host, or the IP/hostname of its LXC/VM (reached as $ROUTER_SSH_USER over SSH)."
+  pve_suggest ROUTER 'Router CT ID or address' "$(pve_tagged_ct osr-router)" valid_router \
+    'Use a CT ID (100 or more), an IPv4 address or a hostname.'
+}
+if (( integrate_only )); then
+  pve_ask_existing_ct open-terminal 'Open Terminal' register
+fi
+ask_router
 if [[ -z $ROUTER_CT_ID && -z $ROUTER_SSH_HOST ]]; then
-  if [[ -z $ROUTER ]]; then
-    [[ -t 0 ]] || die 'Set ROUTER to the router CT ID on this host, or the IP/hostname of the router LXC/VM (root SSH login).'
-    printf 'Existing ollama-smart-router Open WebUI:\n' >&2
-    printf '  a CT ID on this Proxmox host (e.g. 280), or\n' >&2
-    printf '  the IP address or hostname of its LXC/VM, reached as %s over SSH\n' "$ROUTER_SSH_USER" >&2
-    read -r -p 'Open WebUI CT ID or IP address: ' ROUTER || die 'No Open WebUI location was entered.'
-  fi
+  [[ -n $ROUTER ]] || die 'Set ROUTER to the router CT ID on this host, or the IP/hostname of the router LXC/VM (root SSH login).'
   router_spec=$(classify_router "$ROUTER") ||
     die "ROUTER '$ROUTER' is neither a CT ID (100 or more) nor an IPv4 address or hostname."
   case $router_spec in
@@ -318,29 +326,29 @@ else
   router_label="router ${ROUTER_SSH_USER}@${ROUTER_SSH_HOST}"
 fi
 
-if (( integrate_only )); then
-  prompt_required CT_ID 'Existing Open Terminal CT ID on this Proxmox host: '
-else
-  prompt_required CT_ID 'New Open Terminal CT ID on this Proxmox host (unused, at least 100): '
+if (( ! integrate_only )); then
+  pve_ask_new_ct 'Open Terminal'
 fi
 [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] ||
   die 'Open Terminal CT_ID must be numeric and at least 100; it is separate from the existing Open WebUI CT ID or IP.'
 [[ $router_kind == ssh || $CT_ID != "$ROUTER_CT_ID" ]] || die 'Terminal and router CT IDs must differ.'
 if (( ! integrate_only )); then
   positive ROOTFS_GB "$ROOTFS_GB"
-  if [[ -z $TEMPLATE && -t 0 ]] && (( ! dry_run )); then
+  if [[ -z $TEMPLATE ]] && pve_interactive && (( ! dry_run )); then
+    _pve_heading
     select_template
-  else
-    prompt_required TEMPLATE 'Downloaded Debian 12/13 amd64 template (e.g. local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst): '
   fi
-  if [[ -z $STORAGE && -t 0 ]] && (( ! dry_run )); then
+  pve_suggest TEMPLATE 'Debian 12/13 amd64 template' '' valid_template 'Use a downloaded Debian 12/13 amd64 template (storage:vztmpl/...).'
+  if [[ -z $STORAGE ]] && pve_interactive && (( ! dry_run )); then
+    _pve_heading
     select_storage
-  else
-    prompt_required STORAGE 'Storage for the new terminal CT root disk (e.g. local-lvm): '
   fi
-  prompt_required IP_CIDR 'Static IP/CIDR for the new terminal CT: '
-  prompt_required GATEWAY 'Gateway for the new terminal CT: '
+  pve_suggest STORAGE 'Root disk storage' '' valid_storage
+  pve_ask_network 'Open Terminal'
+  pve_section 'Open Terminal settings'
+  pve_ask OPEN_TERMINAL_PORT 'Terminal API port' 8000 valid_port 'Use a port from 1 to 65535.'
 fi
+OPEN_TERMINAL_PORT=${OPEN_TERMINAL_PORT:-8000}
 for name in CORES MEMORY_MB ROOTFS_GB OPEN_TERMINAL_PORT; do positive "$name" "${!name}"; done
 (( OPEN_TERMINAL_PORT <= 65535 )) || die 'OPEN_TERMINAL_PORT must be <=65535.'
 [[ $SWAP_MB =~ ^(0|[1-9][0-9]{0,8})$ ]] || die 'SWAP_MB must be nonnegative.'
@@ -509,12 +517,26 @@ if [[ -z $ROUTER_IP ]]; then
   fi
 fi
 
+pve_summary "Open Terminal: $( (( integrate_only )) && printf 'integrate' || printf 'create')"
+pve_row 'Router (Open WebUI)' "$router_label, reaches the terminal from $ROUTER_IP"
+if (( integrate_only )); then
+  pve_row 'Terminal CT' "$CT_ID at $TERMINAL_IP"
+  pve_confirm "Register Open Terminal CT $CT_ID in Open WebUI?"
+else
+  pve_row 'Terminal CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on $STORAGE"
+  pve_row 'Template' "$TEMPLATE"
+  pve_row 'Network' "$IP_CIDR via $GATEWAY on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+  pve_row 'Terminal' "Open Terminal $OPEN_TERMINAL_VERSION on port $OPEN_TERMINAL_PORT"
+  pve_confirm "Create Open Terminal CT $CT_ID?"
+fi
+
 admin_token=''
 if (( ! dry_run )); then
   admin_token=$saved_admin_token
   if [[ -z $admin_token ]]; then
     [[ -t 0 ]] || die 'Set OPENWEBUI_ADMIN_TOKEN to an Open WebUI admin API key or JWT for unattended use.'
-    read -r -s -p 'Open WebUI admin API key or JWT: ' admin_token
+    printf '\n== Open WebUI ==\n' >&2
+    read -r -s -p '  Open WebUI admin API key or JWT (not shown): ' admin_token
     printf '\n'
   fi
   [[ -n $admin_token ]] || die 'An Open WebUI admin API key or JWT is required.'

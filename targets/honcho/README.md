@@ -319,8 +319,10 @@ every Open WebUI conversation a Honcho memory session.
 The router CT's Proxmox firewall must let the Honcho CT reach the router API.
 When `/etc/pve/firewall/<router CT>.fw` exists, the provisioner keeps one rule
 there for it (`# osr-honcho-router`, replaced when the Honcho address or
-router port changes; every other line stays). Set `HONCHO_ROUTER_FIREWALL=false`
-to manage that file yourself. The selected chat and embedding model hosts
+router port changes; every other line stays). It writes the file under the
+CT's Proxmox firewall lock (`targets/pve-firewall-swap.pl`) and only if nobody
+changed it meanwhile; otherwise it stops and says where the previous content
+is saved. Set `HONCHO_ROUTER_FIREWALL=false` to manage that file yourself. The selected chat and embedding model hosts
 must also be reachable from the Honcho CT.
 
 The selection menu requires you to enter the router CT ID and IP/CIDR and,
@@ -403,12 +405,15 @@ one to an empty string to choose inventory lookup explicitly. The guest installe
 does not create an LXC or use a CT ID. Use the Proxmox `--reconfigure` path
 when keys or router integration also need updating.
 
-Use `--reconfigure` to repair or update a CT this target created. Supply or
-enter the Honcho and router CT IDs; the provisioner reads the existing
-Honcho address from the CT. Supply the embedding model and dimensions again,
-plus its `/v1` URL if it does not use the router; the Open WebUI admin token
-is requested again. A dry-run reconfigure also needs `IP_CIDR` because it
-does not inspect the CT.
+Use `--reconfigure` to repair or update a CT this target created. It asks
+for the Honcho CT (offering the one tagged `honcho`), then the router
+(offering the one Honcho already uses), and reads the Honcho address from the
+CT. The models, context window, embedding model, `/v1` URL and dimensions,
+and the agents admitted to Honcho are all offered from what the running CT
+recorded (`/etc/honcho-target/proxy.settings`, `budgets.env` and its
+firewall), so Enter keeps each one; unattended, the recorded values are kept.
+The Open WebUI admin token is requested again. A dry-run reconfigure also
+needs `IP_CIDR` because it does not inspect the CT.
 
 A reconfigure only changes the settings it is given. The CT keeps
 `HONCHO_REF`, `HONCHO_MODEL`, `HONCHO_STRUCTURED_OUTPUT_MODE`,

@@ -57,6 +57,69 @@ printf '[OPTIONS]\nenable: 1\n' > "$fw"
 assert_contains "a file without rules gets a [RULES] section" "$(printf '[RULES]\nIN ACCEPT -source 192.0.2.85/32')" "$(router_fw_with_honcho "$fw" 192.0.2.85 8000)"
 rm -f "$fw"
 
+describe honcho_router_fw_update
+# The router CT's firewall goes through targets/pve-firewall-swap.pl, here on a
+# fixture /etc/pve (no Proxmox lock; its own suite covers live mode).
+pve=$(mktemp -d)
+mkdir -p "$pve/firewall" "$pve/stage"
+router_fw=$pve/firewall/250.fw
+swap_tool=$here/../pve-firewall-swap.pl
+printf '[OPTIONS]\nenable: 1\n\n[RULES]\nIN ACCEPT -source 192.0.2.0/24 -p tcp -dport 8000\n' > "$router_fw"
+cp "$router_fw" "$pve/router.orig"
+status=0; out=$(honcho_router_fw_update "$router_fw" 192.0.2.85 8000 250 "$pve" "$pve/stage" "$swap_tool") || status=$?
+assert_eq "the router firewall admits Honcho" 0 "$status"
+assert_contains "with its rule" '192.0.2.85/32 -p tcp -dport 8000 -log nolog # osr-honcho-router' "$(cat "$router_fw")"
+status=0; out=$(honcho_router_fw_update "$router_fw" 192.0.2.85 8000 250 "$pve" "$pve/stage" "$swap_tool") || status=$?
+assert_eq "a rerun has nothing to do" 3 "$status"
+cp "$pve/router.orig" "$router_fw"; touch "$pve/edit"
+status=0; out=$(OSR_FW_SWAP_TEST_EDIT_FILE=$pve/edit TMPDIR=$pve honcho_router_fw_update "$router_fw" 192.0.2.85 8000 250 "$pve" "$pve/stage" "$swap_tool" 2>/dev/null) || status=$?
+assert_eq "an edit made meanwhile stops the update" 1 "$status"
+assert_contains "and is kept" '# edited meanwhile' "$(cat "$router_fw")"
+assert_eq "the previous content is saved where the run says" "$(cat "$pve/router.orig")" "$(cat "$out")"
+rm -f -- "$out"
+cp "$pve/router.orig" "$router_fw"; touch "$pve/fail"
+status=0; out=$(OSR_FW_SWAP_TEST_FAIL_FILE=$pve/fail TMPDIR=$pve honcho_router_fw_update "$router_fw" 192.0.2.85 8000 250 "$pve" "$pve/stage" "$swap_tool" 2>/dev/null) || status=$?
+assert_eq "a failed write stops the update" 1 "$status"
+assert_ok "and leaves the live file whole" cmp -s "$pve/router.orig" "$router_fw"
+assert_eq "and saves the original" "$(cat "$pve/router.orig")" "$(cat "$out")"
+rm -f -- "$out"
+status=0; out=$(OSR_FW_SWAP_TEST_FAIL_FILE=$pve/fail TMPDIR=$pve/missing honcho_router_fw_update "$router_fw" 192.0.2.85 8000 250 "$pve" "$pve/stage" "$swap_tool" 2>/dev/null) || status=$?
+assert_eq "a failed backup creation is reported separately" 2 "$status"
+assert_eq "without claiming a backup path" '' "$out"
+assert_ok "and leaves the live file whole" cmp -s "$pve/router.orig" "$router_fw"
+cp() { if [[ ${3:-} == "$pve"/honcho-router-fw.* ]]; then return 1; fi; command cp "$@"; }
+status=0; out=$(OSR_FW_SWAP_TEST_FAIL_FILE=$pve/fail TMPDIR=$pve honcho_router_fw_update "$router_fw" 192.0.2.85 8000 250 "$pve" "$pve/stage" "$swap_tool" 2>/dev/null) || status=$?
+unset -f cp
+assert_eq "a failed backup copy is reported separately" 2 "$status"
+assert_eq "without claiming a partial copy" '' "$out"
+assert_eq "and removes that partial copy" 0 "$(find "$pve" -maxdepth 1 -name 'honcho-router-fw.*' | wc -l | tr -d ' ')"
+rm -rf -- "$pve"
+
+describe honcho_ct_fw_update
+# shellcheck disable=SC1090
+source <(awk '/^# Honcho firewall helpers$/{c=1;next} /^# End Honcho firewall helpers\.$/{c=0} c' "$provision")
+pve=$(mktemp -d)
+mkdir -p "$pve/firewall" "$pve/stage"
+ct_fw=$pve/firewall/285.fw
+swap_tool=$here/../pve-firewall-swap.pl
+printf '[OPTIONS]\nenable: 1\n\n[RULES]\nIN ACCEPT -source 192.0.2.50/32 -p tcp -dport 8000 -log nolog # osr-honcho-api\nIN ACCEPT -source 192.0.2.9/32 -p tcp -dport 22\n' > "$ct_fw"
+cp "$ct_fw" "$pve/ct.orig"
+new_rules='IN ACCEPT -source 192.0.2.51/32 -p tcp -dport 8000 -log nolog # osr-honcho-api'
+status=0; honcho_ct_fw_update "$ct_fw" "$new_rules" "$pve/stage" 285 "$pve" "$swap_tool" 2>/dev/null || status=$?
+assert_eq "the owned rules are replaced" 0 "$status"
+assert_contains "with the new ones" '192.0.2.51/32' "$(cat "$ct_fw")"
+assert_not_contains "the old one is gone" '192.0.2.50/32' "$(cat "$ct_fw")"
+assert_contains "other rules stay" '192.0.2.9/32 -p tcp -dport 22' "$(cat "$ct_fw")"
+cp "$pve/ct.orig" "$ct_fw"; touch "$pve/edit"
+status=0; OSR_FW_SWAP_TEST_EDIT_FILE=$pve/edit honcho_ct_fw_update "$ct_fw" "$new_rules" "$pve/stage" 285 "$pve" "$swap_tool" 2>/dev/null || status=$?
+assert_eq "an edit made meanwhile stops the update" 1 "$status"
+assert_eq "and is kept, alone" "$(cat "$pve/ct.orig"; printf '# edited meanwhile')" "$(cat "$ct_fw")"
+rm -f "$pve/edit"; cp "$pve/ct.orig" "$ct_fw"; touch "$pve/fail"
+status=0; OSR_FW_SWAP_TEST_FAIL_FILE=$pve/fail honcho_ct_fw_update "$ct_fw" "$new_rules" "$pve/stage" 285 "$pve" "$swap_tool" 2>/dev/null || status=$?
+assert_eq "a failed write stops the update" 2 "$status"
+assert_ok "and leaves the file whole" cmp -s "$pve/ct.orig" "$ct_fw"
+rm -rf -- "$pve"
+
 describe honcho_rules
 # shellcheck disable=SC1090
 source <(awk '/^# Honcho firewall helpers$/{c=1;next} /^# End Honcho firewall helpers\.$/{c=0} c' "$provision")
@@ -209,7 +272,7 @@ out=$(choose_from Model qwen3:14b valid_model_name "${lines[@]}" 2>&1 <<< $'9\nb
 assert_contains "the list is shown with descriptions" "2) qwen3:32b  (65536-token context)" "$out"
 assert_contains "a number off the list is asked again" "Choose 1-2, or type a name." "$out"
 assert_contains "so is an invalid name" "Not a valid choice: bad name" "$out"
-assert_eq "until an answer fits" "qwen3:14b" "$(tail -n1 <<< "$out")"
+assert_eq "until an answer fits" "qwen3:14b" "$(tail -n1 <<< "$out" | sed 's/.*: //')"
 assert_fail "the end of input is no choice" choose_from Model '' valid_model_name <<< ''
 assert_eq "without a list a number is the value" 1024 "$(choose_from Size '' valid_dimensions <<< '1024' 2>/dev/null)"
 assert_eq "listed_url finds a listed model's host, in any case" "http://192.0.2.91:11434/v1" "$(listed_url QWEN3:32B "${lines[@]}")"
@@ -227,10 +290,13 @@ describe honcho_interactive_choices
 if command -v script >/dev/null; then
   interactive_env=(CT_ID=285 ROUTER_CT_ID=280 ROUTER_IP=192.0.2.80 GATEWAY=192.0.2.1 IP_CIDR=192.0.2.85/24
     TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst STORAGE=local-lvm HONCHO_CLIENT_IPS=)
-  # Answers: the chat model (Enter: the suggestion), the embedding model
-  # (its number), the embedding URL (Enter: inventory), the vector size (Enter).
-  out=$(printf '\n1\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+  # Answers: the context window (Enter: 65536), the chat model (Enter: the
+  # suggestion), the embedding model (its number), the embedding URL (Enter:
+  # inventory), the vector size (Enter).
+  out=$(printf '\n\n1\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
     script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
+  assert_contains "the context window is asked first, with the first-install size" "Context window the chat model serves (tokens; none = Honcho's 128k budgets) [65536]" "$out"
+  assert_contains "and reaches the CT" "HONCHO_CONTEXT_TOKENS=65536" "$out"
   assert_contains "the router's inventory is read once its address is known" "Reading the models router CT 280 serves" "$out"
   assert_contains "the usable chat model is listed" "1) qwen3:14b  (65536-token context, 14.8B, loaded, on http://192.0.2.90:11434)" "$out"
   assert_contains "the ones the proxy cannot use are named, with the reason" "gemma3:12b (tool support not reported)" "$out"
@@ -238,20 +304,20 @@ if command -v script >/dev/null; then
   assert_contains "the vector size is suggested" "Embedding vector dimensions: 640 suggested (measured at http://192.0.2.90:11434/v1)." "$out"
   assert_contains "and the answers reach the plan" "chat model: qwen3:14b; embedding: nomic-embed-text:latest (640 dimensions) via router inventory" "$out"
   # A preset chat model; the embedding model typed, so no listed host to measure.
-  out=$(printf 'nomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" HONCHO_MODEL=large \
+  out=$(printf '\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" HONCHO_MODEL=large \
     script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
   assert_not_contains "a preset chat model is not asked for" "Chat model (number" "$out"
   assert_contains "a vector size it cannot measure is the model's known one" "768 suggested (the size nomic-embed-text is known to have)" "$out"
   assert_contains "the preset is kept" "chat model: large;" "$out"
   cp "$stubs/inventory.json" "$stubs/full.json"
   printf '{"models": [{"server": "http://192.0.2.90:11434", "name": "gemma3:12b", "tools": null, "context_length": 131072}]}\n' > "$stubs/inventory.json"
-  out=$(printf '\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+  out=$(printf '\n\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
     script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
   assert_contains "with no usable model, the install is said to need one" "No model in the inventory reports tool support" "$out"
   assert_contains "and the fast tier is suggested" "Chat model (number, name or tier) [fast]" "$out"
   assert_contains "the Enter key takes it" "chat model: fast;" "$out"
   printf 'not json\n' > "$stubs/inventory.json"
-  out=$(printf '\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+  out=$(printf '\n\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
     script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
   assert_contains "an unreadable inventory is said so" "Could not read the router inventory; enter the model names yourself." "$out"
   assert_contains "and the names are still asked for" "chat model: fast; embedding: nomic-embed-text (768 dimensions)" "$out"
@@ -262,6 +328,45 @@ fi
 PATH=$saved_path
 rm -rf -- "$stubs"
 unset STUBS
+
+describe honcho_guided_prompts
+# Router first, then the Honcho container, then models, then agents; offers
+# come from the PVE configs (router tag and gateway, agent tags).
+lxc=$(mktemp -d) nostub=$(mktemp -d)
+printf '#!/bin/sh\nexit 1\n' > "$nostub/curl"; cp "$nostub/curl" "$nostub/pct"; chmod +x "$nostub/curl" "$nostub/pct"
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.80/24\ntags: osr-router\n' > "$lxc/280.conf"
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.94/24\ntags: osr-target;hermes\n' > "$lxc/294.conf"
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.81/24\ntags: osr-target;deepseek-harness\n' > "$lxc/281.conf"
+answers=$'\n\n285\nlocal:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst\nlocal-lvm\n192.0.2.85/24\n\n\n\nnomic-embed-text\n\n768\n\n'
+out=$(PATH="$nostub:$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR=$lxc HONCHO_EMBEDDING_MODEL='' bash "$provision" --dry-run 2>&1 <<< "$answers")
+order=$(sed '/== Honcho: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|Router CT ID|Router IP|New Honcho CT ID|amd64 template|Root disk storage|Honcho IP/CIDR|Honcho gateway|Context window|Chat model \(|Embedding model \(|Embedding /v1 URL|Embedding vector dimensions \[|Embedding vector dimensions:|Agent CT IPs' | grep -v 'Embedding vector dimensions:' | paste -sd'|')
+assert_eq "create asks router, container, models, agents, then the summary" \
+  '== Router ==|Router CT ID|Router IP|== Honcho container ==|New Honcho CT ID|amd64 template|Root disk storage|Honcho IP/CIDR|Honcho gateway|== Honcho models ==|Context window|Chat model (|Embedding model (|Embedding /v1 URL|Embedding vector dimensions [|== Agents allowed to Honcho ==|Agent CT IPs|== Honcho: create ==' \
+  "$order"
+assert_contains "the router and its address are offered" 'Router IP [192.0.2.80]' "$out"
+assert_contains "the router's gateway is offered" 'Honcho gateway [192.0.2.1]' "$out"
+assert_contains "the agent CTs on this host are offered" 'Agent CT IPs (space-separated) (none to skip) [192.0.2.94 192.0.2.81]' "$out"
+assert_contains "Enter admits them" 'Agent IPs allowed to Honcho: 192.0.2.94 192.0.2.81.' "$out"
+assert_contains "the summary names the plan" 'Agents allowed             192.0.2.94 192.0.2.81' "$out"
+assert_contains "a chosen chat model reaches the CT" 'HONCHO_MODEL=fast' "$out"
+out=$(PATH="$nostub:$PATH" env "${common[@]}" PVE_INTERACTIVE=true PVE_LXC_DIR=$lxc HONCHO_CLIENT_IPS= HONCHO_MODEL=fast \
+  bash "$provision" --dry-run 2>&1 <<< $'\n')
+assert_not_contains "presets are not asked again" 'Router CT ID' "$out"
+assert_not_contains "(nor the embedding model)" 'Embedding model (' "$out"
+assert_not_contains "nor agents given as empty" 'Agent CT IPs' "$out"
+out=$(PATH="$nostub:$PATH" env "${common[@]}" PVE_INTERACTIVE=true PVE_ACCEPT_DEFAULTS=true PVE_LXC_DIR=$lxc HONCHO_CLIENT_IPS= \
+  bash "$provision" --dry-run 2>&1 < /dev/null)
+assert_not_contains "under the OSR installer no default is asked" 'Context window the chat' "$out"
+assert_contains "and the first-install window is used" 'HONCHO_CONTEXT_TOKENS=65536' "$out"
+# Reconfigure: the CT to change (offered by its tag), then Router.
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.85/24\ntags: osr-target;honcho\n' > "$lxc/285.conf"
+out=$(PATH="$nostub:$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR=$lxc IP_CIDR=192.0.2.85/24 HONCHO_EMBEDDING_BASE_URL='' \
+  bash "$provision" --dry-run --reconfigure 2>&1 <<< $'\n\n\nnomic-embed-text\n768\n')
+order=$(sed '/== Honcho: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|Honcho CT ID|Router CT ID|Router IP' | paste -sd'|')
+assert_eq "reconfigure asks the CT first, then Router (its address comes from the route)" \
+  '== Honcho container to reconfigure ==|Honcho CT ID|== Router ==|Router CT ID|== Honcho models ==|== Honcho: reconfigure ==' "$order"
+assert_contains "the tagged Honcho CT is offered" 'Honcho CT ID [285]' "$out"
+rm -rf -- "$lxc" "$nostub"
 
 describe honcho_budget_passthrough
 plan=$(env "${common[@]}" HONCHO_CONTEXT_TOKENS=32768 HONCHO_DREAM_ENABLED= bash "$provision" --dry-run)

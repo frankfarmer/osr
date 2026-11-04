@@ -196,60 +196,80 @@ check 'DHCP with static gateway rejected' fail 'GATEWAY' presets NONINTERACTIVE=
 
 check 'interactive input accepts suggested CT ID and defaults' ok 'SETTINGS|251|local:vztmpl/debian-12-standard_test_amd64.tar.zst|llama-target|192.0.2.50/24|vmbr0||4|16384|local-lvm|64' interactive <<'INPUT'
 
+
 local:vztmpl/debian-12-standard_test_amd64.tar.zst
+local-lvm
+
+
+
 
 192.0.2.50/24
-
-
-
-
-local-lvm
 
 INPUT
 check 'interactive DHCP skips gateway prompt' ok '|gpu-target|dhcp|vmbr1||8|32768|fast-zfs|128' interactive <<'INPUT'
 250
-local:vztmpl/debian-12-standard_test_amd64.tar.zst
 gpu-target
-dhcp
-vmbr1
-8
-32768
+local:vztmpl/debian-12-standard_test_amd64.tar.zst
 fast-zfs
 128
+8
+32768
+vmbr1
+dhcp
 INPUT
 check 'interactive input works when CT ID suggestion unavailable' ok 'SETTINGS|250|' interactive_no_suggestion <<'INPUT'
 250
+
 local:vztmpl/debian-12-standard_test_amd64.tar.zst
-
-dhcp
-
-
-
 local-lvm
 
+
+
+
+dhcp
 INPUT
 check 'interactive invalid values re-prompt' ok 'SETTINGS|250|local:vztmpl/debian-12-standard_test_amd64.tar.zst|gpu-target|192.0.2.50/24|vmbr0|192.0.2.1|8|32768|local-lvm|128' interactive <<'INPUT'
 99
 250
-local:vztmpl/ubuntu-24.04-standard_test_amd64.tar.zst
-local:vztmpl/debian-12-standard_test_amd64.tar.zst
 bad name
 gpu-target
-192.0.2.999/24
-192.0.2.50/24
-vm br0
-vmbr0
-192.0.2.999
-192.0.2.1
-0
-8
-1023
-32768
+local:vztmpl/ubuntu-24.04-standard_test_amd64.tar.zst
+local:vztmpl/debian-12-standard_test_amd64.tar.zst
 /var/lib/vz
 local-lvm
 0
 128
+0
+8
+1023
+32768
+vm br0
+vmbr0
+192.0.2.999/24
+192.0.2.50/24
+192.0.2.999
+192.0.2.1
 INPUT
+order_check() {
+    local output
+    output=$(interactive 2>&1 <<'ANSWERS'
+
+
+local:vztmpl/debian-12-standard_test_amd64.tar.zst
+local-lvm
+
+
+
+
+192.0.2.50/24
+
+ANSWERS
+) || die "order check failed: $output"
+    output=$(grep -o 'New llama.cpp CT ID\|Container name\|CT template volume\|Root disk storage ID\|Root disk size\|CPU cores\|RAM in MiB\|Network bridge\|llama.cpp IP/CIDR\|llama.cpp gateway' <<< "$output" | uniq | tr '\n' ,)
+    [[ $output == 'New llama.cpp CT ID,Container name,CT template volume,Root disk storage ID,Root disk size,CPU cores,RAM in MiB,Network bridge,llama.cpp IP/CIDR,llama.cpp gateway,' ]] || die "questions out of order: $output"
+    printf 'ORDER ok\n'
+}
+check 'questions come in one section: identity, disk, size, then network' ok 'ORDER ok' order_check
 check 'interactive EOF aborts' fail 'Input ended' interactive </dev/null
 check 'inventory lists only downloaded Debian 12 templates on active storage' ok 'INVENTORY verified' inventory_templates
 check 'BACKEND=vulkan lists only Debian 13 templates' ok 'INVENTORY verified' inventory_templates_vulkan
@@ -296,14 +316,14 @@ m
 INPUT
 check 'full interactive configuration selects user template and root storage' ok 'SETTINGS|134|iso_fs:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst|ant-rtxpro2k-llama1|192.168.10.10/23|12|32768|vm_pool|1024' interactive_selectors <<'INPUT'
 134
-1
 ant-rtxpro2k-llama1
-192.168.10.10/23
-
-
-12
-32768
+1
 1
 1024
+12
+32768
+
+192.168.10.10/23
+
 INPUT
 printf '%s container configuration cases passed. No PVE or CT changes were made.\n' "$passed"

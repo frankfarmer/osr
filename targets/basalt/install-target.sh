@@ -14,6 +14,32 @@
 # runs `serve.server` with the built `bin/basalt` engine. Nothing here is
 # guessed; a missing required piece fails with an explanation.
 set -Eeuo pipefail
+# Upgrade signal guard
+# upgrade_guard on|rollback|off: a signal (Ctrl-C, a closed SSH session,
+# kill) during an upgrade must not stop this script before it can roll back.
+# on: a signal is recorded in upgrade_interrupted; the upgrade's subshell dies
+# from it, so its failure takes the rollback path. rollback: further signals
+# are ignored while the previous release is restored. off: the defaults are
+# back. After a hangup the output goes to OSR_INTERRUPT_LOG, so writes to the
+# closed terminal cannot fail the rollback.
+# Every copy matches targets/upgrade-guard.sh (tests/test-signal-rollback.sh).
+upgrade_interrupted=''
+upgrade_hangup() {
+    upgrade_interrupted=${upgrade_interrupted:-129}
+    exec >>"${OSR_INTERRUPT_LOG:-/var/log/osr-install-interrupted.log}" 2>&1 || exec >/dev/null 2>&1
+}
+upgrade_guard() {
+    case $1 in
+        on)
+            upgrade_interrupted=''
+            trap 'upgrade_interrupted=${upgrade_interrupted:-130}' INT
+            trap 'upgrade_interrupted=${upgrade_interrupted:-143}' TERM
+            trap upgrade_hangup HUP ;;
+        rollback) trap '' INT TERM HUP ;;
+        off) trap - INT TERM HUP ;;
+    esac
+}
+# End upgrade signal guard.
 
 BASALT_URL=${BASALT_URL:-https://github.com/jesdga95/basalt.git}
 # Paths are overridable for tests only; the unit file uses the defaults.
@@ -580,6 +606,7 @@ do_upgrade() {
     else
         printf 'Upgrading Basalt from %s to %s.\n' "$previous" "$target"
     fi
+    upgrade_guard on
     systemctl stop basalt.service
     if ! snapshot_runtime; then
         note 'Could not snapshot the previous runtime; no upgrade was applied.'
@@ -596,9 +623,11 @@ do_upgrade() {
         save_settings
         clear_snapshot
         printf 'Basalt is running %s.\n' "$(git_root rev-parse HEAD)"
+        upgrade_guard off
         return 0
     fi
     note "Upgrade failed; returning to $previous."
+    upgrade_guard rollback
     systemctl stop basalt.service || true
     # The settings the previous runtime ran with: the record of the last good
     # install (the fingerprint's port for older installs). wait_ready checks
@@ -613,7 +642,10 @@ do_upgrade() {
     ( restore_runtime "$previous" )
     rc=$?
     set -e
-    (( rc == 0 )) || die "Rollback to $previous failed too; inspect journalctl -u basalt and $BASALT_DIR; the snapshot is kept in $BASALT_STATE_DIR."
+    if (( rc != 0 )); then
+        : > "$BASALT_STATE_DIR/rollback-failed" || true
+        die "Rollback to $previous failed too; inspect journalctl -u basalt and $BASALT_DIR; the snapshot is kept in $BASALT_STATE_DIR."
+    fi
     clear_snapshot
     die "Upgrade failed; Basalt is running $previous again."
 }
@@ -735,6 +767,12 @@ while (( $# )); do
 done
 acquire_install_lock
 saved_settings
+# A failed rollback keeps the last good runtime in $BASALT_STATE_DIR; an upgrade
+# would snapshot over it and an unchanged run would hide it, so stop until
+# someone has looked (see the README).
+if (( ! dry_run )) && [[ -e $BASALT_STATE_DIR/rollback-failed ]]; then
+    die "A rollback failed earlier; the previous runtime is kept in $BASALT_STATE_DIR. Inspect or restore it, then delete $BASALT_STATE_DIR/rollback-failed and rerun."
+fi
 BASALT_REF=${BASALT_REF:-main}
 BASALT_COMMIT=${BASALT_COMMIT:-}
 BASALT_HF_REPO=${BASALT_HF_REPO:-https://huggingface.co/jesdga/Qwen3.8-Flash-Next-Basalt}

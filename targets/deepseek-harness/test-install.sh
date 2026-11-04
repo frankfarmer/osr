@@ -89,7 +89,8 @@ port=$(< "$fake/port")
 # --- stubs -----------------------------------------------------------------
 stub() { printf '#!/usr/bin/env bash\necho "%s $*" >> "$FAKE_LOG"\n%s\n' "$1" "$2" > "$bin/$1"; chmod +x "$bin/$1"; }
 stub id 'if [[ ${1:-} == -u ]]; then echo 0; fi; exit 0'
-for name in apt-get useradd gpg chown sleep; do stub "$name" 'exit 0'; done
+for name in apt-get useradd gpg chown; do stub "$name" 'exit 0'; done
+stub sleep 'exit 0'
 stub install 'a=(); while (( $# )); do case $1 in -o|-g) shift 2;; *) a+=("$1"); shift;; esac; done; exec /usr/bin/install "${a[@]}"'
 stub runuser 'while [[ $1 != -- ]]; do shift; done; shift; exec "$@"'
 stub journalctl 'echo "fake journal line"'
@@ -100,10 +101,13 @@ stub systemctl 'case $1 in
   is-active) [[ -e $FAKE_DIR/active ]] ;;
   restart)
     version=$(basename "$(readlink -f "$DSH_OPT_DIR/current")" | sed "s/_.*//")
+    echo "$version" >> "$FAKE_DIR/restarts"
+    # A signal test needs this restart to take a moment.
+    [[ $version != "$(cat "$FAKE_DIR/slow-restart" 2>/dev/null)" ]] || /bin/sleep 2
     if grep -qx -- "$version" "$FAKE_DIR/bad" 2>/dev/null; then rm -f "$FAKE_DIR/active"; else echo "$version" > "$FAKE_DIR/active"; fi ;;
 esac; exit 0'
 # curl: only the Web UI health check reaches it; 401 is an answer.
-stub curl 'if [[ -e $FAKE_DIR/active ]]; then printf 401; else printf 000; exit 7; fi'
+stub curl 'if [[ -e $FAKE_DIR/active ]]; then if [[ -e $FAKE_DIR/http-code ]]; then cat "$FAKE_DIR/http-code"; else printf 401; fi; else printf 000; exit 7; fi'
 # npm: view answers $FAKE_DIR/latest; install writes a stub release (unless
 # $FAKE_DIR/npm-fail exists) whose bin.js fails --dump-config when
 # $FAKE_DIR/dump-fail exists.
@@ -244,6 +248,34 @@ assert_file_contains "the settings record is the old one" 'DSH_VERSION=0.2.1-rc.
 assert_ok "and the snapshot is cleared" test ! -e "$DSH_ROLLBACK_DIR"
 assert_eq "the service runs the old release" 0.2.1-rc.5 "$(cat "$fake/active")"
 
+describe install_signal_rollback
+# A signal while the new release restarts (Ctrl-C, a closed SSH session, kill)
+# rolls back like a failure. At that moment $? is 0: without the signal traps
+# bash would run the EXIT trap with status 0 and keep the new release. perl
+# restores SIGINT, which a background job otherwise starts with ignored.
+for signal in TERM INT HUP; do
+  push_deploy
+  echo 0.2.2 > "$fake/slow-restart"; : > "$fake/restarts"; : > "$FAKE_LOG"
+  perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die "exec: $!"' -- \
+    env "${base_env[@]}" DSH_VERSION=0.2.2 OSR_INTERRUPT_LOG="$fake/interrupt.log" \
+    bash "$deploy/install-target.sh" > "$fake/signal-out" 2>&1 &
+  pid=$!
+  for _ in $(seq 100); do grep -qx 0.2.2 "$fake/restarts" && break; /bin/sleep 0.1; done
+  kill -"$signal" "$pid"
+  status=0; wait "$pid" || status=$?
+  rm -f -- "$fake/slow-restart"
+  out=$(cat "$fake/signal-out" "$fake/interrupt.log" 2>/dev/null || true)
+  assert_ok "SIG$signal during the restart fails the run" test "$status" -ne 0
+  assert_contains "and rolls back" "Rolling back to 0.2.1-rc.5" "$out"
+  assert_contains "to the previous release, running again" "DeepSeek Harness 0.2.1-rc.5 is running again" "$out"
+  assert_eq "the current link is back" "$first_release" "$(link)"
+  assert_ok "the snapshot is cleared" test ! -e "$DSH_ROLLBACK_DIR"
+  if [[ $signal == HUP ]]; then
+    assert_file_contains "after a hangup the rollback reports to OSR_INTERRUPT_LOG" 'Rolling back' "$fake/interrupt.log"
+  fi
+  rm -f -- "$fake/interrupt.log"
+done
+
 describe install_rollback_fails
 push_deploy
 printf '0.2.2\n0.2.1-rc.5\n' > "$fake/bad"
@@ -254,8 +286,27 @@ push_deploy
 rm -f "$fake/bad"
 run_fails "the next run refuses to overwrite it" DSH_VERSION=0.2.2
 assert_contains "and points at it" "A snapshot from a failed rollback is kept in" "$out"
+assert_ok "the refused run still removes the pushed keys" test ! -e "$deploy/router-api-key"
+printf '0.2.1-rc.5\n' > "$fake/active"
+push_deploy
+# The same settings as the recorded run, so the unchanged shortcut would apply.
+run_fails "a recovered service cannot hide the failed rollback snapshot" DSH_VERSION=0.2.1-rc.5 DSH_MODEL=auto
+assert_contains "the snapshot still takes precedence over an unchanged run" "A snapshot from a failed rollback is kept in" "$out"
 rm -rf -- "$DSH_ROLLBACK_DIR"
 systemctl restart >/dev/null
+
+describe install_health_check
+# shellcheck disable=SC1090
+source <(awk '/^# Install helpers$/{c=1;next} /^# End install helpers\.$/{c=0} c' "$script")
+# shellcheck disable=SC2034  # read by the sourced healthy()
+BIND_IP=127.0.0.1 PORT=3080
+printf '500\n' > "$fake/http-code"
+assert_fail "HTTP 500 is not healthy" healthy
+printf '404\n' > "$fake/http-code"
+assert_fail "HTTP 404 is not the Harness login response" healthy
+printf '401\n' > "$fake/http-code"
+assert_ok "the unauthenticated Harness response is healthy" healthy
+rm -f -- "$fake/http-code"
 
 describe install_npm_failure
 push_deploy

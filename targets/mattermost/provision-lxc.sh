@@ -118,7 +118,7 @@ GATEWAY=${GATEWAY:-}
 NAMESERVER=${NAMESERVER:-}
 VLAN_TAG=${VLAN_TAG:-}
 SSH_PUBLIC_KEY=${SSH_PUBLIC_KEY:-}
-MATTERMOST_CHANNEL=${MATTERMOST_CHANNEL:-ollama-monitor}
+MATTERMOST_CHANNEL=${MATTERMOST_CHANNEL:-}
 READY_TIMEOUT=${READY_TIMEOUT:-120}
 COMMUNITY_SCRIPT_URL=${COMMUNITY_SCRIPT_URL:-$COMMUNITY_SCRIPT_DEFAULT_URL}
 COMMUNITY_SCRIPT_SHA256=${COMMUNITY_SCRIPT_SHA256:-}
@@ -127,12 +127,36 @@ MATTERMOST_CT_VERSION=${MATTERMOST_CT_VERSION:-24.04}
 PVE_NODES_DIR=${PVE_NODES_DIR:-/etc/pve/nodes}
 SYS_NET_DIR=${SYS_NET_DIR:-/sys/class/net}
 
-[[ $mode != reconfigure || -n $CT_ID ]] || die '--reconfigure needs the existing CT_ID.'
-pve_prompt_required CT_ID 'Mattermost CT ID'
-if [[ $mode != reconfigure ]]; then
-    pve_prompt_required IP_CIDR 'Mattermost IP/CIDR (or dhcp)'
-    if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'Mattermost gateway IP'; fi
+# --- Questions, one section at a time -----------------------------------------
+valid_account() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]{2,21}$ ]]; }
+valid_team() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{1,63}$ ]]; }
+valid_channel() { [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]]; }
+recorded_admin='' recorded_channel=''
+if [[ $mode == reconfigure ]]; then
+    pve_ask_existing_ct mattermost Mattermost
+    valid_container_id "$CT_ID" || die 'CT_ID must be a numeric ID of 100 or more.'
+else
+    pve_ask_new_ct Mattermost
+    valid_container_id "$CT_ID" || die 'CT_ID must be a numeric ID of 100 or more.'
+    positive_int ROOTFS_GB "$ROOTFS_GB"
+    if pve_interactive && (( ! dry_run )); then _pve_heading; fi
+    pve_select_storage TEMPLATE_STORAGE vztmpl 0
+    pve_select_storage STORAGE rootdir "$ROOTFS_GB"
+    pve_ask_network Mattermost dhcp
 fi
+if [[ $mode != create ]]; then
+    if [[ $mode == reconfigure ]] && (( ! dry_run )) && command -v pct >/dev/null &&
+       pct status "$CT_ID" 2>/dev/null | grep -q 'status: running'; then
+        # What the CT records: the defaults for the settings below.
+        recorded_admin=$(pct exec "$CT_ID" -- cat /etc/mattermost-target/admin-user 2>/dev/null | tr -d '\r' || true)
+    fi
+    pve_section 'Mattermost settings'
+    pve_note "The router's monitor posts alerts to this team's channel through an incoming webhook."
+    pve_ask MATTERMOST_TEAM 'Team' "${MATTERMOST_TEAM:-ollama}" valid_team 'Use 2-64 lowercase letters, digits or -.'
+    pve_ask MATTERMOST_CHANNEL 'Alert channel' "${recorded_channel:-ollama-monitor}" valid_channel 'Use lowercase letters, digits, - and _.'
+    pve_ask MATTERMOST_ADMIN_USER 'Administrator account' "${recorded_admin:-mmadmin}" valid_account 'Use 3-22 lowercase letters, digits, ., _ or -.'
+fi
+MATTERMOST_CHANNEL=${MATTERMOST_CHANNEL:-ollama-monitor}
 valid_container_id "$CT_ID" || die 'CT_ID must be a numeric ID of 100 or more.'
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die 'CT_HOSTNAME must be a DNS label.'
 for name in CORES MEMORY_MB ROOTFS_GB READY_TIMEOUT; do positive_int "$name" "${!name}"; done
@@ -152,10 +176,6 @@ if [[ -n $VLAN_TAG ]]; then positive_int VLAN_TAG "$VLAN_TAG"; (( VLAN_TAG <= 40
 [[ $MATTERMOST_CT_VERSION =~ ^(22\.04|24\.04|26\.04)$ ]] ||
     die 'MATTERMOST_CT_VERSION must be 22.04, 24.04 or 26.04 (Mattermost publishes for Ubuntu only).'
 [[ -z $TEMPLATE_STORAGE || $TEMPLATE_STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid TEMPLATE_STORAGE.'
-if [[ $mode != reconfigure ]]; then
-    pve_select_storage TEMPLATE_STORAGE vztmpl 0
-    pve_select_storage STORAGE rootdir "$ROOTFS_GB"
-fi
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 deploy=/root/mattermost-target-deploy
@@ -185,6 +205,24 @@ if (( ! dry_run )); then
         [[ -d $SYS_NET_DIR/$BRIDGE ]] || die "Bridge interface is not present: $BRIDGE"
     fi
 fi
+
+case $mode in full) plan_title=create ;; create) plan_title='create (no guest setup)' ;; *) plan_title=reconfigure ;; esac
+pve_summary "Mattermost: $plan_title"
+if [[ $mode == reconfigure ]]; then
+    pve_row 'Mattermost CT' "$CT_ID"
+else
+    pve_row 'Mattermost CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on ${STORAGE:-(chosen in the community script menu)}"
+    pve_row 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+    pve_row 'Ubuntu' "$MATTERMOST_CT_VERSION"
+fi
+if [[ $mode != create ]]; then
+    pve_row 'Alerts' "team ${MATTERMOST_TEAM:-ollama}, channel $MATTERMOST_CHANNEL"
+    pve_row 'Administrator' "${MATTERMOST_ADMIN_USER:-mmadmin}"
+fi
+case $mode in
+    reconfigure) pve_confirm "Reconfigure Mattermost CT $CT_ID?" ;;
+    *) pve_confirm "Create Mattermost CT $CT_ID (the community script shows its own menu next)?" ;;
+esac
 
 address='<CT address>'
 if [[ $mode != reconfigure ]]; then

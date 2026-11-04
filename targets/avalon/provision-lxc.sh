@@ -188,13 +188,18 @@ else
     template_names='Ubuntu 22.04/24.04/26.04 or Debian 12/13'
 fi
 
-pve_prompt_required CT_ID 'New Avalon CT ID (unused, at least 100)'
-pve_prompt_required IP_CIDR 'Avalon IP/CIDR (or dhcp)'
-if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'Avalon gateway IP'; fi
+# --- Questions: the container, one section ----------------------------------
+valid_template_volume() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/[A-Za-z0-9._-]+$ ]]; }
+valid_storage_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+pve_ask_new_ct Avalon
 [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] || die 'CT_ID must be an unused numeric ID of 100 or more.'
+if pve_interactive && (( ! dry_run )); then _pve_heading; fi
 pve_select_template TEMPLATE "$template_re"
 positive_int ROOTFS_GB "$ROOTFS_GB"
 pve_select_storage STORAGE rootdir "$ROOTFS_GB"
+pve_suggest TEMPLATE 'Template (storage:vztmpl/...)' '' valid_template_volume 'Use a downloaded LXC template volume (storage:vztmpl/...).'
+pve_suggest STORAGE 'Root disk storage' '' valid_storage_id
+pve_ask_network Avalon dhcp
 [[ $TEMPLATE =~ $template_re ]] ||
     die "TEMPLATE must be a downloaded $template_names amd64 LXC template for AVALON_BACKEND=$AVALON_BACKEND."
 [[ $STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'STORAGE must be a Proxmox rootdir storage ID.'
@@ -356,6 +361,12 @@ if [[ $AVALON_BACKEND == cuda ]]; then
 fi
 
 trap 'printf "Provisioning stopped at line %s. CT %s is kept for inspection.\n" "$LINENO" "$CT_ID" >&2' ERR
+pve_summary "Avalon: create"
+pve_row 'Avalon CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on $STORAGE"
+pve_row 'Template' "$TEMPLATE"
+pve_row 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+pve_row 'Model' "${AVALON_MODEL_NAME} (context ${AVALON_CONTEXT}, port ${AVALON_PORT})"
+pve_confirm "Create Avalon CT $CT_ID?"
 (umask 022; run "${create[@]}")
 # The expert cache pins host memory for its PCIe copies; systemd's
 # LimitMEMLOCK must be allowed by the outer LXC hard limit too.

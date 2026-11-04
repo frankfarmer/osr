@@ -124,11 +124,39 @@ COMMUNITY_SCRIPT_SHA256=${COMMUNITY_SCRIPT_SHA256:-}
 PVE_NODES_DIR=${PVE_NODES_DIR:-/etc/pve/nodes}
 SYS_NET_DIR=${SYS_NET_DIR:-/sys/class/net}
 
-[[ $mode != reconfigure || -n $CT_ID ]] || die '--reconfigure needs the existing CT_ID.'
-pve_prompt_required CT_ID 'Gitea CT ID'
-if [[ $mode != reconfigure ]]; then
-    pve_prompt_required IP_CIDR 'Gitea IP/CIDR (or dhcp)'
-    if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'Gitea gateway IP'; fi
+# --- Questions, one section at a time -----------------------------------------
+valid_account() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$ ]]; }
+valid_domain() { [[ -z $1 || $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
+recorded_url='' recorded_admin='' recorded_router=''
+if [[ $mode == reconfigure ]]; then
+    pve_ask_existing_ct gitea Gitea
+    valid_container_id "$CT_ID" || die 'CT_ID must be a numeric ID of 100 or more.'
+    if (( ! dry_run )) && command -v pct >/dev/null && pct status "$CT_ID" 2>/dev/null | grep -q 'status: running'; then
+        # What the CT records: the defaults for the settings below.
+        recorded_url=$(pct exec "$CT_ID" -- cat /etc/gitea-target/url 2>/dev/null | tr -d '\r' || true)
+        recorded_admin=$(pct exec "$CT_ID" -- cat /etc/gitea-target/admin-user 2>/dev/null | tr -d '\r' || true)
+        recorded_router=$(pct exec "$CT_ID" -- cat /etc/gitea-target/router-user 2>/dev/null | tr -d '\r' || true)
+    fi
+else
+    pve_ask_new_ct Gitea
+    valid_container_id "$CT_ID" || die 'CT_ID must be a numeric ID of 100 or more.'
+    positive_int ROOTFS_GB "$ROOTFS_GB"
+    if pve_interactive && (( ! dry_run )); then _pve_heading; fi
+    pve_select_storage TEMPLATE_STORAGE vztmpl 0
+    pve_select_storage STORAGE rootdir "$ROOTFS_GB"
+    pve_ask_network Gitea dhcp
+fi
+if [[ $mode != create ]]; then
+    domain_default=''
+    if [[ $recorded_url =~ ^https?://([^/:]+) ]]; then domain_default=${BASH_REMATCH[1]}
+    elif [[ -n $IP_CIDR && $IP_CIDR != dhcp ]]; then domain_default=${IP_CIDR%/*}; fi
+    pve_section 'Gitea settings'
+    pve_note 'Blank host name: the address the CT reports.'
+    pve_ask GITEA_DOMAIN 'Host name or address in Gitea URLs' "$domain_default" valid_domain 'Use a host name or IPv4 address.'
+    pve_ask GITEA_SITE_ADMIN 'Administrator account' "${recorded_admin:-gitea-admin}" valid_account 'Use letters, digits, ., _ or -.'
+    pve_ask GITEA_ROUTER_USER "The router's (non-admin) account" "${recorded_router:-ollama-router}" valid_account 'Use letters, digits, ., _ or -.'
+    # The guest's own dry run below checks them too.
+    export GITEA_DOMAIN GITEA_SITE_ADMIN GITEA_ROUTER_USER
 fi
 valid_container_id "$CT_ID" || die 'CT_ID must be a numeric ID of 100 or more.'
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die 'CT_HOSTNAME must be a DNS label.'
@@ -145,10 +173,6 @@ if [[ -n $VLAN_TAG ]]; then positive_int VLAN_TAG "$VLAN_TAG"; (( VLAN_TAG <= 40
 [[ $COMMUNITY_SCRIPT_URL =~ ^https://[A-Za-z0-9./_-]+\.sh$ ]] || die 'COMMUNITY_SCRIPT_URL must be an https URL of a .sh file.'
 [[ -z $COMMUNITY_SCRIPT_SHA256 || $COMMUNITY_SCRIPT_SHA256 =~ ^[0-9A-Fa-f]{64}$ ]] || die 'COMMUNITY_SCRIPT_SHA256 must be 64 hex digits.'
 [[ -z $TEMPLATE_STORAGE || $TEMPLATE_STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid TEMPLATE_STORAGE.'
-if [[ $mode != reconfigure ]]; then
-    pve_select_storage TEMPLATE_STORAGE vztmpl 0
-    pve_select_storage STORAGE rootdir "$ROOTFS_GB"
-fi
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 deploy=/root/gitea-target-deploy
@@ -178,6 +202,23 @@ if (( ! dry_run )); then
         [[ -d $SYS_NET_DIR/$BRIDGE ]] || die "Bridge interface is not present: $BRIDGE"
     fi
 fi
+
+case $mode in full) plan_title=create ;; create) plan_title='create (no guest setup)' ;; *) plan_title=reconfigure ;; esac
+pve_summary "Gitea: $plan_title"
+if [[ $mode == reconfigure ]]; then
+    pve_row 'Gitea CT' "$CT_ID"
+else
+    pve_row 'Gitea CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on ${STORAGE:-(chosen in the community script menu)}"
+    pve_row 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+fi
+if [[ $mode != create ]]; then
+    pve_row 'Gitea URL host' "${GITEA_DOMAIN:-the CT address}"
+    pve_row 'Accounts' "administrator $GITEA_SITE_ADMIN, router $GITEA_ROUTER_USER"
+fi
+case $mode in
+    reconfigure) pve_confirm "Reconfigure Gitea CT $CT_ID?" ;;
+    *) pve_confirm "Create Gitea CT $CT_ID (the community script shows its own menu next)?" ;;
+esac
 
 address='<CT address>'
 if [[ $mode != reconfigure ]]; then

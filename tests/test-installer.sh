@@ -150,6 +150,7 @@ printf 'provision %s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$(basename "$(dirna
 [[ -z ${COMMUNITY_SCRIPT_URL:-}${COMMUNITY_SCRIPT_SHA256:-}${MATTERMOST_CHANNEL:-} ]] ||
   printf 'service-env %s|%s|%s\n' "${COMMUNITY_SCRIPT_URL:-}" "${COMMUNITY_SCRIPT_SHA256:-}" "${MATTERMOST_CHANNEL:-}" >> "$MOCK_LOG"
 [[ -z ${COMFYUI_IMAGE_VARIANT:-} ]] || printf 'image-variant %s\n' "$COMFYUI_IMAGE_VARIANT" >> "$MOCK_LOG"
+printf 'prompt-env %s|%s|%s\n' "${PVE_ACCEPT_DEFAULTS:-}" "${PVE_CONFIRM:-}" "${PVE_INTERACTIVE:-}" > "$MOCK_LOG.prompt"
 [[ -z ${HONCHO_CLIENT_IPS:-}${HONCHO_URL:-}${HONCHO_CT_ID:-} ]] ||
   printf 'honcho-env %s|%s|%s\n' "${HONCHO_CLIENT_IPS:-}" "${HONCHO_URL:-}" "${HONCHO_CT_ID:-}" >> "$MOCK_LOG"
 [[ $(basename "$(dirname "$0")") != honcho ]] ||
@@ -1271,6 +1272,9 @@ mock_reset_log
 assert_ok "runs Ollama's provisioner" run_target_provisioner ollama
 assert_eq "with its own CT, network and storage, and the guest install" \
   "provision ollama|911|192.0.2.90/24|192.0.2.1|t-store|vmbr2||||||no|--install-target" "$(mock_calls)"
+mock_reset_log
+PVE_INTERACTIVE=true run_target_provisioner ollama
+assert_contains "the provisioner takes defaults and skips its own confirmation" "prompt-env true|false|" "$(cat "$MOCK_LOG.prompt")"
 mock_reset_log
 run_target_provisioner strata
 assert_eq "a GPU target gets its template; the router's CORES/ROOTFS_GB and the token do not leak" \

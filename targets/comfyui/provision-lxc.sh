@@ -328,7 +328,7 @@ COMFYUI_MODEL_URL=${COMFYUI_MODEL_URL:-}
 COMFYUI_MODEL_SHA256=${COMFYUI_MODEL_SHA256:-}
 COMFYUI_MODEL_FOLDER=${COMFYUI_MODEL_FOLDER:-checkpoints}
 COMFYUI_MODEL_NAME=${COMFYUI_MODEL_NAME:-}
-COMFYUI_IMAGE_VARIANT=${COMFYUI_IMAGE_VARIANT:-auto}
+COMFYUI_IMAGE_VARIANT=${COMFYUI_IMAGE_VARIANT:-}
 COMFYUI_IMAGE_MODEL=${COMFYUI_IMAGE_MODEL:-}
 COMFYUI_IMAGE_SIZE=${COMFYUI_IMAGE_SIZE:-}
 COMFYUI_IMAGE_STEPS=${COMFYUI_IMAGE_STEPS:-}
@@ -349,31 +349,42 @@ saved_admin_token=${OPENWEBUI_ADMIN_TOKEN:-}
 saved_hf_token=${HF_TOKEN:-}
 unset OPENWEBUI_ADMIN_TOKEN HF_TOKEN
 
-# --- settings --------------------------------------------------------------------
-if [[ -z $CT_ID ]]; then
-    [[ -t 0 ]] || die 'Set CT_ID for an unattended run (or run interactively to be prompted).'
-    if [[ $mode == integrate ]]; then
-        read -r -p 'Existing ComfyUI CT ID on this Proxmox host: ' CT_ID || die 'No CT_ID was entered.'
-    else
-        read -r -p 'New ComfyUI CT ID on this Proxmox host (unused, at least 100): ' CT_ID || die 'No CT_ID was entered.'
-    fi
-    [[ -n $CT_ID ]] || die 'CT_ID is required.'
+# --- Questions, one section at a time -----------------------------------------
+valid_router() { classify_router "$1" >/dev/null; }
+valid_variant() { [[ $1 == klein-4b || $1 == klein-9b ]]; }
+if [[ -n $ROUTER_CT_ID && -n $ROUTER_SSH_HOST ]] ||
+   [[ -n $ROUTER && ( -n $ROUTER_CT_ID || -n $ROUTER_SSH_HOST ) ]]; then
+    die 'Set only one of ROUTER, ROUTER_CT_ID, or ROUTER_SSH_HOST.'
 fi
-valid_container_id "$CT_ID" || die 'ComfyUI CT_ID must be a numeric ID of 100 or more.'
+if [[ $mode == integrate ]]; then pve_ask_existing_ct comfyui ComfyUI register; fi
+if [[ $mode != nowebui && -z $ROUTER_CT_ID && -z $ROUTER_SSH_HOST && -z $ROUTER ]]; then
+    pve_interactive ||
+        die 'Set ROUTER to the router CT ID on this host, or the IP/hostname of the router LXC/VM (root SSH login); or use --no-webui.'
+    pve_section 'Router (Open WebUI)'
+    pve_note "A router CT ID on this Proxmox host, or the IP/hostname of its LXC/VM (reached as $ROUTER_SSH_USER over SSH)."
+    pve_suggest ROUTER 'Router CT ID or address' "$(pve_tagged_ct osr-router)" valid_router \
+        'Use a CT ID (100 or more), an IPv4 address or a hostname.'
+fi
 if [[ $mode != integrate ]]; then
-    pve_prompt_required IP_CIDR 'ComfyUI IP/CIDR (or dhcp)'
-    if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'ComfyUI gateway IP'; fi
+    pve_ask_new_ct ComfyUI
+    valid_container_id "$CT_ID" || die 'ComfyUI CT_ID must be a numeric ID of 100 or more.'
+    positive_int ROOTFS_GB "$ROOTFS_GB"
+    if pve_interactive && (( ! dry_run )); then _pve_heading; fi
+    pve_select_storage TEMPLATE_STORAGE vztmpl 0
+    pve_select_storage STORAGE rootdir "$ROOTFS_GB"
+    pve_ask_network ComfyUI dhcp
+    pve_section 'ComfyUI settings'
+    pve_note 'klein-4b runs on about 8 GB of VRAM; klein-9b needs about 16 GB and a Hugging Face token.'
+    pve_ask COMFYUI_IMAGE_VARIANT 'Image model (klein-4b or klein-9b)' klein-4b valid_variant 'Answer klein-4b or klein-9b.'
 fi
+COMFYUI_IMAGE_VARIANT=${COMFYUI_IMAGE_VARIANT:-auto}
+valid_container_id "$CT_ID" || die 'ComfyUI CT_ID must be a numeric ID of 100 or more.'
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die 'CT_HOSTNAME must be a DNS label.'
 for name in CORES MEMORY_MB ROOTFS_GB READY_TIMEOUT; do positive_int "$name" "${!name}"; done
 (( MEMORY_MB >= 8192 )) || die 'MEMORY_MB must be at least 8192; image models need several GB of RAM.'
 (( ROOTFS_GB >= 32 )) || die 'ROOTFS_GB must be at least 32; PyTorch alone takes about 10 GB, and models are several GB each.'
 [[ -z $STORAGE || $STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid STORAGE.'
 [[ -z $TEMPLATE_STORAGE || $TEMPLATE_STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid TEMPLATE_STORAGE.'
-if [[ $mode != integrate ]]; then
-    pve_select_storage TEMPLATE_STORAGE vztmpl 0
-    pve_select_storage STORAGE rootdir "$ROOTFS_GB"
-fi
 [[ $BRIDGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid BRIDGE.'
 [[ -z $IP_CIDR ]] || valid_container_ip "$IP_CIDR" || die 'IP_CIDR must be a.b.c.d/nn or dhcp.'
 [[ -z $GATEWAY ]] || ipv4 "$GATEWAY" || die 'GATEWAY must be an IPv4 address.'
@@ -436,18 +447,7 @@ webui=1
 router_kind=none
 router_label=''
 if (( webui )); then
-    if [[ -n $ROUTER_CT_ID && -n $ROUTER_SSH_HOST ]] ||
-       [[ -n $ROUTER && ( -n $ROUTER_CT_ID || -n $ROUTER_SSH_HOST ) ]]; then
-        die 'Set only one of ROUTER, ROUTER_CT_ID, or ROUTER_SSH_HOST.'
-    fi
     if [[ -z $ROUTER_CT_ID && -z $ROUTER_SSH_HOST ]]; then
-        if [[ -z $ROUTER ]]; then
-            [[ -t 0 ]] || die 'Set ROUTER to the router CT ID on this host, or the IP/hostname of the router LXC/VM (root SSH login); or use --no-webui.'
-            printf 'Existing ollama-smart-router Open WebUI:\n' >&2
-            printf '  a CT ID on this Proxmox host (e.g. 280), or\n' >&2
-            printf '  the IP address or hostname of its LXC/VM, reached as %s over SSH\n' "$ROUTER_SSH_USER" >&2
-            read -r -p 'Open WebUI CT ID or IP address: ' ROUTER || die 'No Open WebUI location was entered.'
-        fi
         router_spec=$(classify_router "$ROUTER") ||
             die "ROUTER '$ROUTER' is neither a CT ID (100 or more) nor an IPv4 address or hostname."
         case $router_spec in
@@ -596,6 +596,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+case $mode in integrate) plan_title=integrate ;; *) plan_title=create ;; esac
+storage_label=$STORAGE
+[[ -n $storage_label ]] || storage_label='(chosen in the community script menu)'
+weights_label=''
+[[ $download_variant != none ]] || weights_label=' (weights not downloaded)'
+pve_summary "ComfyUI: $plan_title"
+case $router_kind in
+    none) pve_row 'Open WebUI' 'not registered (--no-webui)' ;;
+    *) pve_row 'Router (Open WebUI)' "$router_label" ;;
+esac
+if [[ $mode == integrate ]]; then
+    pve_row 'ComfyUI CT' "$CT_ID"
+else
+    pve_row 'ComfyUI CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on $storage_label"
+    pve_row 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+    pve_row 'GPU' "$gpu${card:+ ($card)}"
+    pve_row 'Image model' "$COMFYUI_IMAGE_VARIANT$weights_label"
+fi
+case $mode in
+    integrate) pve_confirm "Register ComfyUI CT $CT_ID in Open WebUI?" ;;
+    *) pve_confirm "Create ComfyUI CT $CT_ID (the community script shows its own menu next)?" ;;
+esac
+
 # --- check this host, the router and Open WebUI before anything is created ---------------
 if (( ! dry_run )); then
     # id, not $EUID, so the tests can run the whole flow without root.
@@ -658,7 +681,8 @@ if (( webui )); then
         admin_token=$saved_admin_token
         if [[ -z $admin_token ]]; then
             [[ -t 0 ]] || die 'Set OPENWEBUI_ADMIN_TOKEN to an Open WebUI admin API key or JWT for unattended use.'
-            read -r -s -p 'Open WebUI admin API key or JWT: ' admin_token
+            printf '\n== Open WebUI ==\n' >&2
+            read -r -s -p '  Open WebUI admin API key or JWT (not shown): ' admin_token
             printf '\n'
         fi
         [[ -n $admin_token ]] || die 'An Open WebUI admin API key or JWT is required (or use --no-webui).'
@@ -688,7 +712,8 @@ if [[ $download_variant != none ]]; then
                 [[ -t 0 ]] || die "$download_variant is gated on Hugging Face: set HF_TOKEN (an account that accepted the license at $license_page), or choose klein-4b."
                 note "$download_variant is gated: accept the FLUX Non-Commercial License at $license_page,"
                 note "then create a read token under Hugging Face > Settings > Access Tokens."
-                read -r -s -p 'Hugging Face token (hf_...): ' hf_token
+                printf '\n== Hugging Face ==\n' >&2
+                read -r -s -p '  Hugging Face token (hf_..., not shown): ' hf_token
                 printf '\n'
             fi
             valid_hf_token "$hf_token" || die 'The Hugging Face token must be an access token (hf_...).'

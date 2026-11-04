@@ -174,7 +174,17 @@ bash targets/deepseek-harness/provision-lxc.sh --reconfigure
 
 A reconfigure refreshes the router key and guest files, then regenerates the
 overlay and restarts the service. It only touches a CT with this target's
-description and firewall rule, and keeps the other firewall rules. Settings it
+description and firewall rule, and keeps the other firewall rules. During a
+port change, the firewall admits both old and new Web UI ports until the guest
+is healthy. A successful run leaves only the new Web UI rule. A failed guest
+run restores the Harness and router CT firewall files when the guest has
+returned to its previous service. If the new service is running, the new rule
+stays and the run still fails. If rollback is incomplete or the guest state
+cannot be read, both Web UI rules stay open for inspection. Firewall writes
+use Proxmox's per-CT lock and a staged replacement. A file edited during the
+run is not restored; the run prints where its previous content is kept.
+An interrupted run (Ctrl-C, a closed SSH session) keeps both Web UI rules,
+since the guest may still be installing; rerun `--reconfigure` to finish. Settings it
 is not given (`DSH_MODEL`, `DSH_CONTEXT_WINDOW`, `DSH_MAX_TOKENS`,
 `DSH_VERSION`, `DSH_PORT`, Honcho) keep the values recorded by the CT's last
 completed run in `/etc/deepseek-harness/settings`; the run says which it kept.

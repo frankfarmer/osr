@@ -69,14 +69,6 @@ valid_ip_cidr() {
     ipv4 "$address" && [[ $prefix =~ ^(0|[1-9][0-9]?)$ ]] && (( prefix <= 32 ))
 }
 positive_int() { [[ $2 =~ ^[1-9][0-9]{0,8}$ ]] || die "$1 must be a positive integer."; }
-prompt_required() {
-    local name=$1 label=$2
-    [[ -n ${!name} ]] && return 0
-    [[ -t 0 ]] || die "Set ${name} for an unattended run (or run interactively to be prompted)."
-    # shellcheck disable=SC2229  # reads into the variable that $name names
-    read -r -p "$label" "$name" || die "No ${name} was entered."
-    [[ -n ${!name} ]] || die "${name} is required."
-}
 run() {
     printf '+'; printf ' %q' "$@"; printf '\n'
     if (( ! dry_run )); then "$@"; fi
@@ -139,16 +131,17 @@ STRATA_PORT=${STRATA_PORT:-8080}
 STRATA_READY_TIMEOUT=${STRATA_READY_TIMEOUT:-900}
 STRATA_ALLOW_NO_KEY=${STRATA_ALLOW_NO_KEY:-false}
 
-prompt_required CT_ID 'New Strata CT ID on this Proxmox host (unused, at least 100): '
-pve_select_template TEMPLATE '^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/(ubuntu-(22\.04|24\.04)|debian-(12|13))-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
+# --- Questions: the container, one section ----------------------------------
+valid_template_volume() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/[A-Za-z0-9._-]+$ ]]; }
+valid_storage_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+pve_ask_new_ct Strata
 positive_int ROOTFS_GB "$ROOTFS_GB"
+if pve_interactive && (( ! dry_run )); then _pve_heading; fi
+pve_select_template TEMPLATE '^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/(ubuntu-(22\.04|24\.04)|debian-(12|13))-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
 pve_select_storage STORAGE rootdir "$ROOTFS_GB"
-prompt_required TEMPLATE 'Downloaded Ubuntu or Debian amd64 template (e.g. local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst): '
-prompt_required STORAGE 'Storage for the new Strata CT root disk (e.g. local-lvm): '
-prompt_required IP_CIDR 'IP/CIDR for the new Strata CT (or dhcp): '
-if [[ $IP_CIDR != dhcp ]]; then
-    prompt_required GATEWAY 'Gateway for the new Strata CT: '
-fi
+pve_suggest TEMPLATE 'Ubuntu 22.04/24.04 or Debian 12/13 amd64 template' '' valid_template_volume 'Use a downloaded LXC template volume (storage:vztmpl/...).'
+pve_suggest STORAGE 'Root disk storage' '' valid_storage_id
+pve_ask_network Strata dhcp
 
 [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] || die 'CT_ID must be an unused numeric ID of 100 or more.'
 [[ $TEMPLATE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/(ubuntu-(22\.04|24\.04)|debian-(12|13))-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$ ]] || \
@@ -249,6 +242,12 @@ else
 fi
 
 trap 'printf "Provisioning stopped at line %s. CT %s is kept for inspection.\n" "$LINENO" "$CT_ID" >&2' ERR
+pve_summary "Strata: create"
+pve_row 'Strata CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on $STORAGE"
+pve_row 'Template' "$TEMPLATE"
+pve_row 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+pve_row 'Server' "context $STRATA_CONTEXT, port $STRATA_PORT"
+pve_confirm "Create Strata CT $CT_ID?"
 (umask 022; run "${create[@]}")
 # Strata pins tens of GiB of model memory. systemd's LimitMEMLOCK must be
 # allowed by the outer LXC hard limit too.

@@ -273,10 +273,18 @@ rollback() {
 }
 on_exit() {
   local rc=$?
+  trap '' INT TERM HUP  # the rollback below must finish
   if (( rc != 0 )) && $existing; then rollback; fi
   exit "$rc"
 }
 trap on_exit EXIT
+# A signal (Ctrl-C, a closed SSH session, kill) must reach the EXIT trap as a
+# failure so it rolls back: after a signal bash runs it with $? = 0. After a
+# hangup the output goes to OSR_INTERRUPT_LOG, so writes to the closed
+# terminal cannot fail the rollback.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exec >>"${OSR_INTERRUPT_LOG:-/var/log/osr-install-interrupted.log}" 2>&1 || exec >/dev/null 2>&1; exit 129' HUP
 
 if [[ ! -d $opt/.git ]]; then
   git clone https://github.com/plastic-labs/honcho.git "$opt"

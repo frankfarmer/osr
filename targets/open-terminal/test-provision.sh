@@ -212,8 +212,8 @@ has '--terminal-url http://\<terminal-eth0-ip\>:8000'
 passed=$((passed + 1))
 
 reject 'CT_ID' CT_ID=99
-reject 'Set CT_ID for an unattended run' CT_ID=
-reject 'Set CT_ID for an unattended run' ROUTER_CT_ID= ROUTER=192.0.2.80 CT_ID=
+reject 'Set CT_ID for unattended provisioning' CT_ID=
+reject 'Set CT_ID for unattended provisioning' ROUTER_CT_ID= ROUTER=192.0.2.80 CT_ID=
 reject 'must differ' ROUTER_CT_ID=281
 reject 'must differ' ROUTER_CT_ID= ROUTER=281
 reject 'neither a CT ID' ROUTER_CT_ID= ROUTER=99
@@ -225,10 +225,10 @@ reject 'ROUTER_SSH_PORT' ROUTER_CT_ID= ROUTER=192.0.2.80 ROUTER_SSH_PORT=0
 reject 'ROUTER_SSH_USER' ROUTER_CT_ID= ROUTER=192.0.2.80 ROUTER_SSH_USER='Bad User'
 reject 'ROUTER_SSH_USER must be root' ROUTER_CT_ID= ROUTER=192.0.2.80 ROUTER_SSH_USER=admin
 reject 'TEMPLATE' TEMPLATE=local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
-reject 'Set TEMPLATE for an unattended run' TEMPLATE=
-reject 'Set STORAGE for an unattended run' STORAGE=
-reject 'Set IP_CIDR for an unattended run' IP_CIDR=
-reject 'Set GATEWAY for an unattended run' GATEWAY=
+reject 'Set TEMPLATE for unattended provisioning' TEMPLATE=
+reject 'Set STORAGE for unattended provisioning' STORAGE=
+reject 'Set IP_CIDR for unattended provisioning' IP_CIDR=
+reject 'Set GATEWAY for unattended provisioning' GATEWAY=
 reject 'IP_CIDR' IP_CIDR=dhcp
 reject 'GATEWAY' GATEWAY=
 reject 'OPEN_TERMINAL_PORT' OPEN_TERMINAL_PORT=70000
@@ -241,4 +241,24 @@ bash -n "$provision"
 bash -n "$here/install-target.sh"
 python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$here/integrate-webui.py"
 python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$here/verify-webui.py"
+# Guided prompts: Router (Open WebUI) first, then the terminal container and
+# its port; --integrate-only starts with the existing CT, offered by its tag.
+lxc=$(mktemp -d)
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.80/24\ntags: osr-router\n' > "$lxc/280.conf"
+out=$(env -i "PATH=$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR="$lxc" bash "$provision" --dry-run 2>&1 \
+  <<< $'\n281\nlocal:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst\nlocal-lvm\n192.0.2.81/24\n\n\n') || { printf 'FAIL guided create: %s\n' "$out" >&2; exit 1; }
+order=$(sed '/== Open Terminal: /q' <<< "$out" | grep -oE '== [A-Za-z:() ]+ ==|Router CT ID or address|New Open Terminal CT ID|amd64 template|Root disk storage|Open Terminal IP/CIDR|Open Terminal gateway|Terminal API port' | paste -sd'|')
+[[ $order == '== Router (Open WebUI) ==|Router CT ID or address|== Open Terminal container ==|New Open Terminal CT ID|amd64 template|Root disk storage|Open Terminal IP/CIDR|Open Terminal gateway|== Open Terminal settings ==|Terminal API port|== Open Terminal: create ==' ]] ||
+  { printf 'FAIL create prompts out of order: %s\n' "$order" >&2; exit 1; }
+[[ $out == *'Router CT ID or address [280]'* && $out == *'Open Terminal gateway [192.0.2.1]'* ]] ||
+  { printf 'FAIL router offers: %s\n' "$out" >&2; exit 1; }
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.81/24\ntags: osr-target;open-terminal\n' > "$lxc/281.conf"
+out=$(env -i "PATH=$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR="$lxc" bash "$provision" --dry-run --integrate-only 2>&1 <<< $'\n\n') ||
+  { printf 'FAIL guided integrate: %s\n' "$out" >&2; exit 1; }
+order=$(sed '/== Open Terminal: /q' <<< "$out" | grep -oE '== [A-Za-z:() ]+ ==|Open Terminal CT ID|Router CT ID or address' | paste -sd'|')
+[[ $order == '== Open Terminal container to register ==|Open Terminal CT ID|== Router (Open WebUI) ==|Router CT ID or address|== Open Terminal: integrate ==' ]] ||
+  { printf 'FAIL integrate prompts out of order: %s\n' "$order" >&2; exit 1; }
+rm -rf -- "$lxc"
+passed=$((passed + 1))
+
 printf '%s Open Terminal dry-run cases and syntax checks passed. No CT was created.\n' "$passed"

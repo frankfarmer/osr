@@ -117,6 +117,42 @@ export function validateModel(models, inventory, model, contextWindow) {
   return entries.length > 0;
 }
 
+// Streamable HTTP may return one JSON message or an SSE stream. Read through
+// the initialize response rather than treating any HTTP 200 as success.
+async function readMcpInitialize(response) {
+  if (!response.headers.get('content-type')?.includes('text/event-stream')) {
+    try { return await response.json(); }
+    catch { throw new Error('Honcho MCP initialize returned invalid JSON'); }
+  }
+  if (!response.body) throw new Error('Honcho MCP initialize returned an empty event stream');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      if (buffer.length > 1024 * 1024) throw new Error('Honcho MCP initialize response is too large');
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop();
+      for (const event of events) {
+        const data = event.split(/\r?\n/).filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trimStart()).join('\n');
+        if (!data) continue;
+        let message;
+        try { message = JSON.parse(data); }
+        catch { throw new Error('Honcho MCP initialize returned invalid event JSON'); }
+        // An error the server could not tie to the request carries id null.
+        if (message?.id === 1 || (message?.id === null && message.error)) return message;
+      }
+      if (done) break;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  throw new Error('Honcho MCP initialize returned no response');
+}
+
 // checkHoncho: one MCP initialize with the key and workspace header, so a
 // wrong key, workspace or address fails the install instead of the first chat.
 async function checkHoncho(options, key) {
@@ -143,11 +179,24 @@ async function checkHoncho(options, key) {
     throw new Error(`Honcho MCP rejected the key (HTTP ${response.status}); reconfigure with HONCHO_CT_ID to fetch the osr workspace key`);
   }
   if (!response.ok) throw new Error(`Honcho MCP initialize: HTTP ${response.status}`);
-  await response.body?.cancel().catch(() => {});
+  const message = await readMcpInitialize(response);
+  // Report a JSON-RPC error first, also one with id null (a request the
+  // server could not parse or route), so its message is not lost.
+  if (message?.error && (message.id === 1 || message.id === null)) {
+    throw new Error(`Honcho MCP initialize failed: ${message.error.message ?? 'JSON-RPC error'}`);
+  }
+  if (message?.jsonrpc !== '2.0' || message.id !== 1) {
+    throw new Error('Honcho MCP initialize returned an unexpected JSON-RPC response');
+  }
+  if (!message.result || typeof message.result.protocolVersion !== 'string') {
+    throw new Error('Honcho MCP initialize returned no negotiated protocol');
+  }
   const session = response.headers.get('mcp-session-id');
   if (session) {
     await fetch(options.honchoMcpUrl, {
-      method: 'DELETE', headers: { Authorization: headers.Authorization, 'mcp-session-id': session },
+      method: 'DELETE', headers: { Authorization: headers.Authorization,
+        'X-Honcho-Workspace-ID': options.honchoWorkspace,
+        'MCP-Protocol-Version': message.result.protocolVersion, 'mcp-session-id': session },
       signal: AbortSignal.timeout(5000),
     }).catch(() => {});
   }

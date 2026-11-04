@@ -225,7 +225,10 @@ and outbound model rules belong to this target. They carry rule comments
 `ollama-smart-router hermes-api`, `hermes-dashboard`, `hermes-router` and `hermes-model`, which Proxmox keeps when
 you edit the firewall in its GUI. `--reconfigure` replaces only those rules,
 puts them first in `[RULES]` so they match first, and leaves every other line
-as it is.
+as it is. Each write goes through
+`targets/pve-firewall-swap.pl`: under the CT's Proxmox firewall lock, and only
+if the file still holds what the run read, so an edit made meanwhile (the GUI,
+another provisioner) stops the run and is kept, never overwritten.
 - **Order.** Before anything in the CT changes, the new rules are added next
   to the old ones, so the guest installer can reach a moved router. Once it
   has succeeded, the old ones are removed. A failed run therefore leaves the

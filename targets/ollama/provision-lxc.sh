@@ -219,9 +219,8 @@ COMMUNITY_SCRIPT_SHA256=${COMMUNITY_SCRIPT_SHA256:-}
 OLLAMA_CT_OS=${OLLAMA_CT_OS:-debian}
 OLLAMA_CT_VERSION=${OLLAMA_CT_VERSION:-13}
 
-pve_prompt_required CT_ID 'New Ollama CT ID (unused, at least 100)'
-pve_prompt_required IP_CIDR 'Ollama IP/CIDR (or dhcp)'
-if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'Ollama gateway IP'; fi
+# --- Questions: the container, one section ----------------------------------
+pve_ask_new_ct Ollama
 valid_container_id "$CT_ID" || die 'CT_ID must be a numeric ID of 100 or more.'
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die 'CT_HOSTNAME must be a DNS label.'
 for name in CORES MEMORY_MB ROOTFS_GB; do positive_int "$name" "${!name}"; done
@@ -229,7 +228,6 @@ for name in CORES MEMORY_MB ROOTFS_GB; do positive_int "$name" "${!name}"; done
 (( ROOTFS_GB >= 32 )) || die 'ROOTFS_GB must be at least 32; models are several GB each.'
 [[ -z $STORAGE || $STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid STORAGE.'
 [[ $BRIDGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid BRIDGE.'
-[[ -z $IP_CIDR ]] || valid_container_ip "$IP_CIDR" || die 'IP_CIDR must be a.b.c.d/nn or dhcp.'
 [[ -z $GATEWAY ]] || ipv4 "$GATEWAY" || die 'GATEWAY must be an IPv4 address.'
 [[ -z $NAMESERVER ]] || ipv4 "$NAMESERVER" || die 'NAMESERVER must be one IPv4 address.'
 if [[ -n $VLAN_TAG ]]; then positive_int VLAN_TAG "$VLAN_TAG"; (( VLAN_TAG <= 4094 )) || die 'VLAN_TAG must be 1..4094.'; fi
@@ -242,8 +240,12 @@ valid_models "$OLLAMA_PULL_MODELS" || die 'OLLAMA_PULL_MODELS is a space-separat
 valid_ct_os "$OLLAMA_CT_OS" "$OLLAMA_CT_VERSION" ||
     die 'OLLAMA_CT_OS/OLLAMA_CT_VERSION must be debian 12|13 or ubuntu 22.04|24.04|26.04.'
 [[ -z $TEMPLATE_STORAGE || $TEMPLATE_STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid TEMPLATE_STORAGE.'
+if pve_interactive && (( ! dry_run )); then _pve_heading; fi
 pve_select_storage TEMPLATE_STORAGE vztmpl 0
 pve_select_storage STORAGE rootdir "$ROOTFS_GB"
+pve_ask_network Ollama dhcp
+[[ -z $IP_CIDR ]] || valid_container_ip "$IP_CIDR" || die 'IP_CIDR must be a.b.c.d/nn or dhcp.'
+[[ $IP_CIDR == dhcp || -z $GATEWAY ]] || ipv4 "$GATEWAY" || die 'GATEWAY must be an IPv4 address.'
 gpu=$(gpu_vendor "$GPU") || die 'GPU must be auto, nvidia, amd, intel or none (yes means nvidia, no means none).'
 card=''
 if [[ -n $GPU_CARD ]]; then
@@ -330,6 +332,14 @@ if [[ $gpu == nvidia ]]; then
     fi
 fi
 
+script_choice="the community script's choice"
+pve_summary "Ollama: create"
+pve_row 'Ollama CT' "$CT_ID ($CT_HOSTNAME), $CORES cores, ${MEMORY_MB} MiB, ${ROOTFS_GB} GiB on ${STORAGE:-$script_choice}"
+pve_row 'Template' "$OLLAMA_CT_OS $OLLAMA_CT_VERSION from ${TEMPLATE_STORAGE:-$script_choice}"
+pve_row 'Network' "$IP_CIDR${GATEWAY:+ via $GATEWAY} on $BRIDGE${VLAN_TAG:+ (VLAN $VLAN_TAG)}"
+pve_row 'GPU' "$gpu${card:+ ($card)}"
+pve_row 'Models to pull' "${OLLAMA_PULL_MODELS:-none} (context $OLLAMA_CONTEXT_LENGTH)"
+pve_confirm "Create Ollama CT $CT_ID with the community script?"
 script=${TMPDIR:-/tmp}/community-ollama.$$.sh
 trap 'rm -f -- "$script"' EXIT
 run curl -fsSL -o "$script" "$COMMUNITY_SCRIPT_URL"

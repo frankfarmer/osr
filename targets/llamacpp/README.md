@@ -138,10 +138,12 @@ unset CT_ID TEMPLATE CT_HOSTNAME IP_CIDR BRIDGE GATEWAY CORES MEMORY_MB STORAGE 
 bash targets/llamacpp/provision-lxc.sh
 ```
 
-The script prompts for the **CT template, name, IPv4/CIDR (or `dhcp`), CPU
-cores, RAM in MiB, root disk storage ID, and disk size in GiB**. It also asks
-for the CT ID, network bridge, and an optional static gateway. No CT ID or IP
-is suggested or selected automatically. Downloaded Debian 13 and 12 templates (13 first) and
+The script asks, in this order, for the **CT ID, name, template, root disk
+storage ID and size in GiB, CPU cores, RAM in MiB, network bridge, IPv4/CIDR
+(or `dhcp`), and an optional static gateway**, then shows a summary to
+confirm. On a terminal the cluster's next free CT ID and the router CT's
+gateway are offered in brackets; an unattended run never picks a CT ID or
+IP. Downloaded Debian 13 and 12 templates (13 first) and
 active storage that supports container root disks appear in numbered selectors.
 Choose a number, paste an exact listed ID, or enter `m` to provide a manual
 value. CUDA runs also present a numbered NVIDIA GPU selector. Templates are not

@@ -127,8 +127,8 @@ pass '--integrate-only only registers the existing CT'
 
 refuse 'With --no-webui nothing would be admitted' --no-webui
 refuse 'Use only one of' --integrate-only --no-webui
-refuse 'Set CT_ID for an unattended run' --integrate-only CT_ID=
-refuse 'Set CT_ID for an unattended run' CT_ID=
+refuse 'Set CT_ID for unattended provisioning' --integrate-only CT_ID=
+refuse 'Set CT_ID for unattended provisioning' CT_ID=
 refuse 'MEMORY_MB must be at least 8192' MEMORY_MB=4096
 refuse 'ROOTFS_GB must be at least 32' ROOTFS_GB=25
 refuse 'GPU must be' GPU=radeon
@@ -445,5 +445,25 @@ real OPENWEBUI_ADMIN_TOKEN=t COMFYUI_IMAGE_VARIANT=klein-9b HF_TOKEN="$hf_token"
 grep -q 'pct exec 286 -- rm -f -- /root/comfyui-target-deploy/hf-token' "$log" || fail 'a failed run left the token in the CT'
 has 'COMFYUI_IMAGE_VARIANT=klein-9b bash /root/comfyui-target-deploy/install-target.sh'; has 'HF_TOKEN_FILE='
 pass 'a failed guest step still removes the token, and says how to resume the download'
+
+# Guided prompts: Router (Open WebUI) first, then the ComfyUI container and its
+# image model; --integrate-only starts with the existing CT.
+lxc=$(mktemp -d)
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.80/24\ntags: osr-router\n' > "$lxc/280.conf"
+out=$(env -i "PATH=$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR="$lxc" NVIDIA_DEVICE=/nonexistent GPU=none \
+  bash "$here/provision-lxc.sh" --dry-run 2>&1 <<< $'\n286\n192.0.2.86/24\n\n\n') || fail 'guided create'
+order=$(sed '/== ComfyUI: /q' <<< "$out" | grep -oE '== [A-Za-z:() ]+ ==|Router CT ID or address|New ComfyUI CT ID|ComfyUI IP/CIDR|ComfyUI gateway|Image model \(' | paste -sd'|')
+[[ $order == '== Router (Open WebUI) ==|Router CT ID or address|== ComfyUI container ==|New ComfyUI CT ID|ComfyUI IP/CIDR|ComfyUI gateway|== ComfyUI settings ==|Image model (|== ComfyUI: create ==' ]] ||
+  { out=$order; fail 'create prompts out of order'; }
+[[ $out == *'Router CT ID or address [280]'* && $out == *'ComfyUI gateway [192.0.2.1]'* && $out == *'Image model (klein-4b or klein-9b) [klein-4b]'* ]] ||
+  fail 'router, gateway or image model offers'
+printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.86/24\ntags: osr-target;comfyui\n' > "$lxc/286.conf"
+out=$(env -i "PATH=$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR="$lxc" NVIDIA_DEVICE=/nonexistent \
+  bash "$here/provision-lxc.sh" --dry-run --integrate-only 2>&1 <<< $'\n\n') || fail 'guided integrate'
+order=$(sed '/== ComfyUI: /q' <<< "$out" | grep -oE '== [A-Za-z:() ]+ ==|ComfyUI CT ID|Router CT ID or address' | paste -sd'|')
+[[ $order == '== ComfyUI container to register ==|ComfyUI CT ID|== Router (Open WebUI) ==|Router CT ID or address|== ComfyUI: integrate ==' ]] ||
+  { out=$order; fail 'integrate prompts out of order'; }
+rm -rf -- "$lxc"
+pass 'guided prompts: router, container, image model; --integrate-only starts with the CT, offered by its tag'
 
 printf '%s provision cases passed. Nothing was fetched or created.\n' "$passed"

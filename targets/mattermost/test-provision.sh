@@ -84,7 +84,7 @@ lacks '+ curl -fsSL'; lacks '+ env var_'
 has '+ pct exec 275 -- env MATTERMOST_CHANNEL=ollama-monitor MATTERMOST_TEAM=ops'
 pass '--reconfigure reruns the guest setup in the existing CT only'
 
-refuse 'needs the existing CT_ID' --reconfigure CT_ID=
+refuse 'Set CT_ID for unattended provisioning' --reconfigure CT_ID=
 refuse 'Use only one of' --create-only --reconfigure
 refuse 'MATTERMOST_ADMIN_USER' MATTERMOST_ADMIN_USER=X
 refuse 'MATTERMOST_TEAM' MATTERMOST_TEAM='Ops Team'
