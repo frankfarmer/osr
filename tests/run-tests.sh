@@ -79,6 +79,7 @@ add_suite comfyui-integration       python "${ROOT}/targets/comfyui/test-integra
 add_suite honcho-integration        python "${ROOT}/targets/honcho/test-integrate.py"          python3
 add_suite honcho-budgets            python "${ROOT}/targets/honcho/test-budgets.py"            python3
 add_suite honcho-proxy              python "${ROOT}/targets/honcho/test-proxy.py"              python3
+add_suite honcho-model-choices      python "${ROOT}/targets/honcho/test-model-choices.py"      python3
 add_suite skip-report               python "${HERE}/test-skip-report.py"                       python3
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_bld=$'\033[1m'; c_off=$'\033[0m'

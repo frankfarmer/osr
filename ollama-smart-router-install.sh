@@ -1608,11 +1608,18 @@ ensure_target_template() {
   pveam download "$storage" "$name"
 }
 
+# honcho_known_dimensions MODEL: the vector size a common embedding model is
+# known to have (from targets/honcho/model_choices.py), or nothing.
+honcho_known_dimensions() {
+  [[ -r ${TARGETS_DIR}/honcho/model_choices.py ]] || return 0
+  python3 "${TARGETS_DIR}/honcho/model_choices.py" dimensions "$1" 2>/dev/null || true
+}
+
 # For each selected target: an explicit CT ID, static address and storage (and
 # a template for Strata, Basalt, Maya, Xolotl and Avalon). Presets:
 # <NAME>_CT_ID, <NAME>_IP_CIDR, <NAME>_STORAGE, <NAME>_TEMPLATE.
 prompt_target_settings() {
-  local name prefix id_var ip_var storage_var template_var default ip
+  local name prefix id_var ip_var storage_var template_var default ip dims_default
   [[ -n "${TARGETS:-}" ]] || return 0
   echo
   echo "--- Target containers ---"
@@ -1641,7 +1648,10 @@ prompt_target_settings() {
       echo "    For an Ollama CT, pull an embedding model there and use http://<ollama-ip>:11434/v1."
       echo "    Leave the URL blank to use OSR's /v1/embeddings (it needs an embedding model mapped in LiteLLM)."
       prompt_until_valid "    Embedding model" HONCHO_EMBEDDING_MODEL "${HONCHO_EMBEDDING_MODEL:-}" valid_honcho_model || return 1
-      prompt_until_valid "    Embedding dimensions" HONCHO_EMBEDDING_DIMENSIONS "${HONCHO_EMBEDDING_DIMENSIONS:-}" valid_positive_int || return 1
+      dims_default="${HONCHO_EMBEDDING_DIMENSIONS:-$(honcho_known_dimensions "$HONCHO_EMBEDDING_MODEL")}"
+      [[ -n ${HONCHO_EMBEDDING_DIMENSIONS:-} || -z $dims_default ]] ||
+        echo "    ${HONCHO_EMBEDDING_MODEL} makes ${dims_default}-dimension vectors (its known size); Enter accepts it."
+      prompt_until_valid "    Embedding dimensions" HONCHO_EMBEDDING_DIMENSIONS "$dims_default" valid_positive_int || return 1
       prompt_until_valid "    Embedding base URL" HONCHO_EMBEDDING_BASE_URL "${HONCHO_EMBEDDING_BASE_URL:-}" valid_honcho_embedding_url || return 1
       echo "    Its context window is asked with the model targets' windows, below."
     fi

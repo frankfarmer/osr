@@ -1072,6 +1072,26 @@ preset_target_model_servers > /dev/null
 assert_eq "companions alone change nothing" "3 10.0.0.51" "$MODEL_SERVER_COUNT $MODEL_SERVER_1"
 for _i in 1 2 3 4 5; do unset "MODEL_SERVER_$_i"; done; unset _i
 
+describe honcho_known_dimensions
+_saved_targets_dir=$TARGETS_DIR
+TARGETS_DIR="${HERE}/../targets"
+assert_eq "a common embedding model's known size" 768 "$(honcho_known_dimensions nomic-embed-text)"
+assert_eq "an Ollama tag that decides it" 1024 "$(honcho_known_dimensions qwen3-embedding:0.6b)"
+assert_eq "nothing for an unknown model" "" "$(honcho_known_dimensions my-embedder)"
+TARGETS_DIR=$_saved_targets_dir; unset _saved_targets_dir
+assert_eq "nothing without the helper" "" "$(honcho_known_dimensions nomic-embed-text)"
+TARGETS=honcho
+HONCHO_CT_ID=934; HONCHO_IP_CIDR=192.0.2.101/24; HONCHO_STORAGE=router-store
+unset HONCHO_EMBEDDING_DIMENSIONS
+_saved_fn="$(declare -f honcho_known_dimensions)"
+honcho_known_dimensions() { [[ $1 == bge-m3 ]] && echo 1024; return 0; }
+_out="$(mktemp)"
+prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nfast\nbge-m3\n\n\n'
+assert_eq "the known size is the default vector size" 1024 "$HONCHO_EMBEDDING_DIMENSIONS"
+assert_contains "and the prompt says so" "bge-m3 makes 1024-dimension vectors (its known size)" "$(cat "$_out")"
+eval "$_saved_fn"; unset _saved_fn
+HONCHO_EMBEDDING_DIMENSIONS=768; HONCHO_EMBEDDING_MODEL=nomic-embed-text; TARGETS=""
+
 describe target_context_var
 assert_eq "Ollama's window is OLLAMA_CONTEXT_LENGTH" OLLAMA_CONTEXT_LENGTH "$(target_context_var ollama)"
 assert_eq "llama.cpp's is per request, not CONTEXT_SIZE" LLAMACPP_CONTEXT "$(target_context_var llamacpp)"

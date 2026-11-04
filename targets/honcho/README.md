@@ -327,7 +327,10 @@ The selection menu requires you to enter the router CT ID and IP/CIDR and,
 for every selected target, its own CT ID and static IP/CIDR. It does not
 choose IDs or addresses for you. For Honcho it also asks which router chat
 model or tier to use (default `fast`), plus the embedding model, vector
-dimensions, and `/v1` endpoint. Enter the IPs of Hermes, OpenClaw and
+dimensions, and `/v1` endpoint. The router does not exist yet at that point,
+so it cannot list models; for a common embedding model (`nomic-embed-text`,
+`mxbai-embed-large`, `bge-m3`, `qwen3-embedding`, ...) it offers the model's
+known vector size as the default. Enter the IPs of Hermes, OpenClaw and
 DeepSeek Harness at their own target prompts if you select them; Honcho uses
 those addresses for its firewall rules. `HONCHO_CT_ID`, `HONCHO_IP_CIDR`,
 `HONCHO_STORAGE`, and `HONCHO_TEMPLATE` can preset Honcho's answers. The CT
@@ -348,10 +351,28 @@ bash targets/honcho/provision-lxc.sh
 ```
 
 The standalone installer asks for the Honcho CT ID and static IP/CIDR, the
-router/Open WebUI CT ID and router IP, and Honcho's gateway. It then asks for
-the embedding model, its actual vector dimensions, and its reachable `/v1`
-base URL. A blank URL lets the local proxy find that model in the router's
-inventory and contact its host directly. Give the Hermes, OpenClaw and
+router/Open WebUI CT ID and router IP, and Honcho's gateway. Once it has the
+router's address, it reads the router's model inventory with curl
+(`/routing/inventory`, with the router key read from the router CT and given
+to curl on stdin; from inside the router CT if its firewall turns the host
+away). It then asks, each with a suggestion that Enter accepts:
+
+- **Chat model.** It lists the models the proxy can use (tool support
+  reported and at least `HONCHO_CONTEXT_TOKENS` of context; 65536 on a first
+  install), loaded ones first, then larger ones, and names the others with
+  the reason they are left out. Answer with a number, a model name or a tier
+  (`fast`, `medium`, `large`, `xlarge`). With no usable model it suggests
+  `fast` and says the install will need one.
+- **Embedding model.** It lists the inventory's embedding models.
+- **Embedding base URL.** Blank lets the local proxy find the model in the
+  router's inventory and contact its host directly.
+- **Vector dimensions.** It measures them with one short `/embeddings`
+  request to the model's host (the URL given, or the one the inventory lists),
+  or else offers the size a common embedding model is known to have.
+
+A preset `HONCHO_MODEL`, `HONCHO_EMBEDDING_MODEL` or
+`HONCHO_EMBEDDING_DIMENSIONS` is not asked for. If the inventory cannot be
+read, the installer says so and asks for the names without a list. Give the Hermes, OpenClaw and
 DeepSeek Harness CT IPs at the optional prompts if those agents should access
 Honcho. The router IP must
 match the source address its CT uses to reach Honcho; the installer checks

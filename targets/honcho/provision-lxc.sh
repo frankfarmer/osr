@@ -44,14 +44,97 @@ honcho_fw_clients() {
   ' "$1" | sort -u | paste -sd' ' -
 }
 # End Honcho firewall helpers.
+# Model choice helpers
+# router_inventory ROUTER_CT ROUTER_IP: the router's /routing/inventory JSON,
+# asked with curl at ROUTER_IP from this host, else from inside the router CT
+# (its firewall may admit only its clients). The router key is read in that CT
+# and given to curl on stdin, never on a command line.
+router_inventory() {
+  local ct=$1 ip=$2 port key config
+  port=$(pct exec "$ct" -- sh -c "sed -n 's/^ROUTER_PORT=//p' /app/router/.env | head -n1" 2>/dev/null | tr -d '\r\n') || port=''
+  [[ $port =~ ^[0-9]{2,5}$ ]] || port=8000
+  key=$(pct exec "$ct" -- awk -F= '$1=="ROUTER_API_KEY" {sub(/^[^=]*=/,""); print; exit}' \
+    /app/router/secrets.env 2>/dev/null | tr -d '\r\n') || key=''
+  key=${key//\\/\\\\}; key=${key//\"/\\\"}
+  config=$(printf 'silent\nshow-error\nfail\nmax-time = 10\n'
+    [[ -z $key ]] || printf 'header = "Authorization: Bearer %s"\n' "$key")
+  curl -K - "http://$ip:$port/routing/inventory" <<< "$config" 2>/dev/null ||
+    pct exec "$ct" -- curl -K - "http://127.0.0.1:$port/routing/inventory" <<< "$config" 2>/dev/null
+}
+valid_model_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; }
+valid_dimensions() { [[ $1 =~ ^[1-9][0-9]{0,5}$ ]]; }
+# choose_from LABEL SUGGESTION VALIDATOR [NAME<TAB>DESCRIPTION<TAB>URL...]: a
+# numbered list of the lines, then one answer: Enter takes SUGGESTION, a list
+# number that line's name, anything else what VALIDATOR accepts. Prints the
+# choice; the list and prompts go to stderr. Fails at the end of input.
+choose_from() {
+  local label=$1 suggestion=$2 validator=$3 line answer i=0 description
+  shift 3
+  local -a names=()
+  for line in "$@"; do
+    i=$((i + 1)); names+=("${line%%$'\t'*}")
+    description=${line#*$'\t'}; description=${description%%$'\t'*}
+    printf '  %d) %s  (%s)\n' "$i" "${names[i - 1]}" "$description" >&2
+  done
+  while true; do
+    IFS= read -r -p "$label${suggestion:+ [$suggestion]}: " answer || { printf '\n' >&2; return 1; }
+    answer=${answer:-$suggestion}
+    if [[ $answer =~ ^[0-9]+$ ]] && (( ${#names[@]} > 0 )); then
+      if (( 10#$answer < 1 || 10#$answer > ${#names[@]} )); then
+        printf 'Choose 1-%d, or type a name.\n' "${#names[@]}" >&2; continue
+      fi
+      answer=${names[10#$answer - 1]}
+    fi
+    if [[ -n $answer ]] && "$validator" "$answer"; then printf '%s\n' "$answer"; return 0; fi
+    printf 'Not a valid choice: %s\n' "${answer:-(empty)}" >&2
+  done
+}
+# listed_url NAME [NAME<TAB>DESCRIPTION<TAB>URL...]: the URL of NAME's line
+# (any case), or nothing.
+listed_url() {
+  local name=${1,,} line listed
+  shift
+  for line in "$@"; do
+    listed=${line%%$'\t'*}
+    [[ ${listed,,} == "$name" ]] || continue
+    printf '%s\n' "${line##*$'\t'}"; return 0
+  done
+}
+# suggest_dimensions CHOICES MODEL [URL]: the vector size to offer. With URL
+# (an OpenAI-compatible /v1), one short /embeddings request measures it;
+# otherwise, or when that fails, the size MODEL is known to have. Prints the
+# size, then a tab and where it came from, or nothing.
+suggest_dimensions() {
+  local choices=$1 model=$2 url=${3:-} answer size
+  if [[ -n $url ]]; then
+    answer=$(mktemp "${TMPDIR:-/tmp}/honcho-embedding.XXXXXX")
+    if curl -fsS --max-time 60 -H 'Content-Type: application/json' -o "$answer" \
+        -d "{\"model\":\"$model\",\"input\":\"dimension probe\"}" "${url%/}/embeddings" 2>/dev/null; then
+      size=$(python3 "$choices" measured "$answer")
+      if [[ -n $size ]]; then
+        rm -f -- "$answer"
+        printf '%s\tmeasured at %s\n' "$size" "$url"
+        return 0
+      fi
+    fi
+    rm -f -- "$answer"
+  fi
+  size=$(python3 "$choices" dimensions "$model")
+  [[ -z $size ]] || printf '%s\tthe size %s is known to have\n' "$size" "$model"
+}
+# End model choice helpers.
 source "$(dirname -- "${BASH_SOURCE[0]}")/pve-select.sh"
 usage() {
   cat <<'USAGE'
 Usage: bash provision-lxc.sh [--dry-run] [--reconfigure [--rotate-keys]]
 
 Run as root on the Proxmox host. For a new CT, the installer asks for the
-Honcho CT ID and IP/CIDR, router/Open WebUI CT ID and IP, gateway, embedding
-model and dimensions, embedding endpoint, and optional agent CT IPs.
+Honcho CT ID and IP/CIDR, router/Open WebUI CT ID and IP, gateway, chat model,
+embedding model, embedding endpoint and dimensions, and optional agent CT IPs.
+Once the router's address is known it reads the router's model inventory
+(curl to /routing/inventory) and lists the chat models Honcho can use and the
+embedding models, each with a suggestion; the vector size is measured with one
+embedding request, or else suggested from the model's known size.
 Set CT_ID, IP_CIDR, ROUTER_CT_ID, ROUTER_IP, GATEWAY,
 HONCHO_EMBEDDING_MODEL, HONCHO_EMBEDDING_DIMENSIONS,
 HONCHO_EMBEDDING_BASE_URL, and HONCHO_CLIENT_IPS to preset these answers.
@@ -132,6 +215,7 @@ for name in "${honcho_kept_names[@]}"; do
   [[ -z ${!var+set} ]] || kept_env+=("$var=${!var}")
 done
 honcho_ref_given=${HONCHO_REF+set}
+honcho_model_given=${HONCHO_MODEL:+set}
 HONCHO_MODEL=${HONCHO_MODEL:-fast}
 HONCHO_REF=${HONCHO_REF:-v3.5.0}
 HONCHO_EMBEDDING_MODEL=${HONCHO_EMBEDDING_MODEL:-}
@@ -171,16 +255,70 @@ if [[ $mode == create ]]; then
   prompt_missing ROUTER_CT_ID 'Router and Open WebUI CT ID'
   prompt_missing ROUTER_IP 'Router IP reachable from Honcho'
   prompt_missing GATEWAY 'Honcho gateway IP'
-  printf 'Honcho will use router inventory to select chat model %s and contact its host directly; it must support tools and structured output (set HONCHO_MODEL to change it).\n' "$HONCHO_MODEL"
+  interactive=false
+  [[ ${NONINTERACTIVE:-false} == true || ! -t 0 ]] || interactive=true
+  choices=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/model_choices.py
+  chat_lines=() embedding_lines=()
+  # The models the router serves, to choose from: read once the router's
+  # address is known, and only when a model setting is still to be chosen.
+  if [[ $interactive == true && ( -z $honcho_model_given || -z $HONCHO_EMBEDDING_MODEL ||
+        -z $HONCHO_EMBEDDING_DIMENSIONS ) ]]; then
+    inventory_file=$(mktemp "${TMPDIR:-/tmp}/honcho-inventory.XXXXXX")
+    printf 'Reading the models router CT %s serves (http://%s, /routing/inventory)...\n' "$ROUTER_CT_ID" "$ROUTER_IP"
+    if router_inventory "$ROUTER_CT_ID" "$ROUTER_IP" > "$inventory_file" &&
+       python3 "$choices" embedding "$inventory_file" > /dev/null 2>&1; then
+      # The proxy's own test: tools reported and this much context (65536 on a
+      # first install without HONCHO_CONTEXT_TOKENS; Honcho's 131072 when blank).
+      min_context=${HONCHO_CONTEXT_TOKENS-65536}
+      [[ $min_context =~ ^[1-9][0-9]*$ ]] || min_context=131072
+      mapfile -t chat_lines < <(python3 "$choices" chat "$inventory_file" "$min_context" 2> "$inventory_file.skipped")
+      mapfile -t embedding_lines < <(python3 "$choices" embedding "$inventory_file")
+    else
+      printf 'Could not read the router inventory; enter the model names yourself.\n'
+    fi
+  fi
+  if [[ $interactive == true && -z $honcho_model_given ]]; then
+    printf 'Chat model: Honcho needs one that calls tools and returns structured output, with %s tokens of\n' "${min_context:-65536}"
+    printf 'context or more. A tier (fast, medium, large, xlarge) lets the router pick the model.\n'
+    if (( ${#chat_lines[@]} == 0 )) && [[ -s ${inventory_file:-} ]]; then
+      printf 'No model in the inventory reports tool support and that much context, so Honcho cannot install yet.\n'
+    fi
+    [[ ! -s ${inventory_file:-}.skipped ]] || sed 's/^/  /' "$inventory_file.skipped"
+    HONCHO_MODEL=$(choose_from 'Chat model (number, name or tier)' "$(cut -f1 <<< "${chat_lines[0]:-fast}")" \
+      valid_model_name "${chat_lines[@]}") || die 'No chat model was chosen.'
+  else
+    printf 'Honcho will use router inventory to select chat model %s and contact its host directly; it must support tools and structured output (set HONCHO_MODEL to change it).\n' "$HONCHO_MODEL"
+  fi
+  if [[ $interactive == true && -z $HONCHO_EMBEDDING_MODEL ]]; then
+    if (( ${#embedding_lines[@]} )); then
+      printf 'Embedding model: the router serves these.\n'
+    else
+      printf 'Embedding model: none is in the router inventory; name one its server serves (e.g. nomic-embed-text).\n'
+    fi
+    HONCHO_EMBEDDING_MODEL=$(choose_from 'Embedding model (number or name)' "$(cut -f1 <<< "${embedding_lines[0]:-}")" \
+      valid_model_name "${embedding_lines[@]}") || die 'No embedding model was chosen.'
+  fi
   prompt_missing HONCHO_EMBEDDING_MODEL 'Embedding model name'
-  prompt_missing HONCHO_EMBEDDING_DIMENSIONS 'Embedding vector dimensions'
   if [[ -z $embedding_url_explicit ]]; then
-    [[ ${NONINTERACTIVE:-false} != true && -t 0 ]] ||
+    [[ $interactive == true ]] ||
       die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to use router inventory.'
     printf 'Embedding base URL: use the model host /v1 endpoint, or press Enter to find it in router inventory.\n'
     IFS= read -r -p 'Embedding base URL (blank = inventory): ' HONCHO_EMBEDDING_BASE_URL ||
       die 'No embedding endpoint choice was entered.'
   fi
+  if [[ $interactive == true && -z $HONCHO_EMBEDDING_DIMENSIONS ]]; then
+    IFS=$'\t' read -r dimensions_suggestion dimensions_source < <(suggest_dimensions "$choices" "$HONCHO_EMBEDDING_MODEL" \
+      "${HONCHO_EMBEDDING_BASE_URL:-$(listed_url "$HONCHO_EMBEDDING_MODEL" "${embedding_lines[@]}")}") || true
+    if [[ -n ${dimensions_suggestion:-} ]]; then
+      printf 'Embedding vector dimensions: %s suggested (%s).\n' "$dimensions_suggestion" "$dimensions_source"
+    else
+      printf 'Embedding vector dimensions: give the size of %s'"'"'s vectors (e.g. 768 for nomic-embed-text).\n' "$HONCHO_EMBEDDING_MODEL"
+    fi
+    HONCHO_EMBEDDING_DIMENSIONS=$(choose_from 'Embedding vector dimensions' "${dimensions_suggestion:-}" valid_dimensions) ||
+      die 'No vector size was entered.'
+  fi
+  prompt_missing HONCHO_EMBEDDING_DIMENSIONS 'Embedding vector dimensions'
+  [[ -z ${inventory_file:-} ]] || rm -f -- "$inventory_file" "$inventory_file.skipped"
   if [[ -z $honcho_clients_explicit && ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
     printf 'Allow existing agent CTs through the Honcho firewall; leave either address blank if absent.\n'
     IFS= read -r -p 'Hermes CT IP or IP/CIDR (optional): ' hermes_ip || die 'No Hermes address choice was entered.'

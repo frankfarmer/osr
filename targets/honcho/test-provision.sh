@@ -152,6 +152,117 @@ warning=$(FAIL_ROUTER_RM=true clean_router_stage 2>&1)
 assert_contains "a failed whole-directory cleanup warns about the admin token" 'it may still hold an Open WebUI admin token' "$warning"
 [[ $stage == "${TMPDIR:-/tmp}"/honcho-rotation-test.* ]] && rm -rf -- "$stage"
 
+describe model_choice_helpers
+unset -f pct   # the rotation cases' stand-in; these use the stubs below
+# shellcheck disable=SC1090
+source <(awk '/^# Model choice helpers$/{c=1;next} /^# End model choice helpers\.$/{c=0} c' "$provision")
+stubs=$(mktemp -d)
+cat > "$stubs/inventory.json" <<'JSON'
+{"models": [
+ {"server": "http://192.0.2.90:11434", "name": "qwen3:14b", "tools": true, "context_length": 65536, "params_b": 14.8, "loaded": true, "is_embedding": false},
+ {"server": "http://192.0.2.90:11434", "name": "gemma3:12b", "tools": null, "context_length": 131072, "params_b": 12, "is_embedding": false},
+ {"server": "http://192.0.2.90:11434", "name": "nomic-embed-text:latest", "tools": null, "context_length": 2048, "is_embedding": true}
+]}
+JSON
+cat > "$stubs/pct" <<'STUB'
+#!/usr/bin/env bash
+printf 'pct %s\n' "$*" >> "$STUBS/calls"
+case "$*" in
+  *ROUTER_PORT*) echo 8123 ;;
+  *ROUTER_API_KEY*) printf 'sk-router"key\n' ;;
+  *'curl -K -'*) cat > "$STUBS/pct-curl-config"; cat "$STUBS/inventory.json" ;;
+esac
+STUB
+cat > "$stubs/curl" <<'STUB'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "$STUBS/calls"
+case "$*" in
+  *routing/inventory*)
+    cat > "$STUBS/curl-config"
+    [[ ${FAIL_HOST_CURL:-} != true ]] || exit 7
+    cat "$STUBS/inventory.json" ;;
+  *embeddings*)
+    [[ ${FAIL_EMBED:-} != true ]] || exit 22
+    while (( $# )); do [[ $1 == -o ]] && out=$2; shift; done
+    python3 -c 'import json,sys; json.dump({"data": [{"embedding": [0.0] * int(sys.argv[2])}]}, open(sys.argv[1], "w"))' \
+      "$out" "${STUB_DIMS:-640}" ;;
+esac
+STUB
+chmod +x "$stubs/pct" "$stubs/curl"
+export STUBS=$stubs
+saved_path=$PATH; PATH="$stubs:$PATH"
+inventory=$(router_inventory 280 192.0.2.80)
+assert_contains "the inventory comes from the router's address" "curl -K - http://192.0.2.80:8123/routing/inventory" "$(cat "$stubs/calls")"
+assert_contains "and is returned" '"qwen3:14b"' "$inventory"
+assert_contains "the router key goes to curl on stdin, quoted" 'header = "Authorization: Bearer sk-router\"key"' "$(cat "$stubs/curl-config")"
+assert_not_contains "never on a command line" "sk-router" "$(grep '^curl' "$stubs/calls")"
+: > "$stubs/calls"
+inventory=$(FAIL_HOST_CURL=true router_inventory 280 192.0.2.80)
+assert_contains "a firewalled router is asked from inside its CT" "pct exec 280 -- curl -K - http://127.0.0.1:8123/routing/inventory" "$(cat "$stubs/calls")"
+assert_contains "with the same key on stdin" "sk-router" "$(cat "$stubs/pct-curl-config")"
+assert_contains "and its answer is used" '"qwen3:14b"' "$inventory"
+lines=($'qwen3:14b\t65536-token context, loaded\thttp://192.0.2.90:11434/v1' $'qwen3:32b\t65536-token context\thttp://192.0.2.91:11434/v1')
+assert_eq "Enter takes the suggestion" "qwen3:14b" "$(choose_from Model qwen3:14b valid_model_name "${lines[@]}" <<< '' 2>/dev/null)"
+assert_eq "a number takes its line" "qwen3:32b" "$(choose_from Model qwen3:14b valid_model_name "${lines[@]}" <<< '2' 2>/dev/null)"
+assert_eq "a name or tier is taken as typed" "large" "$(choose_from Model qwen3:14b valid_model_name "${lines[@]}" <<< 'large' 2>/dev/null)"
+out=$(choose_from Model qwen3:14b valid_model_name "${lines[@]}" 2>&1 <<< $'9\nbad name\n1')
+assert_contains "the list is shown with descriptions" "2) qwen3:32b  (65536-token context)" "$out"
+assert_contains "a number off the list is asked again" "Choose 1-2, or type a name." "$out"
+assert_contains "so is an invalid name" "Not a valid choice: bad name" "$out"
+assert_eq "until an answer fits" "qwen3:14b" "$(tail -n1 <<< "$out")"
+assert_fail "the end of input is no choice" choose_from Model '' valid_model_name <<< ''
+assert_eq "without a list a number is the value" 1024 "$(choose_from Size '' valid_dimensions <<< '1024' 2>/dev/null)"
+assert_eq "listed_url finds a listed model's host, in any case" "http://192.0.2.91:11434/v1" "$(listed_url QWEN3:32B "${lines[@]}")"
+assert_eq "and nothing for an unlisted one" "" "$(listed_url other "${lines[@]}")"
+choices=$here/model_choices.py
+assert_eq "the vector size is measured with one request when the host is known" \
+  $'640\tmeasured at http://192.0.2.90:11434/v1' "$(suggest_dimensions "$choices" nomic-embed-text http://192.0.2.90:11434/v1)"
+assert_contains "at the host's /embeddings" "http://192.0.2.90:11434/v1/embeddings" "$(cat "$stubs/calls")"
+assert_eq "an unreachable host falls back to the model's known size" \
+  $'768\tthe size nomic-embed-text is known to have' "$(FAIL_EMBED=true suggest_dimensions "$choices" nomic-embed-text http://192.0.2.90:11434/v1)"
+assert_eq "as does no host" $'1024\tthe size bge-m3 is known to have' "$(suggest_dimensions "$choices" bge-m3)"
+assert_eq "an unknown model with no host gets no suggestion" "" "$(suggest_dimensions "$choices" my-embedder)"
+
+describe honcho_interactive_choices
+if command -v script >/dev/null; then
+  interactive_env=(CT_ID=285 ROUTER_CT_ID=280 ROUTER_IP=192.0.2.80 GATEWAY=192.0.2.1 IP_CIDR=192.0.2.85/24
+    TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst STORAGE=local-lvm HONCHO_CLIENT_IPS=)
+  # Answers: the chat model (Enter: the suggestion), the embedding model
+  # (its number), the embedding URL (Enter: inventory), the vector size (Enter).
+  out=$(printf '\n1\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+    script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
+  assert_contains "the router's inventory is read once its address is known" "Reading the models router CT 280 serves" "$out"
+  assert_contains "the usable chat model is listed" "1) qwen3:14b  (65536-token context, 14.8B, loaded, on http://192.0.2.90:11434)" "$out"
+  assert_contains "the ones the proxy cannot use are named, with the reason" "gemma3:12b (tool support not reported)" "$out"
+  assert_contains "and the embedding models" "1) nomic-embed-text:latest" "$out"
+  assert_contains "the vector size is suggested" "Embedding vector dimensions: 640 suggested (measured at http://192.0.2.90:11434/v1)." "$out"
+  assert_contains "and the answers reach the plan" "chat model: qwen3:14b; embedding: nomic-embed-text:latest (640 dimensions) via router inventory" "$out"
+  # A preset chat model; the embedding model typed, so no listed host to measure.
+  out=$(printf 'nomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" HONCHO_MODEL=large \
+    script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
+  assert_not_contains "a preset chat model is not asked for" "Chat model (number" "$out"
+  assert_contains "a vector size it cannot measure is the model's known one" "768 suggested (the size nomic-embed-text is known to have)" "$out"
+  assert_contains "the preset is kept" "chat model: large;" "$out"
+  cp "$stubs/inventory.json" "$stubs/full.json"
+  printf '{"models": [{"server": "http://192.0.2.90:11434", "name": "gemma3:12b", "tools": null, "context_length": 131072}]}\n' > "$stubs/inventory.json"
+  out=$(printf '\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+    script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
+  assert_contains "with no usable model, the install is said to need one" "No model in the inventory reports tool support" "$out"
+  assert_contains "and the fast tier is suggested" "Chat model (number, name or tier) [fast]" "$out"
+  assert_contains "the Enter key takes it" "chat model: fast;" "$out"
+  printf 'not json\n' > "$stubs/inventory.json"
+  out=$(printf '\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+    script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
+  assert_contains "an unreadable inventory is said so" "Could not read the router inventory; enter the model names yourself." "$out"
+  assert_contains "and the names are still asked for" "chat model: fast; embedding: nomic-embed-text (768 dimensions)" "$out"
+  mv "$stubs/full.json" "$stubs/inventory.json"
+else
+  printf 'SKIP honcho_interactive_choices (no script command for a terminal)\n'
+fi
+PATH=$saved_path
+rm -rf -- "$stubs"
+unset STUBS
+
 describe honcho_budget_passthrough
 plan=$(env "${common[@]}" HONCHO_CONTEXT_TOKENS=32768 HONCHO_DREAM_ENABLED= bash "$provision" --dry-run)
 assert_contains "set budget variables are passed on" "HONCHO_CONTEXT_TOKENS=32768" "$plan"
