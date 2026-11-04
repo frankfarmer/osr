@@ -22,6 +22,20 @@ unit_dir=${HONCHO_UNIT_DIR:-/etc/systemd/system}
 cpuinfo=${HONCHO_CPUINFO:-/proc/cpuinfo}
 health_tries=${HONCHO_HEALTH_TRIES:-60}
 
+# Settings a reconfigure keeps, from settings.env: unset here, the last run's
+# value is used; set and empty, the default. Only these names are read back.
+kept_names=(HONCHO_REF HONCHO_MODEL HONCHO_STRUCTURED_OUTPUT_MODE HONCHO_EMBEDDING_DIMENSIONS_MODE
+  HONCHO_BUN_VERSION HONCHO_BUN_SHA256 HONCHO_BUN_BASELINE_SHA256)
+kept_from_last_run=()
+if [[ -f $etc/settings.env ]]; then
+  while IFS='=' read -r key value; do
+    [[ " ${kept_names[*]} " == *" $key "* ]] || continue
+    [[ -z ${!key+set} ]] || continue
+    printf -v "$key" '%s' "$value"
+    kept_from_last_run+=("$key=$value")
+  done < "$etc/settings.env"
+fi
+
 ref=${HONCHO_REF:-v3.5.0}
 model=${HONCHO_MODEL:-fast}
 router_url=${ROUTER_URL:-}
@@ -49,6 +63,7 @@ bun=$bun_dir/bun
 units=(honcho-api honcho-deriver honcho-mcp)
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
+(( ${#kept_from_last_run[@]} == 0 )) || note "Kept from the last run: ${kept_from_last_run[*]}"
 
 if [[ ${1:-} == --help ]]; then
   cat <<'USAGE'
@@ -219,14 +234,14 @@ if [[ -f $unit_dir/honcho-api.service && -d $opt/.git ]]; then
   prev_commit=$(git -C "$opt" rev-parse HEAD)
   if [[ -e $backup ]]; then
     die "Previous rollback data remains in $backup: an earlier run's rollback did not complete.
-It holds what that run set aside: honcho.env, the keys, the units, Bun and, as honcho.dump, the
+It holds what that run set aside: honcho.env, the budget and settings records, the keys, the units, Bun and, as honcho.dump, the
 database from before that run. Check Honcho (systemctl status honcho-api honcho-deriver honcho-mcp).
 If it is healthy, or after restoring from those copies (see 'When a rollback does not complete' in
 targets/honcho/README.md), remove the directory with: rm -r -- $backup
 Then run the reconfigure again. Nothing was changed by this run."
   fi
   install -d -m 0700 "$backup"
-  for file in "$etc/honcho.env" "$etc/budgets.env" "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key" "$bun" \
+  for file in "$etc/honcho.env" "$etc/budgets.env" "$etc/settings.env" "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key" "$bun" \
               "$unit_dir/honcho-api.service" "$unit_dir/honcho-deriver.service" "$unit_dir/honcho-mcp.service"; do
     if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file")"; fi
   done
@@ -239,7 +254,7 @@ rollback() {
   trap - EXIT
   note 'Honcho setup failed; restoring the previous installation.'
   systemctl stop "${units[@]/%/.service}" >/dev/null 2>&1 || true
-  for name in honcho.env budgets.env jwt-secret api-key client-api-key; do
+  for name in honcho.env budgets.env settings.env jwt-secret api-key client-api-key; do
     if [[ -f $backup/$name ]]; then cp -a -- "$backup/$name" "$etc/$name"
     else rm -f -- "$etc/$name"; fi
   done
@@ -347,6 +362,10 @@ router_key=$(<"$deploy/router-api-key")
 chown root:honcho "$etc/honcho.env"
 chmod 0640 "$etc/honcho.env"
 install -m 0600 "$deploy/budgets.record" "$etc/budgets.env"
+for key in "${kept_names[@]}"; do
+  [[ -z ${!key:-} ]] || printf '%s=%s\n' "$key" "${!key}"
+done > "$deploy/settings.record"
+install -m 0600 "$deploy/settings.record" "$etc/settings.env"
 
 # Upstream's bootstrap: the first migration creates vector(1536) columns, then
 # configure_embeddings.py sets them to the model's size. Later runs migrate

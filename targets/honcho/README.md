@@ -168,7 +168,8 @@ embedding provider needs the OpenAI `dimensions` parameter, set
 `HONCHO_EMBEDDING_DIMENSIONS_MODE=auto` or `always`; the default is `never` for
 fixed-size local models. Changing vector dimensions after data has been stored
 requires a new Honcho database. The target installs the upstream release
-`HONCHO_REF=v3.5.0`; set another release tag, a full commit SHA, or `main`.
+`HONCHO_REF=v3.5.0`; set another release tag, a full commit SHA, or `main`
+(the choice is kept by later reconfigures).
 Its MCP server runs on Bun 1.4.4 from the release zip, checked against a
 pinned SHA-256 (the baseline build on CPUs without AVX2). For another Bun set
 `HONCHO_BUN_VERSION` with the checksum of the build this CPU takes:
@@ -212,9 +213,10 @@ cannot overwrite the only copy of the old database. Inside the Honcho CT:
    systemctl start honcho-api honcho-deriver honcho-mcp
    ```
 
-   `honcho.env`, `jwt-secret`, `api-key`, `client-api-key`, the three units and
-   `bun` in the same directory are the copies from before the failed run; they
-   belong in `/etc/honcho-target/`, `/etc/systemd/system/` and `/opt/honcho-bun/`.
+   `honcho.env`, `budgets.env`, `settings.env`, `jwt-secret`, `api-key`,
+   `client-api-key`, the three units and `bun` in the same directory are the
+   copies from before the failed run; they belong in `/etc/honcho-target/`,
+   `/etc/systemd/system/` and `/opt/honcho-bun/`.
 3. Once Honcho is healthy (`curl -fsS http://127.0.0.1:8000/health` and
    `http://127.0.0.1:3000/health`), remove the directory with
    `rm -r -- /var/lib/honcho-target/rollback` and run the reconfigure again.
@@ -333,7 +335,18 @@ enter the Honcho and router CT IDs; the provisioner reads the existing
 Honcho address from the CT. Supply the embedding model and dimensions again,
 plus its `/v1` URL if it does not use the router; the Open WebUI admin token
 is requested again. A dry-run reconfigure also needs `IP_CIDR` because it
-does not inspect the CT. Existing agent firewall allowances are preserved
+does not inspect the CT.
+
+A reconfigure only changes the settings it is given. The CT keeps
+`HONCHO_REF`, `HONCHO_MODEL`, `HONCHO_STRUCTURED_OUTPUT_MODE`,
+`HONCHO_EMBEDDING_DIMENSIONS_MODE` and the `HONCHO_BUN_*` pins from the run
+that last set them (in `/etc/honcho-target/settings.env`), and the token
+budgets in `budgets.env`; the run prints what it kept. So a repair or key
+rotation does not move a CT back to the default release or model. To change
+one, set it; to return one to its default, set it to an empty value
+(`HONCHO_STRUCTURED_OUTPUT_MODE=`). A CT that never set `HONCHO_REF` follows
+this target's pinned release, so it is upgraded on the first reconfigure
+after the pin in this repository moves. Existing agent firewall allowances are preserved
 unless `HONCHO_CLIENT_IPS` is explicitly set. When adding Hermes or OpenClaw
 separately, set their actual IPs in `HONCHO_CLIENT_IPS`. Then run their
 provisioners with `HONCHO_URL` and the actual `HONCHO_CT_ID`; they pull the

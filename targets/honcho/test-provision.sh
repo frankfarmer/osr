@@ -144,6 +144,14 @@ helper_names=$(python3 -c 'import importlib.util,sys
 spec = importlib.util.spec_from_file_location("b", sys.argv[1]); b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
 print("\n".join(sorted(b.NAMES)))' "$here/budgets.py" | tr -d '\r')
 assert_eq "the provisioner forwards exactly the settings budgets.py knows" "$helper_names" "$provision_names"
+plan=$(env "${common[@]}" HONCHO_MODEL=auto HONCHO_STRUCTURED_OUTPUT_MODE= bash "$provision" --dry-run --reconfigure)
+assert_contains "a reconfigure without HONCHO_REF keeps the CT's release" "with its recorded release (v3.5.0 if none)" "$plan"
+assert_contains "set kept settings are passed on" "HONCHO_MODEL=auto" "$plan"
+assert_contains "an empty one too, to clear it" "HONCHO_STRUCTURED_OUTPUT_MODE=" "$plan"
+assert_not_contains "unset ones are not" "HONCHO_REF=" "$plan"
+plan=$(env "${common[@]}" HONCHO_REF=v3.6.0 bash "$provision" --dry-run --reconfigure)
+assert_contains "a given release is used" "with v3.6.0" "$plan"
+assert_not_contains "and the guest is never handed a default it did not ask for" "HONCHO_MODEL=fast" "$(env "${common[@]}" bash "$provision" --dry-run --reconfigure)"
 assert_contains "budgets.py is pushed with the guest installer" "install-target.sh budgets.py honcho-api.service" "$(cat "$provision")"
 
 describe honcho_guest_files

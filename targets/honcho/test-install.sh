@@ -339,6 +339,33 @@ assert_not_contains "no budget settings remain" "DIALECTIC_MAX_INPUT_TOKENS" "$(
 assert_eq "and the record is empty" "" "$(<"$etc/budgets.env")"
 assert_contains "the run says so" "Honcho budgets: Honcho's defaults." "$out"
 
+describe honcho_kept_settings
+head_now() { cat "$tmp/ct/opt/.git/FAKE_HEAD"; }
+out=$(guest HONCHO_REF=v3.6.0 HONCHO_MODEL=auto HONCHO_STRUCTURED_OUTPUT_MODE=json_object) && rc=0 || rc=$?
+assert_eq "a run that sets the release, model and output mode succeeds" 0 "$rc"
+assert_eq "it records them" "$(printf 'HONCHO_REF=v3.6.0\nHONCHO_MODEL=auto\nHONCHO_STRUCTURED_OUTPUT_MODE=json_object')" "$(<"$etc/settings.env")"
+assert_eq "root-only" 600 "$(stat -c %a "$etc/settings.env")"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "a plain rerun succeeds" 0 "$rc"
+assert_eq "and stays on the recorded release instead of the default" "$(printf 'b%.0s' {1..40})" "$(head_now)"
+assert_contains "with the recorded model" "DERIVER_MODEL_CONFIG__MODEL=auto" "$(<"$etc/honcho.env")"
+assert_contains "and output mode" "DERIVER_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=json_object" "$(<"$etc/honcho.env")"
+assert_contains "the probe used the recorded mode" '"type": "json_object"' "$(cat "$fake/probe.json")"
+assert_contains "and says what it kept" "Kept from the last run: HONCHO_REF=v3.6.0 HONCHO_MODEL=auto" "$out"
+out=$(guest HONCHO_STRUCTURED_OUTPUT_MODE= HONCHO_MODEL=) && rc=0 || rc=$?
+assert_eq "empty values succeed" 0 "$rc"
+assert_not_contains "and return the output mode to the default" "STRUCTURED_OUTPUT_MODE" "$(<"$etc/honcho.env")"
+assert_contains "and the model" "DERIVER_MODEL_CONFIG__MODEL=fast" "$(<"$etc/honcho.env")"
+assert_eq "only the release stays recorded" "HONCHO_REF=v3.6.0" "$(<"$etc/settings.env")"
+before=$(<"$etc/settings.env")
+out=$(guest HONCHO_REF=v3.7.0 FAKE_MIGRATE_FAIL_COMMIT="$(printf 'd%.0s' {1..40})") && rc=0 || rc=$?
+assert_ne "a failed upgrade" 0 "$rc"
+assert_eq "keeps the previous record" "$before" "$(<"$etc/settings.env")"
+printf 'HONCHO_REF=v3.6.0\nPATH=/nowhere\nHONCHO_ROTATE_KEYS=true\n' > "$etc/settings.env"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "unknown names in the record are ignored" 0 "$rc"
+assert_not_contains "it does not rotate the keys" "Rotating the JWT secret" "$out"
+
 describe honcho_model_probe
 fresh
 printf '400\n' > "$fake/chat-status"
@@ -389,7 +416,8 @@ printf 'flags : fpu sse2\n' > "$tmp/ct/cpuinfo"
 out=$(guest HONCHO_BUN_VERSION=9.9.8 HONCHO_BUN_SHA256="$zip_sha") && rc=0 || rc=$?
 assert_ne "a CPU without AVX2 needs the baseline checksum" 0 "$rc"
 assert_contains "and is told which one" "Set HONCHO_BUN_BASELINE_SHA256" "$out"
-out=$(guest) && rc=0 || rc=$?
+assert_contains "a run without Bun settings keeps the recorded pin" "HONCHO_BUN_VERSION=9.9.9" "$(<"$etc/settings.env")"
+out=$(guest HONCHO_BUN_VERSION= HONCHO_BUN_SHA256=) && rc=0 || rc=$?
 assert_contains "the default Bun takes the baseline build here" "bun-v1.4.4/bun-linux-x64-baseline.zip" "$(calls)"
 assert_ne "and is held to its built-in checksum (the fake zip is not Bun 1.4.4)" 0 "$rc"
 assert_contains "which it reports" "does not match its pinned SHA-256" "$out"

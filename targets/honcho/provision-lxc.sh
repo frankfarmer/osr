@@ -44,6 +44,9 @@ embedding URL uses the router and requires an embedding model mapped there.
 HONCHO_CONTEXT_TOKENS sets Honcho's token budgets for the model's context
 window (at least 8192); HONCHO_<SETTING> overrides one budget (see the
 README). Unset, they keep the CT's last values; set and empty, the default.
+HONCHO_REF, HONCHO_MODEL, HONCHO_STRUCTURED_OUTPUT_MODE,
+HONCHO_EMBEDDING_DIMENSIONS_MODE and the HONCHO_BUN_* pins are kept the same
+way: a reconfigure only changes the ones it sets.
 HONCHO_STRUCTURED_OUTPUT_MODE=json_object is for a router model whose backend
 lacks JSON-schema output; the install probes the model with tools and
 structured output first (HONCHO_SKIP_CHAT_PROBE=true skips that). Another Bun
@@ -86,6 +89,18 @@ ROOTFS_GB=${ROOTFS_GB:-48}
 ONBOOT=${ONBOOT:-1}
 CT_HOSTNAME=${CT_HOSTNAME:-honcho-ai}
 OPENWEBUI_PORT=${OPENWEBUI_PORT:-8080}
+# Settings the CT keeps between runs (its settings.env). Forwarded only when
+# set here, before the defaults below fill them in: a plain --reconfigure then
+# keeps the CT's release, model and output mode, and an empty value returns a
+# setting to its default.
+honcho_kept_names=(REF MODEL STRUCTURED_OUTPUT_MODE EMBEDDING_DIMENSIONS_MODE
+  BUN_VERSION BUN_SHA256 BUN_BASELINE_SHA256)
+kept_env=()
+for name in "${honcho_kept_names[@]}"; do
+  var=HONCHO_$name
+  [[ -z ${!var+set} ]] || kept_env+=("$var=${!var}")
+done
+honcho_ref_given=${HONCHO_REF+set}
 HONCHO_MODEL=${HONCHO_MODEL:-fast}
 HONCHO_REF=${HONCHO_REF:-v3.5.0}
 HONCHO_EMBEDDING_MODEL=${HONCHO_EMBEDDING_MODEL:-}
@@ -338,8 +353,10 @@ cleanup() {
 }
 trap cleanup EXIT
 if (( dry_run )); then
+  ref_label=$HONCHO_REF
+  if [[ $mode == reconfigure && -z $honcho_ref_given ]]; then ref_label="its recorded release ($HONCHO_REF if none)"; fi
   printf 'Would %s Honcho CT %s at %s with %s, then register MCP in router CT %s.\n' \
-    "$mode" "$CT_ID" "$honcho_ip" "$HONCHO_REF" "$ROUTER_CT_ID"
+    "$mode" "$CT_ID" "$honcho_ip" "$ref_label" "$ROUTER_CT_ID"
   printf 'Router IP: %s; chat model: %s; embedding: %s (%s dimensions) via %s.\n' \
     "${ROUTER_IP:-detected from router route}" "$HONCHO_MODEL" "$HONCHO_EMBEDDING_MODEL" \
     "$HONCHO_EMBEDDING_DIMENSIONS" "${HONCHO_EMBEDDING_BASE_URL:-router /v1/embeddings}"
@@ -348,6 +365,7 @@ if (( dry_run )); then
     printf 'Would admit %s to the router API in /etc/pve/firewall/%s.fw, if that file exists.\n' "$honcho_ip" "$ROUTER_CT_ID"
   [[ $rotate_keys == false ]] || printf 'Would replace the JWT secret and both Honcho keys.\n'
   (( ${#budget_env[@]} == 0 )) || printf 'Would pass these budget settings to the CT: %s\n' "${budget_env[*]}"
+  (( ${#kept_env[@]} == 0 )) || printf 'Would pass these settings to the CT: %s\n' "${kept_env[*]}"
   exit 0
 fi
 # Checked before anything is created: the run ends by registering MCP.
@@ -470,16 +488,12 @@ if [[ $rotate_keys == true ]]; then
   done
   rotation_pending=true
 fi
-pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" "HONCHO_MODEL=$HONCHO_MODEL" \
-  "HONCHO_REF=$HONCHO_REF" "HONCHO_EMBEDDING_MODEL=$HONCHO_EMBEDDING_MODEL" \
+pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" \
+  "HONCHO_EMBEDDING_MODEL=$HONCHO_EMBEDDING_MODEL" \
   "HONCHO_EMBEDDING_DIMENSIONS=$HONCHO_EMBEDDING_DIMENSIONS" \
   "HONCHO_EMBEDDING_BASE_URL=$HONCHO_EMBEDDING_BASE_URL" \
-  "HONCHO_EMBEDDING_DIMENSIONS_MODE=$HONCHO_EMBEDDING_DIMENSIONS_MODE" \
-  "HONCHO_STRUCTURED_OUTPUT_MODE=$HONCHO_STRUCTURED_OUTPUT_MODE" \
-  "HONCHO_SKIP_CHAT_PROBE=$HONCHO_SKIP_CHAT_PROBE" "HONCHO_ROTATE_KEYS=$rotate_keys" "${budget_env[@]}" \
-  ${HONCHO_BUN_VERSION:+"HONCHO_BUN_VERSION=$HONCHO_BUN_VERSION"} \
-  ${HONCHO_BUN_SHA256:+"HONCHO_BUN_SHA256=$HONCHO_BUN_SHA256"} \
-  ${HONCHO_BUN_BASELINE_SHA256:+"HONCHO_BUN_BASELINE_SHA256=$HONCHO_BUN_BASELINE_SHA256"} \
+  "HONCHO_SKIP_CHAT_PROBE=$HONCHO_SKIP_CHAT_PROBE" "HONCHO_ROTATE_KEYS=$rotate_keys" \
+  "${kept_env[@]}" "${budget_env[@]}" \
   bash /root/honcho-deploy/install-target.sh
 pct exec "$ROUTER_CT_ID" -- curl -fsS --max-time 10 "http://${honcho_ip}:3000/health" >/dev/null ||
   die 'Router CT cannot reach Honcho MCP; check the CT firewall.'
