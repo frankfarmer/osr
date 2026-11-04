@@ -1,6 +1,11 @@
 # Mattermost service for Ollama Smart Router
 
-On an interactive new install, `provision-lxc.sh` lists active LXC template storage and `rootdir` storage with enough free space for `ROOTFS_GB`. Set `TEMPLATE_STORAGE` and `STORAGE` to skip the menus. The community script chooses or downloads its Ubuntu template on the selected template storage. `--reconfigure` and dry runs skip these Proxmox queries.
+On an interactive new install, `provision-lxc.sh` asks for the Mattermost CT
+ID, IP/CIDR (or `dhcp`), and a gateway for a static IP. It lists eligible
+template and `rootdir` storage. Preset `CT_ID`, `IP_CIDR`, `GATEWAY`,
+`TEMPLATE_STORAGE`, and `STORAGE` to skip those prompts. No CT ID or IP is
+selected automatically. The community script chooses or downloads its Ubuntu
+template. `--reconfigure` and dry runs skip these Proxmox queries.
 
 Mattermost receives the router's **health alerts**. The `ollama-monitor`
 service posts host and service state changes to an incoming webhook (see the
@@ -22,11 +27,7 @@ existing router.
 ## Provision on the Proxmox host
 
 ```bash
-CT_ID=277 IP_CIDR=192.168.11.77/24 GATEWAY=192.168.11.1 STORAGE=local-lvm \
-bash targets/mattermost/provision-lxc.sh --dry-run      # print the plan
-
-CT_ID=277 IP_CIDR=192.168.11.77/24 GATEWAY=192.168.11.1 STORAGE=local-lvm \
-bash targets/mattermost/provision-lxc.sh                # pick "Default" in the community menu
+bash targets/mattermost/provision-lxc.sh
 ```
 
 The community script shows its own menu: choose **Default** to accept the
@@ -56,7 +57,7 @@ All results are root-only (0600) files in `/etc/mattermost-target/`: `url`,
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `CT_ID`, `IP_CIDR`, `GATEWAY`, `STORAGE`, `BRIDGE`, `NAMESERVER`, `VLAN_TAG`, `SSH_PUBLIC_KEY` | next free ID, DHCP | CT settings, passed to the community script as its `var_*` presets. |
+| `CT_ID`, `IP_CIDR`, `GATEWAY`, `STORAGE`, `BRIDGE`, `NAMESERVER`, `VLAN_TAG`, `SSH_PUBLIC_KEY` | CT ID and IP required; gateway required for static IP | CT settings, passed to the community script as its `var_*` presets. |
 | `CORES`, `MEMORY_MB`, `ROOTFS_GB` | 2, 4096, 16 | CT size (Mattermost plus PostgreSQL). |
 | `MATTERMOST_TEAM`, `MATTERMOST_CHANNEL` | `ollama`, `ollama-monitor` | URL names (lowercase letters, digits, `-`, `_`). |
 | `MATTERMOST_ADMIN_USER`, `MATTERMOST_ADMIN_EMAIL` | `mmadmin`, `<name>@<host>.local` | The administrator. |

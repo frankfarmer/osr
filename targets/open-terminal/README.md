@@ -18,20 +18,20 @@ The Open WebUI connection is **admin-only** by default. All users granted access
 
 | `ROUTER` | Reached with | Use for |
 |---|---|---|
-| `280` (a CT ID) | `pct exec` / `pct push` | the router CT on this Proxmox node |
-| `192.168.11.80` or `router.lan` | SSH as `root` (`ROUTER_SSH_PORT=22` by default) | a router LXC on another node, a VM, or any host root can log in to |
+| An existing CT ID | `pct exec` / `pct push` | the router CT on this Proxmox node |
+| An IP or hostname | SSH as `root` (`ROUTER_SSH_PORT=22` by default) | a router LXC on another node, a VM, or any host root can log in to |
 
 If `ROUTER` is not set, the script asks for the existing Open WebUI location. It then asks for the **new Open Terminal CT ID**, which must be an unused ID on this Proxmox host. These are separate values:
 
 ```text
 Existing ollama-smart-router Open WebUI:
-  a CT ID on this Proxmox host (e.g. 280), or
+  a CT ID on this Proxmox host, or
   the IP address or hostname of its LXC/VM, reached as root over SSH
 Open WebUI CT ID or IP address:
 New Open Terminal CT ID on this Proxmox host (unused, at least 100):
 ```
 
-`ROUTER_CT_ID` or `ROUTER_SSH_HOST` force one kind. The older `ROUTER_CT_ID=280` form still works. Set only one of these or `ROUTER`. SSH login must be as `root`, since integration stages files under `/root` on the selected host.
+`ROUTER_CT_ID` or `ROUTER_SSH_HOST` force one kind. Set only one of these or `ROUTER`. SSH login must be as `root`, since integration stages files under `/root` on the selected host.
 
 Over SSH, the script opens one connection and reuses it for the whole run, so a password is entered at most once. The host key must be known: connect once by hand, or accept it with `StrictHostKeyChecking accept-new` in `~/.ssh/config`. Unattended runs need key-based login. Before changing anything, the script checks the following on the router:
 
@@ -59,21 +59,12 @@ bash provision-lxc.sh
 
 The script prompts for the existing Open WebUI CT ID or IP address and the new Open Terminal CT ID. It then shows numbered lists of downloaded Debian 12/13 amd64 templates and active storage that supports container root disks. Press Enter for the suggested choice or enter a number. Storage with less free space than `ROOTFS_GB` is shown but cannot be selected. The script also asks for the new terminal's static IP/CIDR, gateway, and Open WebUI admin key. Set `TEMPLATE` and `STORAGE` to skip their menus. To preview the plan without changing or querying Proxmox, run `bash provision-lxc.sh --dry-run`; supply `TEMPLATE` and `STORAGE` yourself (or enter them when prompted), since dry runs do not query the host. Dry runs do not ask for the admin key.
 
-For an unattended run, supply the required values as environment variables:
+No CT ID or IP is inferred. For an unattended run, supply `CT_ID`, `ROUTER`,
+`TEMPLATE`, `STORAGE`, `IP_CIDR`, `GATEWAY`, and `OPENWEBUI_ADMIN_TOKEN` as
+environment variables before launching the script.
 
-```bash
-cd /path/to/ollama-smart-router/targets/open-terminal
-CT_ID=281 \
-ROUTER=280 \
-TEMPLATE='local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst' \
-STORAGE=local-lvm \
-IP_CIDR=192.168.11.81/24 \
-GATEWAY=192.168.11.1 \
-OPENWEBUI_ADMIN_TOKEN='<admin API key>' \
-bash provision-lxc.sh
-```
-
-For a router that is a VM or a CT on another node, set `ROUTER=192.168.11.80` instead. Leave any required environment variable unset in an interactive run to be asked for it.
+For a router that is a VM or a CT on another node, enter its actual IP
+address or hostname at the `ROUTER` prompt.
 
 `--dry-run` prints every command it would run, `pct` or `ssh`, with placeholders for the values a real run reads from the router. It never logs in. Replace the template ID, storage, CT IDs, and network values with your own. `ROUTER_IP` and `OPENWEBUI_PORT` are detected on the router; set them explicitly if detection does not fit your network. Set `OPEN_TERMINAL_PORT` to change the terminal port. `--help` lists all options.
 
@@ -85,26 +76,33 @@ Before anything is saved, the integration step checks two things from the router
 
 ### Repair a CT created by the earlier installer
 
-The earlier installer made `/etc/open-terminal` mode `0700`. Open Terminal probes the optional `/etc/open-terminal/config.toml` on startup, so its `open-terminal` service account could not traverse the directory and exited with `PermissionError` even though pip had finished. The installer now sets the directory to `0711`; `api-key` and `service.env` remain root-only (`0600`). If the CT was created but installation failed, update the target files on the Proxmox host and retry **inside that CT**. For CT 155, from the `targets/open-terminal` directory:
+The earlier installer made `/etc/open-terminal` mode `0700`. Open Terminal probes the optional `/etc/open-terminal/config.toml` on startup, so its `open-terminal` service account could not traverse the directory and exited with `PermissionError` even though pip had finished. The installer now sets the directory to `0711`; `api-key` and `service.env` remain root-only (`0600`). If the CT was created but installation failed, update the target files on the Proxmox host and retry **inside that CT**. From the `targets/open-terminal` directory, enter the existing CT ID:
 
 ```bash
-pct push 155 install-target.sh /root/open-terminal-deploy/install-target.sh --perms 0755
-pct exec 155 -- bash /root/open-terminal-deploy/install-target.sh
-pct exec 155 -- curl -fsS http://127.0.0.1:8000/health
-CT_ID=155 bash provision-lxc.sh --integrate-only
+read -r -p 'Existing Open Terminal CT ID: ' TERMINAL_CT_ID
+pct push "$TERMINAL_CT_ID" install-target.sh /root/open-terminal-deploy/install-target.sh --perms 0755
+pct exec "$TERMINAL_CT_ID" -- bash /root/open-terminal-deploy/install-target.sh
+pct exec "$TERMINAL_CT_ID" -- curl -fsS http://127.0.0.1:8000/health
+CT_ID="$TERMINAL_CT_ID" bash provision-lxc.sh --integrate-only
 ```
 
-The last command asks for the existing Open WebUI CT ID or IP address and its admin credential. Set `ROUTER` and `OPEN_TERMINAL_PORT` as needed. Do not run normal provisioning again with CT 155; it is already allocated.
+The last command asks for the existing Open WebUI CT ID or IP address and its admin credential. Set `ROUTER` and `OPEN_TERMINAL_PORT` as needed. Do not run normal provisioning again with that ID; it is already allocated.
 
 ## Verify and use
 
 ```bash
-pct exec 281 -- systemctl status open-terminal.service --no-pager
-pct exec 281 -- curl -fsS http://127.0.0.1:8000/health
-pct exec 280 -- curl -fsS http://192.168.11.81:8000/health    # or: ssh root@<router> curl -fsS ...
+read -r -p 'Open Terminal CT ID: ' TERMINAL_CT_ID
+read -r -p 'Router CT ID: ' ROUTER_CT_ID
+read -r -p 'Open Terminal CT IP: ' TERMINAL_IP
+pct exec "$TERMINAL_CT_ID" -- systemctl status open-terminal.service --no-pager
+pct exec "$TERMINAL_CT_ID" -- curl -fsS http://127.0.0.1:8000/health
+pct exec "$ROUTER_CT_ID" -- curl -fsS "http://${TERMINAL_IP}:8000/health"
 ```
 
-Refresh Open WebUI, choose **Open Terminal LXC** from the terminal picker in a chat, and use a model with native function calling. The Open WebUI admin connection proxies requests, so browsers never need direct access to TCP 8000. The service therefore allows no browser origins (`OPEN_TERMINAL_CORS_ALLOWED_ORIGINS=http://127.0.0.1`; an empty value would mean `*`). For troubleshooting, use `pct exec 281 -- journalctl -u open-terminal.service -n 100 --no-pager`.
+If the router is on another Proxmox host or is a VM, run the last `curl` from
+its shell instead of using `pct exec`.
+
+Refresh Open WebUI, choose **Open Terminal LXC** from the terminal picker in a chat, and use a model with native function calling. The Open WebUI admin connection proxies requests, so browsers never need direct access to TCP 8000. The service therefore allows no browser origins (`OPEN_TERMINAL_CORS_ALLOWED_ORIGINS=http://127.0.0.1`; an empty value would mean `*`). For troubleshooting, use `pct exec "$TERMINAL_CT_ID" -- journalctl -u open-terminal.service -n 100 --no-pager`.
 
 ## What the shell can and cannot do
 

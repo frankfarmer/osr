@@ -5,7 +5,7 @@ exec </dev/null
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$here/../../tests/lib/assert.sh"
 provision=$here/provision-lxc.sh
-common=(CT_ID=285 ROUTER_CT_ID=280 TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst
+common=(CT_ID=285 ROUTER_CT_ID=280 ROUTER_IP=192.0.2.80 TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst
   STORAGE=local-lvm IP_CIDR=192.0.2.85/24 GATEWAY=192.0.2.1
   HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_DIMENSIONS=768
   HONCHO_EMBEDDING_BASE_URL=http://192.0.2.90:11434/v1)
@@ -13,8 +13,17 @@ common=(CT_ID=285 ROUTER_CT_ID=280 TEMPLATE=local:vztmpl/debian-13-standard_13.1
 describe honcho_dry_run
 plan=$(env "${common[@]}" bash "$provision" --dry-run)
 assert_contains "valid setup gets a plan" "Would create Honcho CT 285" "$plan"
+assert_contains "the plan shows the entered router IP" "Router IP: 192.0.2.80" "$plan"
+assert_contains "the plan shows the selected embedding endpoint" "via http://192.0.2.90:11434/v1" "$plan"
+assert_fail "a missing Honcho CT ID cannot be guessed" env "${common[@]}" CT_ID= bash "$provision" --dry-run
+assert_fail "a missing router CT ID cannot be guessed" env "${common[@]}" ROUTER_CT_ID= bash "$provision" --dry-run
+assert_fail "a missing Honcho IP cannot be guessed" env "${common[@]}" IP_CIDR= bash "$provision" --dry-run
+assert_fail "a missing router IP cannot be guessed" env "${common[@]}" ROUTER_IP= bash "$provision" --dry-run
+assert_fail "Honcho cannot reuse the router IP" env "${common[@]}" ROUTER_IP=192.0.2.85 bash "$provision" --dry-run
+assert_fail "an agent cannot reuse the Honcho IP" env "${common[@]}" HONCHO_CLIENT_IPS=192.0.2.85 bash "$provision" --dry-run
 assert_fail "a missing embedding model is refused" env "${common[@]}" HONCHO_EMBEDDING_MODEL= bash "$provision" --dry-run
 assert_fail "a missing vector size is refused" env "${common[@]}" HONCHO_EMBEDDING_DIMENSIONS= bash "$provision" --dry-run
+assert_fail "an unattended install must choose an embedding endpoint" env "${common[@]}" env -u HONCHO_EMBEDDING_BASE_URL bash "$provision" --dry-run
 assert_fail "a non-v1 embedding URL is refused" env "${common[@]}" HONCHO_EMBEDDING_BASE_URL=http://192.0.2.90:11434/api bash "$provision" --dry-run
 assert_fail "Debian 12 lacks the packaged pgvector target" env "${common[@]}" TEMPLATE=local:vztmpl/debian-12-standard_12.0-1_amd64.tar.zst bash "$provision" --dry-run
 assert_contains "a release is pinned by default" "with v3.5.0" "$plan"
@@ -122,6 +131,20 @@ assert_contains "otherwise the whole staging directory goes" "exec 280 -- rm -rf
 warning=$(FAIL_ROUTER_RM=true clean_router_stage 2>&1)
 assert_contains "a failed whole-directory cleanup warns about the admin token" 'it may still hold an Open WebUI admin token' "$warning"
 [[ $stage == "${TMPDIR:-/tmp}"/honcho-rotation-test.* ]] && rm -rf -- "$stage"
+
+describe honcho_budget_passthrough
+plan=$(env "${common[@]}" HONCHO_CONTEXT_TOKENS=32768 HONCHO_DREAM_ENABLED= bash "$provision" --dry-run)
+assert_contains "set budget variables are passed on" "HONCHO_CONTEXT_TOKENS=32768" "$plan"
+assert_contains "an empty one too: it returns the setting to the default" "HONCHO_DREAM_ENABLED=" "$plan"
+assert_not_contains "unset ones are not, so the CT keeps its values" "HONCHO_DIALECTIC_MAX_INPUT_TOKENS" "$plan"
+assert_fail "a budget with a unit is refused before any Proxmox call" env "${common[@]}" HONCHO_CONTEXT_TOKENS=32k bash "$provision" --dry-run
+assert_fail "DREAM_ENABLED is true or false" env "${common[@]}" HONCHO_DREAM_ENABLED=no bash "$provision" --dry-run
+provision_names=$(sed -n '/^honcho_budget_names=(/,/)/p' "$provision" | tr -d '()' | sed 's/honcho_budget_names=//' | tr -s ' \n' '\n' | grep . | sort)
+helper_names=$(python3 -c 'import importlib.util,sys
+spec = importlib.util.spec_from_file_location("b", sys.argv[1]); b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
+print("\n".join(sorted(b.NAMES)))' "$here/budgets.py" | tr -d '\r')
+assert_eq "the provisioner forwards exactly the settings budgets.py knows" "$helper_names" "$provision_names"
+assert_contains "budgets.py is pushed with the guest installer" "install-target.sh budgets.py honcho-api.service" "$(cat "$provision")"
 
 describe honcho_guest_files
 install=$here/install-target.sh

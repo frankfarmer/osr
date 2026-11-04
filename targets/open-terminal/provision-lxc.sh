@@ -11,9 +11,6 @@ note() { printf '%s\n' "$*" >&2; }
 usage() {
   cat <<'USAGE'
 Usage: bash provision-lxc.sh [--dry-run] [--integrate-only]
-   or: CT_ID=281 ROUTER=280 TEMPLATE=local:vztmpl/debian-13-standard_..._amd64.tar.zst \
-       STORAGE=local-lvm IP_CIDR=192.168.11.81/24 GATEWAY=192.168.11.1 \
-       bash provision-lxc.sh [--dry-run] [--integrate-only]
 
 Creates a dedicated unprivileged Debian 12/13 LXC, installs Open Terminal from
 the open-webui/open-terminal v0.14.0 GitHub tag, and registers an admin-only
@@ -21,9 +18,8 @@ system terminal in an existing ollama-smart-router Open WebUI. It asks for an
 Open WebUI admin API key or session JWT unless OPENWEBUI_ADMIN_TOKEN is set.
 
 The router (the LXC or VM running that Open WebUI) is given as ROUTER:
-  ROUTER=280                a CT on this Proxmox host, reached with pct
-  ROUTER=192.168.11.80      any LXC or VM, reached as root over SSH
-  ROUTER=router.lan         (hostname; root must be able to log in)
+  ROUTER=<CT ID>            a CT on this Proxmox host, reached with pct
+  ROUTER=<IP or hostname>   any LXC or VM, reached as root over SSH
 When ROUTER is not set, the script asks for it. ROUTER_CT_ID or ROUTER_SSH_HOST
 force one kind. It verifies the selected host's Open WebUI before creating the
 terminal CT. SSH uses one connection for the whole run, so a password is asked
@@ -342,8 +338,8 @@ if (( ! integrate_only )); then
   else
     prompt_required STORAGE 'Storage for the new terminal CT root disk (e.g. local-lvm): '
   fi
-  prompt_required IP_CIDR 'Static IP/CIDR for the new terminal CT (e.g. 192.168.11.81/24): '
-  prompt_required GATEWAY 'Gateway for the new terminal CT (e.g. 192.168.11.1): '
+  prompt_required IP_CIDR 'Static IP/CIDR for the new terminal CT: '
+  prompt_required GATEWAY 'Gateway for the new terminal CT: '
 fi
 for name in CORES MEMORY_MB ROOTFS_GB OPEN_TERMINAL_PORT; do positive "$name" "${!name}"; done
 (( OPEN_TERMINAL_PORT <= 65535 )) || die 'OPEN_TERMINAL_PORT must be <=65535.'

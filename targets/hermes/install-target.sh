@@ -27,7 +27,11 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 usage() {
   cat <<'USAGE'
-Usage: ROUTER_URL=http://192.168.11.80:8000 bash install-target.sh [--dry-run]
+Usage: bash install-target.sh [--dry-run]
+
+Inside an existing Hermes CT, a direct interactive run asks for the router
+base URL when ROUTER_URL is unset. An unattended run must set ROUTER_URL.
+CT ID and CT IP are chosen by provision-lxc.sh on the Proxmox host.
 
 Installs Hermes Agent with the official POSIX installer and points its named
 provider custom:osr at a local direct dispatcher. The dispatcher uses the
@@ -207,10 +211,14 @@ target_names() { [[ -f $1 ]] && cut -d= -f1 "$1" || true; }
 targets_source=$TARGETS_FILE
 [[ -f $targets_source ]] || targets_source=$HERMES_ETC/targets
 
+if [[ -z $ROUTER_URL && ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
+  IFS= read -r -p 'Router base URL (http(s)://router-address:port): ' ROUTER_URL ||
+    die 'No router URL was entered.'
+fi
 [[ -n $ROUTER_URL ]] ||
-  die 'ROUTER_URL is unset. Resume from the Proxmox host with provision-lxc.sh --reconfigure; direct guest runs must set ROUTER_URL=http://router-address:8000.'
+  die 'ROUTER_URL is unset. Resume from the Proxmox host with provision-lxc.sh --reconfigure; unattended guest runs must set ROUTER_URL=http://router-address:8000.'
 [[ $ROUTER_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] ||
-  die 'ROUTER_URL must be an HTTP(S) host and port, such as http://192.168.11.80:8000.'
+  die 'ROUTER_URL must be an HTTP(S) host and port, such as http://router-address:8000.'
 [[ -z $HONCHO_URL || $HONCHO_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] || die 'Invalid HONCHO_URL.'
 ROUTER_URL=${ROUTER_URL%/}
 [[ $HERMES_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HERMES_MODEL.'

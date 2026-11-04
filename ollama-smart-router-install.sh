@@ -29,11 +29,11 @@ set -euo pipefail
 #   * Routing thresholds/keywords moved out of router.py into router.ini, and
 #     monitor polling into monitor.ini, so behaviour is configurable per commit.
 # ==============================================================================
-CT_ID="${CT_ID:-}"                    # blank = offer the cluster's next free ID at the prompt
+CT_ID="${CT_ID:-}"                    # required at the prompt; never auto-selected
 CT_NAME="${CT_NAME:-ollama-smart-router}"
 BRIDGE="${BRIDGE:-vmbr0}"
-IP_CIDR="${IP_CIDR:-192.168.11.80/24}"
-GATEWAY="${GATEWAY:-192.168.11.1}"
+IP_CIDR="${IP_CIDR:-}"
+GATEWAY="${GATEWAY:-}"
 NAMESERVER="${NAMESERVER:-}"          # optional; falls back to host DNS if empty
 STORAGE="${STORAGE:-local-lvm}"
 # Resources (bumped for Open WebUI: it loads a local embedding model for RAG).
@@ -87,12 +87,11 @@ OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 MODEL_SERVER_MIN="${MODEL_SERVER_MIN:-1}"
 MODEL_SERVER_MAX="${MODEL_SERVER_MAX:-20}"
 MODEL_SERVER_COUNT="${MODEL_SERVER_COUNT:-3}"
-# Per-index defaults offered at the prompts. Any MODEL_SERVER_<n> up to
-# MODEL_SERVER_MAX is honoured; unset indices simply have no default and must
-# be typed in.
-MODEL_SERVER_1="${MODEL_SERVER_1:-192.168.11.52}"
-MODEL_SERVER_2="${MODEL_SERVER_2:-192.168.11.53}"
-MODEL_SERVER_3="${MODEL_SERVER_3:-192.168.11.54}"
+# Per-index values may be preset through the environment. Unset server
+# addresses have no default and must be entered at the prompt.
+MODEL_SERVER_1="${MODEL_SERVER_1:-}"
+MODEL_SERVER_2="${MODEL_SERVER_2:-}"
+MODEL_SERVER_3="${MODEL_SERVER_3:-}"
 # How long Ollama should keep a model resident after a request. Blank means
 # "send nothing", so each server's own OLLAMA_KEEP_ALIVE governs. A value here
 # (e.g. 30m, 2h, -1 for indefinite) is sent explicitly on the LiteLLM path and
@@ -284,46 +283,6 @@ require_command() {
     echo "Required command not found: $1" >&2
     exit 1
   fi
-}
-find_next_ct_id() {
-  local next_id=""
-  if [[ -n "$CT_ID" ]]; then
-    if [[ ! "$CT_ID" =~ ^[0-9]+$ ]]; then
-      echo "CT_ID must be numeric when provided." >&2
-      return 1
-    fi
-    if ! ct_id_free "$CT_ID"; then
-      echo "Requested CT_ID ${CT_ID} is in use or not available in this cluster." >&2
-      return 1
-    fi
-    printf '%s\n' "$CT_ID"
-    return 0
-  fi
-  next_id="$(cluster_next_ct_id)" || return 1
-  if [[ -n "$next_id" ]] && ct_id_free "$next_id"; then
-    printf '%s\n' "$next_id"
-    return 0
-  fi
-  next_free_ct_id_excluding
-}
-
-# The cluster's own next free CT ID, or nothing when pvesh is not installed.
-# A pvesh that cannot answer means the guest list is unreadable (pve-cluster
-# down, /etc/pve not mounted): every later ID check would fail too, so stop
-# here instead of scanning IDs that can never be confirmed free.
-cluster_next_ct_id() {
-  local next_id=""
-  command -v pvesh >/dev/null 2>&1 || return 0
-  if ! next_id="$(pvesh get /cluster/nextid 2>/dev/null)"; then
-    next_id=""
-  fi
-  next_id="$(awk 'NF {print $1; exit}' <<< "$next_id")"
-  if [[ ! "$next_id" =~ ^[0-9]+$ ]]; then
-    echo "Cannot read the cluster's guest list (pvesh get /cluster/nextid failed)." >&2
-    echo "Check that pve-cluster is running and /etc/pve is mounted." >&2
-    return 1
-  fi
-  printf '%s\n' "$next_id"
 }
 # --- storage discovery -------------------------------------------------------
 # Content types a storage declares, read straight from the cluster config. Used
@@ -956,26 +915,6 @@ ct_id_free() {
   fi
 }
 
-# The lowest free CT ID that is not one of the arguments. The arguments are IDs
-# this run will use later (the router's CT_ID), which the cluster cannot know.
-# The scan is capped, so an ID check that never succeeds cannot loop forever.
-next_free_ct_id_excluding() {
-  local candidate="" id reserved tries=0
-  candidate="$(cluster_next_ct_id)" || return 1
-  [[ -n "$candidate" ]] || candidate=100
-  while (( tries < 1000 )); do
-    reserved=false
-    for id in "$@"; do [[ "$id" == "$candidate" ]] && reserved=true; done
-    if ! $reserved && ct_id_free "$candidate"; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-    candidate=$((candidate + 1)); tries=$((tries + 1))
-  done
-  echo "No free CT ID found below ${candidate}." >&2
-  return 1
-}
-
 # A service LXC created in this run exists to give the router that feature, so
 # stop before building the router if its repository or webhook is not in use.
 require_companion_credentials() {
@@ -1601,6 +1540,8 @@ valid_comfyui_variant() { [[ $1 == klein-4b || $1 == klein-9b ]]; }
 valid_honcho_model() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; }
 # Blank: Honcho asks the router's /v1/embeddings.
 valid_honcho_embedding_url() { [[ -z $1 || $1 =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]]; }
+# Blank: Honcho's own token budgets (fine for a context window of 128k or more).
+valid_honcho_context_tokens() { [[ -z $1 || ( $1 =~ ^[1-9][0-9]{3,6}$ && $1 -ge 8192 && $1 -le 1048576 ) ]]; }
 valid_hf_token() { [[ $1 =~ ^hf_[A-Za-z0-9]{30,}$ ]]; }
 
 # host_gpu_cuda_arch: GPU 0's compute capability (86), from the GPU step or,
@@ -1665,8 +1606,8 @@ ensure_target_template() {
   pveam download "$storage" "$name"
 }
 
-# For each selected target: CT ID, static address and storage (and a template
-# for Strata, Basalt, Maya, Xolotl and Avalon), asked now so a typo costs a re-prompt. Presets:
+# For each selected target: an explicit CT ID, static address and storage (and
+# a template for Strata, Basalt, Maya, Xolotl and Avalon). Presets:
 # <NAME>_CT_ID, <NAME>_IP_CIDR, <NAME>_STORAGE, <NAME>_TEMPLATE.
 prompt_target_settings() {
   local name prefix id_var ip_var storage_var template_var default ip
@@ -1682,12 +1623,7 @@ prompt_target_settings() {
     id_var="${prefix}_CT_ID"; ip_var="${prefix}_IP_CIDR"
     storage_var="${prefix}_STORAGE"; template_var="${prefix}_TEMPLATE"
     echo "  ${name}: $(target_field "$name" label)"
-    default="${!id_var:-}"
-    if [[ -z "$default" ]]; then
-      # shellcheck disable=SC2086  # a list of IDs
-      default="$(next_free_ct_id_excluding $TARGET_RESERVED_IDS)" || return 1
-    fi
-    prompt_until_valid "    CT ID" "$id_var" "$default" valid_target_ct_id || return 1
+    prompt_until_valid "    CT ID (required)" "$id_var" "${!id_var:-}" valid_target_ct_id || return 1
     TARGET_RESERVED_IDS+=" ${!id_var}"
     prompt_until_valid "    IP address / CIDR" "$ip_var" "${!ip_var:-}" valid_target_ip || return 1
     ip="${!ip_var}"
@@ -1697,12 +1633,17 @@ prompt_target_settings() {
     fi
     prompt_until_valid "    Storage" "$storage_var" "${!storage_var:-$STORAGE}" valid_nonempty || return 1
     if [[ $name == honcho ]]; then
+      echo "    Honcho's chat model comes from OSR and must support tools and structured output."
+      prompt_until_valid "    Chat model or tier" HONCHO_MODEL "${HONCHO_MODEL:-fast}" valid_honcho_model || return 1
       echo "    Honcho needs an OpenAI-compatible embedding endpoint reachable from its CT."
       echo "    For an Ollama CT, pull an embedding model there and use http://<ollama-ip>:11434/v1."
       echo "    Leave the URL blank to use OSR's /v1/embeddings (it needs an embedding model mapped in LiteLLM)."
       prompt_until_valid "    Embedding model" HONCHO_EMBEDDING_MODEL "${HONCHO_EMBEDDING_MODEL:-}" valid_honcho_model || return 1
       prompt_until_valid "    Embedding dimensions" HONCHO_EMBEDDING_DIMENSIONS "${HONCHO_EMBEDDING_DIMENSIONS:-}" valid_positive_int || return 1
       prompt_until_valid "    Embedding base URL" HONCHO_EMBEDDING_BASE_URL "${HONCHO_EMBEDDING_BASE_URL:-}" valid_honcho_embedding_url || return 1
+      echo "    The chat model's context window in tokens sizes Honcho's budgets (e.g. 32768 on a"
+      echo "    small GPU). Leave it blank for Honcho's defaults, which assume about 128k."
+      prompt_until_valid "    Model context window" HONCHO_CONTEXT_TOKENS "${HONCHO_CONTEXT_TOKENS:-}" valid_honcho_context_tokens || return 1
     fi
     if [[ $name == comfyui ]]; then
       echo "    Image model; the CT install downloads its diffusion model, text encoder and VAE:"
@@ -1821,7 +1762,7 @@ run_target_provisioner() {
   gpu_env="$(target_gpu_env "$name")"
   cuda_env="$(target_cuda_env "$name" "$template")"
   (
-    local router_ct="$CT_ID" gateway="$GATEWAY" bridge="$BRIDGE" nameserver="$NAMESERVER"
+    local router_ct="$CT_ID" router_ip="${IP_CIDR%/*}" gateway="$GATEWAY" bridge="$BRIDGE" nameserver="$NAMESERVER"
     local webui_port="$OPENWEBUI_PORT" admin_token="${TARGET_ADMIN_TOKEN:-}"
     unset CT_ID CT_NAME CT_HOSTNAME IP_CIDR GATEWAY STORAGE BRIDGE NAMESERVER VLAN_TAG \
       CORES MEMORY MEMORY_MB SWAP SWAP_MB ROOTFS_GB ONBOOT TEMPLATE FIREWALL NONINTERACTIVE \
@@ -1847,10 +1788,12 @@ run_target_provisioner() {
     if [[ "$phase" == companion ]]; then
       export ROUTER_CT_ID="$router_ct" OPENWEBUI_PORT="$webui_port"
       if [[ "$name" == honcho ]]; then
-        export HONCHO_EMBEDDING_MODEL="${HONCHO_EMBEDDING_MODEL:-}" \
+        export ROUTER_IP="$router_ip" HONCHO_MODEL="${HONCHO_MODEL:-fast}" \
+          HONCHO_EMBEDDING_MODEL="${HONCHO_EMBEDDING_MODEL:-}" \
           HONCHO_EMBEDDING_DIMENSIONS="${HONCHO_EMBEDDING_DIMENSIONS:-}" \
           HONCHO_EMBEDDING_BASE_URL="${HONCHO_EMBEDDING_BASE_URL:-}"
-        [[ -z $client_ips ]] || export HONCHO_CLIENT_IPS="$client_ips"
+        export HONCHO_CLIENT_IPS="${client_ips:-${HONCHO_CLIENT_IPS:-}}"
+        [[ -z ${HONCHO_CONTEXT_TOKENS:-} ]] || export HONCHO_CONTEXT_TOKENS
       fi
       # Only the agents use Honcho, and only once its CT was provisioned.
       if [[ ( "$name" == hermes || "$name" == openclaw ) && "${HONCHO_READY:-false}" == true ]]; then
@@ -2045,18 +1988,12 @@ provision_selected_targets() {
 }
 
 # --- interactive configuration ----------------------------------------------
-# The router's CT ID. The default offered is the CT_ID preset, else the
-# cluster's next free ID; any other free ID can be typed in. An ID that is
-# malformed or already in use anywhere in the cluster is refused and re-asked
-# (with NONINTERACTIVE=true it stops the install instead).
+# Ask for the router's CT ID explicitly. A supplied CT_ID pre-fills the prompt;
+# a malformed or occupied ID is refused and re-asked (or stops unattended runs).
 prompt_router_ct_id() {
-  local default="$CT_ID"
-  if [[ -z "$default" ]]; then
-    default="$(find_next_ct_id)" || return 1
-  fi
   echo
   echo "--- Ollama Smart Router container ---"
-  prompt_until_valid "OSR CT ID" CT_ID "$default" valid_router_ct_id
+  prompt_until_valid "OSR CT ID (required)" CT_ID "$CT_ID" valid_router_ct_id
 }
 # Proxmox accepts guest IDs 100-999999999.
 valid_router_ct_id() {
@@ -2067,11 +2004,11 @@ valid_router_ct_id() {
 prompt_network_config() {
   echo
   echo "--- Container network ---"
-  prompt_until_valid "Proxmox bridge"            BRIDGE     "$BRIDGE"     valid_nonempty
-  prompt_until_valid "OSR IP address / CIDR"     IP_CIDR    "$IP_CIDR"    valid_cidr
-  prompt_until_valid "Gateway IP"                GATEWAY    "$GATEWAY"    valid_ipv4
+  prompt_until_valid "Proxmox bridge"            BRIDGE     "$BRIDGE"     valid_nonempty || return 1
+  prompt_until_valid "OSR IP address / CIDR"     IP_CIDR    "$IP_CIDR"    valid_cidr || return 1
+  prompt_until_valid "Gateway IP"                GATEWAY    "$GATEWAY"    valid_ipv4 || return 1
   prompt_until_valid "DNS nameserver (blank = inherit host)" \
-                                                 NAMESERVER "$NAMESERVER" valid_optional_ipv4
+                                                 NAMESERVER "$NAMESERVER" valid_optional_ipv4 || return 1
   # A gateway outside the router's subnet is almost always a typo, and the
   # container would come up with no route off-link.
   if ! ip_in_same_subnet "$IP_CIDR" "$GATEWAY"; then
@@ -2237,18 +2174,8 @@ prompt_model_servers() {
   for (( i = 1; i <= MODEL_SERVER_COUNT; i++ )); do
     local var="MODEL_SERVER_${i}"
     default_addr="${!var:-}"
-    # No default is offered for servers without a configured MODEL_SERVER_n:
-    # suggesting the previous server's address would let a stray Enter create a
-    # duplicate deployment, which silently double-weights that host.
-    if [[ -n "$default_addr" ]]; then
-      prompt_until_valid "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host, xolotl://host or avalon://host)" raw "$default_addr" valid_ollama_addr
-    else
-      while true; do
-        read -r -p "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host, xolotl://host or avalon://host): " raw
-        valid_ollama_addr "$raw" && break
-        echo "    Not a valid address — try again." >&2
-      done
-    fi
+    prompt_until_valid "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host, xolotl://host or avalon://host)" \
+      raw "$default_addr" valid_ollama_addr || return 1
     MODEL_SERVERS+=("$(normalize_ollama_url "$raw")")
   done
 
@@ -2972,7 +2899,7 @@ prompt_secret "Root password for container ${CT_ID}" ROOT_PASSWORD
 # Collect the rest of the configuration up front, before anything is built, so
 # a typo costs a re-prompt rather than a failed provisioning run. Every prompt
 # offers a default (Enter accepts); NONINTERACTIVE=true takes all defaults.
-prompt_network_config
+prompt_network_config || exit 1
 prompt_storage_config
 prompt_template_storage || exit 1
 echo "Updating Proxmox appliance template index."
@@ -2995,7 +2922,7 @@ prompt_gitea_credentials
 
 prompt_mattermost_config
 preset_target_model_servers
-prompt_model_servers
+prompt_model_servers || exit 1
 
 # Ensure the config repo exists and that the token can write to it. Non-fatal:
 # on failure we fall back to installing the configuration locally.

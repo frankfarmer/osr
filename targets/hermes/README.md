@@ -70,20 +70,14 @@ reach this HTTP endpoint only over a trusted LAN or VPN.
 
 Run `bash targets/hermes/provision-lxc.sh` interactively to enter the existing
 router CT ID or IP address, then a separate **new Hermes CT ID**, Debian template,
-storage and network settings. To resume or update an existing Hermes CT, use
+storage and network settings. The new CT's static IP/CIDR and gateway are
+required and prompted when unset; no CT ID or IP is selected automatically.
+To resume or update an existing Hermes CT, use
 `bash targets/hermes/provision-lxc.sh --reconfigure`; enter that **existing
 Hermes CT ID** when prompted. `--integrate-only` needs the existing Hermes CT ID
 and registers its API server in Open WebUI again.
 
 ```bash
-CT_ID=282 ROUTER=280 \
-TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst \
-STORAGE=local-lvm IP_CIDR=192.168.11.82/24 GATEWAY=192.168.11.1 \
-bash targets/hermes/provision-lxc.sh --dry-run          # print the plan
-
-CT_ID=282 ROUTER=280 \
-TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst \
-STORAGE=local-lvm IP_CIDR=192.168.11.82/24 GATEWAY=192.168.11.1 \
 bash targets/hermes/provision-lxc.sh
 ```
 
@@ -160,9 +154,11 @@ under the CT's **Options → Features** in Proxmox and restart the CT.
 If the first install failed after creating the CT, rerun `--reconfigure` on the
 Proxmox host after fixing the reported cause. It can resume a CT created by
 this target even if the guest installer never wrote its settings file, provided
-the CT description and firewall file remain. Running `install-target.sh` by
-itself inside the CT lacks the `ROUTER_URL` and other settings that the host
-provisioner supplies for that run.
+the CT description and firewall file remain. Running `install-target.sh`
+directly inside the CT asks for the router base URL if `ROUTER_URL` is unset.
+It does not need a CT ID or the Hermes CT IP: those belong to the existing
+container. Set `ROUTER_URL` explicitly for unattended guest runs. Use the
+host `--reconfigure` path after key changes so it supplies current keys.
 
 Rerunning the guest installer with unchanged settings says "nothing to do".
 It compares a settings record that includes hashes of the router and backend

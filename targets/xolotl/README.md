@@ -1,6 +1,11 @@
 # Xolotl (DeepSeek-V4.1-Flash) inference target for Proxmox VE 9
 
-On an interactive Proxmox run, `provision-lxc.sh` lists downloaded compatible templates and active `rootdir` storage with enough free space for `ROOTFS_GB`. Set `TEMPLATE` and `STORAGE` to skip the menus. Dry runs make no Proxmox queries, so supply those values explicitly.
+On an interactive Proxmox run, `provision-lxc.sh` asks for an unused CT ID,
+the CT IP/CIDR (or `dhcp`), and a gateway for a static IP. It lists downloaded
+compatible templates and active `rootdir` storage with enough free space for
+`ROOTFS_GB`. Preset `CT_ID`, `IP_CIDR`, `GATEWAY`, `TEMPLATE`, and `STORAGE`
+to skip the corresponding prompts. No CT ID or IP is selected automatically.
+Dry runs make no Proxmox queries, so supply template and storage explicitly.
 
 [Xolotl](https://github.com/Indras-Mirror/Xolotl) is Indras Mirror's fork of
 [Strata](https://github.com/Niko1221/Strata): Strata's engine, server and

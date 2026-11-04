@@ -26,8 +26,10 @@ The community script still shows its own menu; pick "Default" (or "My
 Defaults") to accept the presets below. Its settings you do not preset keep
 the community defaults (unprivileged, nesting).
 
-Settings (environment; all optional):
-  CT_ID=<next free>  CT_HOSTNAME=ollama  CORES=4  MEMORY_MB=16384  ROOTFS_GB=128
+CT_ID and IP_CIDR are required; a static IP also needs GATEWAY. An
+interactive run asks for missing values. No ID or IP is chosen for you.
+Settings (environment; values shown here are presets or defaults):
+  CT_ID=<required>  CT_HOSTNAME=ollama  CORES=4  MEMORY_MB=16384  ROOTFS_GB=128
   TEMPLATE_STORAGE=<vztmpl storage>  STORAGE=<rootdir storage>
   BRIDGE=vmbr0  IP_CIDR=<a.b.c.d/nn|dhcp>  GATEWAY=<a.b.c.d>
   NAMESERVER=<a.b.c.d>  VLAN_TAG=<1-4094>  SSH_PUBLIC_KEY=<file>
@@ -214,10 +216,9 @@ COMMUNITY_SCRIPT_SHA256=${COMMUNITY_SCRIPT_SHA256:-}
 OLLAMA_CT_OS=${OLLAMA_CT_OS:-debian}
 OLLAMA_CT_VERSION=${OLLAMA_CT_VERSION:-13}
 
-if [[ -z $CT_ID ]]; then
-    (( dry_run )) || CT_ID=$(pvesh get /cluster/nextid 2>/dev/null || true)
-    [[ -n $CT_ID ]] || die 'Set CT_ID (the next free ID could not be read from the cluster).'
-fi
+pve_prompt_required CT_ID 'New Ollama CT ID (unused, at least 100)'
+pve_prompt_required IP_CIDR 'Ollama IP/CIDR (or dhcp)'
+if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'Ollama gateway IP'; fi
 valid_container_id "$CT_ID" || die 'CT_ID must be a numeric ID of 100 or more.'
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die 'CT_HOSTNAME must be a DNS label.'
 for name in CORES MEMORY_MB ROOTFS_GB; do positive_int "$name" "${!name}"; done

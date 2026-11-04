@@ -702,7 +702,10 @@ egress rule and memory survive, and `HONCHO_URL=` turns them off. Inbound is
 limited to the router (API and MCP) and the selected agents (API); the
 provisioner keeps one tagged rule in the router CT's firewall file so Honcho
 can reach the router API. The guest probes the chat model with a tool and a
-JSON schema before changing anything. A rerun sets aside the env file, keys,
+JSON schema before changing anything. `HONCHO_CONTEXT_TOKENS` (asked by the
+installer) sizes Honcho's token budgets for small context windows through
+`budgets.py`; `HONCHO_<SETTING>` overrides one, and the explicit values persist in
+the CT's `budgets.env` across reconfigures. A rerun sets aside the env file, keys,
 units and Bun, stops Honcho and dumps the database before migrations even if
 the commit is unchanged; any failure restores all of them. `--rotate-keys`
 replaces the JWT secret and both keys after checking Open WebUI admin access;

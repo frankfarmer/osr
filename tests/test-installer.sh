@@ -106,31 +106,6 @@ assert_fail "without pvesh, pct status decides" \
 assert_ok   "and a free ID passes" \
   env PATH="$_ids/pct-only:$NO_PVESH_BIN" bash -c 'source "$1"; ct_id_free 906' _ "$FUNCS"
 
-describe cluster_next_ct_id
-assert_eq "reads the cluster's next free ID" "910" "$(cluster_next_ct_id)"
-: > "$_ids/nextid"
-assert_fail "an unanswered nextid is an error" cluster_next_ct_id
-assert_contains "that says the guest list is unreadable" "Cannot read the cluster's guest list" \
-  "$(cluster_next_ct_id 2>&1)"
-assert_fail "rejects an ID printed by a failed pvesh" \
-  bash -c 'source "$1"; pvesh() { echo 910; return 1; }; cluster_next_ct_id' _ "$FUNCS"
-echo 910 > "$_ids/nextid"
-assert_eq "without pvesh there is no cluster answer, and no error" "" \
-  "$(env PATH="$_ids/pct-only:$NO_PVESH_BIN" bash -c 'source "$1"; cluster_next_ct_id' _ "$FUNCS")"
-
-describe next_free_ct_id_excluding
-assert_eq "takes the cluster's next free ID" "910" "$(next_free_ct_id_excluding)"
-assert_eq "skips an ID this run will use later" "911" "$(next_free_ct_id_excluding 910)"
-echo "905 911" > "$_ids/used"
-assert_eq "and IDs already in use" "912" "$(next_free_ct_id_excluding 910)"
-echo 905 > "$_ids/used"
-: > "$_ids/nextid"
-assert_fail "an unreadable guest list stops the search" next_free_ct_id_excluding 910
-echo 910 > "$_ids/nextid"
-assert_fail "a scan with no free ID gives up" \
-  env PATH="$_ids/pct-only:$NO_PVESH_BIN" timeout 30 bash -c \
-    'source "$1"; ct_id_free() { return 1; }; next_free_ct_id_excluding' _ "$FUNCS"
-
 describe require_companion_credentials
 TARGETS="ollama"; CONFIG_SOURCE=local; MATTERMOST_WEBHOOK_URL=""
 assert_ok "no new services, nothing to check" require_companion_credentials
@@ -179,6 +154,10 @@ printf 'provision %s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$(basename "$(dirna
   printf 'honcho-env %s|%s|%s\n' "${HONCHO_CLIENT_IPS:-}" "${HONCHO_URL:-}" "${HONCHO_CT_ID:-}" >> "$MOCK_LOG"
 [[ $(basename "$(dirname "$0")") != honcho ]] ||
   printf 'embedding-env %s|%s|%s\n' "${HONCHO_EMBEDDING_MODEL:-}" "${HONCHO_EMBEDDING_DIMENSIONS:-}" "${HONCHO_EMBEDDING_BASE_URL:-}" >> "$MOCK_LOG"
+[[ $(basename "$(dirname "$0")") != honcho ]] ||
+  printf 'router-ip %s\n' "${ROUTER_IP:-}" >> "$MOCK_LOG"
+[[ $(basename "$(dirname "$0")") != honcho ]] ||
+  printf 'chat-model %s\n' "${HONCHO_MODEL:-}" >> "$MOCK_LOG"
 [[ -z ${GPU:-}${BACKEND:-}${GPU_DEVICES:-}${GPU_CARD:-} ]] ||
   printf 'gpu-env %s|%s|%s|%s\n' "${GPU:-}" "${BACKEND:-}" "${GPU_DEVICES:-}" "${GPU_CARD:-}" >> "$MOCK_LOG"
 [[ -z ${CUDA_VERSION:-}${MAYA_CUDA_VERSION:-}${XOLOTL_CUDA_VERSION:-}${AVALON_CUDA_VERSION:-} ]] ||
@@ -633,10 +612,9 @@ assert_fail "above the Proxmox range" valid_router_ct_id 1000000000
 
 describe prompt_router_ct_id
 _saved_ct_id="$CT_ID"
-find_next_ct_id() { echo 940; }
 CT_ID=""
-prompt_router_ct_id >/dev/null 2>&1 <<< $'\n'
-assert_eq "Enter takes the next free ID" 940 "$CT_ID"
+prompt_router_ct_id >/dev/null 2>&1 <<< $'\n940\n'
+assert_eq "a blank answer requires an explicit router ID" 940 "$CT_ID"
 CT_ID=""
 prompt_router_ct_id >/dev/null 2>&1 <<< $'950\n'
 assert_eq "or a typed one" 950 "$CT_ID"
@@ -653,20 +631,18 @@ prompt_router_ct_id >/dev/null 2>&1 <<< $'\n952\n'
 assert_eq "a taken preset is re-asked, not accepted" 952 "$CT_ID"
 CT_ID=905
 assert_fail "input running out on a taken ID gives up" prompt_router_ct_id <<< $'905\n'
-find_next_ct_id() { return 1; }
 CT_ID=""
-assert_fail "no free ID found stops the install" prompt_router_ct_id
+assert_fail "no router ID provided stops the install" prompt_router_ct_id <<< $'\n'
 NONINTERACTIVE=true
-find_next_ct_id() { echo 940; }
 CT_ID=""
-prompt_router_ct_id >/dev/null 2>&1
-assert_eq "NONINTERACTIVE takes the next free ID" 940 "$CT_ID"
+assert_fail "NONINTERACTIVE requires a router ID preset" prompt_router_ct_id
+CT_ID=940
+assert_ok "NONINTERACTIVE accepts an explicit free ID" prompt_router_ct_id
 CT_ID=905
 assert_fail "NONINTERACTIVE refuses a taken preset" prompt_router_ct_id
 NONINTERACTIVE=false
-unset -f find_next_ct_id
 # shellcheck source=/dev/null
-source "$FUNCS"   # restore the real find_next_ct_id and ct_id_free
+source "$FUNCS"   # restore the real ct_id_free
 CT_ID="$_saved_ct_id"; unset _saved_ct_id _out
 
 describe valid_target_ip
@@ -921,22 +897,24 @@ assert_fail "a failed download fails" ensure_target_template local:vztmpl/ubuntu
 unset FAKE_DOWNLOAD_RC
 
 describe prompt_target_settings
-next_free_ct_id_excluding() { local id max=0; for id in "$@"; do (( id > max )) && max=$id; done; echo $((max + 1)); }
 default_gpu_target_template() { echo local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst; }
 TEMPLATE_REF=nfs:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst
 CT_ID=910; IP_CIDR=192.0.2.80/24; GATEWAY=192.0.2.1; BRIDGE=vmbr0; STORAGE=router-store
 TARGETS="ollama strata"
 unset OLLAMA_CT_ID OLLAMA_IP_CIDR OLLAMA_STORAGE STRATA_CT_ID STRATA_IP_CIDR STRATA_STORAGE STRATA_TEMPLATE
 _out="$(mktemp)"
-prompt_target_settings > "$_out" 2>&1 <<< $'\n192.0.2.80/24\n192.0.2.90/24\n\n\n192.0.2.90/24\n192.0.2.91/24\ngpu-store\n\n'
-assert_eq "the first target takes the ID after the router's" 911 "$OLLAMA_CT_ID"
-assert_eq "the next one skips it" 912 "$STRATA_CT_ID"
+prompt_target_settings > "$_out" 2>&1 <<< $'911\n192.0.2.80/24\n192.0.2.90/24\n\n912\n192.0.2.90/24\n192.0.2.91/24\ngpu-store\n\n'
+assert_eq "the first target takes the entered ID" 911 "$OLLAMA_CT_ID"
+assert_eq "the next target takes its own entered ID" 912 "$STRATA_CT_ID"
 assert_eq "the router's address is refused, the next answer kept" 192.0.2.90/24 "$OLLAMA_IP_CIDR"
 assert_eq "an address already taken is refused" 192.0.2.91/24 "$STRATA_IP_CIDR"
 assert_eq "storage defaults to the router's" router-store "$OLLAMA_STORAGE"
 assert_eq "or takes the answer" gpu-store "$STRATA_STORAGE"
 assert_eq "Strata defaults to the router's selected template location" "$TEMPLATE_REF" "$STRATA_TEMPLATE"
 assert_eq "Ollama is not given one (the community script chooses)" "" "${OLLAMA_TEMPLATE:-}"
+TARGETS=ollama; unset OLLAMA_CT_ID
+assert_fail "an unprovided target ID cannot be inferred" prompt_target_settings <<< $'\n'
+OLLAMA_CT_ID=911
 TARGETS=strata; STRATA_TEMPLATE=""
 _pveam_list_local='NAME SIZE
 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst 140MB'
@@ -984,19 +962,30 @@ assert_not_contains "a preset HF_TOKEN is not asked for" "Hugging Face token (hf
 TARGET_HF_TOKEN=""; unset COMFYUI_IMAGE_VARIANT
 TARGETS=honcho
 HONCHO_CT_ID=934; HONCHO_IP_CIDR=192.0.2.101/24; HONCHO_STORAGE=router-store
-unset HONCHO_EMBEDDING_MODEL HONCHO_EMBEDDING_DIMENSIONS HONCHO_EMBEDDING_BASE_URL
-prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nnomic-embed-text\n768\nhttp://192.0.2.90:11434/v1\n'
+unset HONCHO_MODEL HONCHO_EMBEDDING_MODEL HONCHO_EMBEDDING_DIMENSIONS HONCHO_EMBEDDING_BASE_URL
+prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nfast\nnomic-embed-text\n768\nhttp://192.0.2.90:11434/v1\n'
+assert_eq "Honcho confirms its router chat tier" fast "$HONCHO_MODEL"
 assert_eq "Honcho prompts for a real embedding model" nomic-embed-text "$HONCHO_EMBEDDING_MODEL"
 assert_eq "and its vector dimensions" 768 "$HONCHO_EMBEDDING_DIMENSIONS"
 assert_eq "and the embedding endpoint" http://192.0.2.90:11434/v1 "$HONCHO_EMBEDDING_BASE_URL"
 assert_contains "the prompt explains the endpoint" "Ollama CT" "$(cat "$_out")"
 unset HONCHO_EMBEDDING_BASE_URL
-prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nnomic-embed-text\n768\n\n'
+prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\n\nnomic-embed-text\n768\n\n'
 assert_eq "a blank endpoint leaves Honcho on OSR's /v1/embeddings" "" "$HONCHO_EMBEDDING_BASE_URL"
 assert_contains "and the prompt says so" "Leave the URL blank" "$(cat "$_out")"
 # Later cases use the first answers again.
 HONCHO_EMBEDDING_BASE_URL=http://192.0.2.90:11434/v1
 TARGETS=""
+
+describe valid_honcho_context_tokens
+assert_ok "blank keeps Honcho's budgets" valid_honcho_context_tokens ""
+assert_ok "a 32k window" valid_honcho_context_tokens 32768
+assert_ok "the smallest" valid_honcho_context_tokens 8192
+assert_ok "the largest" valid_honcho_context_tokens 1048576
+assert_fail "too small to hold a request" valid_honcho_context_tokens 4096
+assert_fail "too large" valid_honcho_context_tokens 2097152
+assert_fail "a unit suffix" valid_honcho_context_tokens 32k
+assert_fail "a leading zero" valid_honcho_context_tokens 032768
 
 describe valid_honcho_model
 assert_ok "a router tier" valid_honcho_model fast
@@ -1139,6 +1128,8 @@ assert_contains "Honcho gets both selected agent addresses" \
   "honcho-env 192.0.2.94 192.0.2.98||" "$(mock_calls)"
 assert_contains "Honcho gets the prompted embedding settings" \
   "embedding-env nomic-embed-text|768|http://192.0.2.90:11434/v1" "$(mock_calls)"
+assert_contains "Honcho gets the router IP entered earlier" "router-ip 192.0.2.80" "$(mock_calls)"
+assert_contains "Honcho gets the selected router chat model" "chat-model fast" "$(mock_calls)"
 HONCHO_READY=true
 mock_reset_log
 run_target_provisioner hermes
@@ -1775,47 +1766,6 @@ describe require_command
 assert_ok   "existing command"  require_command bash
 assert_fail "missing command"   bash -c "source '$FUNCS'; require_command definitely-not-a-real-binary"
 
-describe find_next_ct_id
-mock_script pct <<'EOF'
-[ "$1" = "status" ] && { case "$2" in 100|101) exit 0;; *) exit 1;; esac; }
-exit 0
-EOF
-mock_script pvesh <<'EOF'
-if [[ "$*" == *"--vmid "* ]]; then
-  case "${*: -1}" in 100|101|151) exit 1;; *) exit 0;; esac
-fi
-echo 102
-EOF
-CT_ID=""
-assert_eq "uses pvesh nextid when free" "102" "$(find_next_ct_id)"
-CT_ID="150"
-assert_eq "honours an explicit free CT_ID" "150" "$(find_next_ct_id)"
-CT_ID="100"
-assert_fail "rejects an occupied CT_ID" find_next_ct_id
-CT_ID="151"
-assert_fail "rejects an ID occupied on another cluster node" find_next_ct_id
-CT_ID="abc"
-assert_fail "rejects a non-numeric CT_ID" find_next_ct_id
-CT_ID="151"
-assert_contains "a refused ID names every cause" "is in use or not available in this cluster" \
-  "$(find_next_ct_id 2>&1)"
-CT_ID=""
-# A pvesh that cannot answer is an error at once, never an endless scan.
-_broken="$(mktemp -d)"
-printf '#!/bin/sh\nexit 1\n' > "$_broken/pvesh"
-printf '#!/bin/sh\nexit 1\n' > "$_broken/pct"
-chmod +x "$_broken/pvesh" "$_broken/pct"
-_rc=0
-_msg="$(env PATH="$_broken:$PATH" timeout 10 bash -c 'source "$1"; CT_ID=""; find_next_ct_id' _ "$FUNCS" 2>&1)" || _rc=$?
-assert_eq       "a failing pvesh stops instead of looping" "1" "$_rc"
-assert_contains "and says why" "Cannot read the cluster's guest list" "$_msg"
-_rc=0
-env PATH="$NO_PVESH_BIN" timeout 10 bash -c \
-  'source "$1"; ct_id_free() { return 1; }; CT_ID=""; find_next_ct_id' _ "$FUNCS" \
-  >/dev/null 2>&1 || _rc=$?
-assert_eq       "without pvesh, a node with no free ID gives up" "1" "$_rc"
-rm -rf "$_broken"; unset _broken _rc _msg
-
 describe run_ct
 CT_ID=999
 mock_command pct 0
@@ -1981,6 +1931,8 @@ BRIDGE=vmbr0; IP_CIDR=10.0.0.5/24; GATEWAY=10.0.0.1; NAMESERVER=""
 _pn_out="$(mktemp)"
 prompt_network_config > "$_pn_out" 2>&1 <<< $'\n\n\n\n' || true
 assert_eq "keeps defaults on empty input" "10.0.0.5/24" "$IP_CIDR"
+IP_CIDR=""; GATEWAY=""
+assert_fail "missing network addresses cannot be inferred" prompt_network_config <<< $'\n\n'
 IP_CIDR=192.168.50.10/24; GATEWAY=10.99.99.1
 prompt_network_config > "$_pn_out" 2>&1 <<< $'\n\n\n\n' || true
 assert_contains "warns when the gateway is off-subnet" "outside" "$(cat "$_pn_out")"
@@ -2033,6 +1985,11 @@ assert_eq "installer keeps Basalt on port 11434" "basalt+http://10.0.0.7:11434" 
 MODEL_SERVERS=(); MODEL_SERVER_COUNT=1; MODEL_SERVER_1=maya://10.0.0.9:11434
 prompt_model_servers > /dev/null 2>&1 <<< $'\n\n\n\n\n\n\n\n\n\n\n' || true
 assert_eq "installer keeps Maya on port 11434" "maya+http://10.0.0.9:11434" "${MODEL_SERVERS[0]}"
+MODEL_SERVERS=(); MODEL_SERVER_COUNT=1; MODEL_SERVER_1=""
+assert_fail "a missing model server address cannot be inferred" prompt_model_servers </dev/null
+NONINTERACTIVE=true
+assert_fail "an unattended install needs an explicit model server address" prompt_model_servers </dev/null
+NONINTERACTIVE=false
 MODEL_SERVER_COUNT=3; MODEL_SERVER_1=10.0.0.51
 
 # ── python provisioning ───────────────────────────────────────────────────────

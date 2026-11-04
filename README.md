@@ -40,7 +40,9 @@ Mattermost receives alerts; both are optional and can also be installed
 separately from [targets/gitea](targets/gitea/README.md) and
 [targets/mattermost](targets/mattermost/README.md).
 
-For each selected target, provide a unique CT ID, static IP/CIDR and storage.
+Enter the router's CT ID and static IP/CIDR, then a unique CT ID, static
+IP/CIDR and storage for each selected target. The installer does not choose
+CT IDs or IP addresses; environment presets prefill the prompts when supplied.
 Strata, Basalt, Maya, Xolotl and Avalon also ask for a template. The installer then
 checks the host GPU, creates selected service CTs, verifies the Gitea token,
 creates the router CT, provisions model targets, then Honcho and the selected
@@ -49,7 +51,10 @@ ComfyUI community-script menus. Open WebUI companions require an admin API key:
 create the first admin account in the browser, enable API keys and create one
 when prompted. A failed service stops the install before the router is built;
 a failed model or companion target leaves the router running and is listed with
-retry instructions at the end.
+retry instructions at the end. Honcho additionally requires a router model
+with tools and structured output, an embedding model and its vector size, and
+an Open WebUI admin API token for MCP registration. Its
+[target README](targets/honcho/README.md) lists the network and model checks.
 
 Ollama and AirLLM install their engines during provisioning. The llama.cpp
 target creates only a CT unless `MODEL_ALIAS` and either `MODEL_DOWNLOAD_URL`
@@ -134,7 +139,7 @@ kernel with Linux 6.12 or newer.
 
 ### Router settings
 
-The router prompts for its CT ID (Enter takes the next free one), root password, network, storage and size; Gitea
+The router prompts for its CT ID (required), root password, network, storage and size; Gitea
 URL, account, repository and token; Mattermost webhook (blank disables
 alerts); and 1–20 model servers, tiers and model tags. Selected model targets
 fill the first server slots. Increase the count to include existing servers.
@@ -154,7 +159,9 @@ Settings can be preset as environment variables:
 | Mattermost | `MATTERMOST_WEBHOOK_URL`, `MATTERMOST_MONITOR_USER`, `MATTERMOST_CHANNEL` (`ollama-monitor`) |
 | Targets | `INSTALL_TARGETS` (comma-separated target names, pre-fills the menu; menu numbers are refused there because they change when targets are regrouped), `INSTALL_GITEA` / `INSTALL_MATTERMOST` (pre-select), `<NAME>_CT_ID`, `<NAME>_IP_CIDR`, `<NAME>_STORAGE`, `<NAME>_TEMPLATE`, `COMFYUI_IMAGE_VARIANT` (`klein-4b` or `klein-9b`), `HF_TOKEN`, `OPENWEBUI_ADMIN_TOKEN`, `OPENWEBUI_WAIT_SECONDS` (900), `TARGETS_DIR`; see target READMEs for engine options, script pins and ports |
 
-`NONINTERACTIVE=true` accepts router defaults without prompts but refuses
+`NONINTERACTIVE=true` requires `CT_ID`, `IP_CIDR`, `GATEWAY`, and a
+`MODEL_SERVER_<n>` address for every configured server. It accepts the
+remaining router defaults without prompts and refuses
 selected targets: community-script menus, GPU selection and the Open WebUI
 admin key require interaction. Install the router unattended, then run each
 target's `provision-lxc.sh` from the full checkout. Target CT variables are
@@ -164,7 +171,8 @@ bridge and gateway. Target-specific options (`GPU_DEVICES`, `BACKEND`,
 in their READMEs.
 
 Model server addresses may be IPs, `host:port`, URLs, or `kind://host` for
-non-Ollama servers. Only servers 1–3 have default addresses. Set `MODEL_LARGE`
+non-Ollama servers. No model server address is prefilled unless you set its
+`MODEL_SERVER_<n>` preset. Set `MODEL_LARGE`
 to a model actually present on your host (its inherited default is
 `qwen3.8:27b`). Hosts are divided among four tiers; with fewer than four
 hosts, upper tiers share the last host. Override assignments with

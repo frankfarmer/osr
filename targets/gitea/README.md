@@ -1,6 +1,11 @@
 # Gitea service for Ollama Smart Router
 
-On an interactive new install, `provision-lxc.sh` lists active LXC template storage and `rootdir` storage with enough free space for `ROOTFS_GB`. Set `TEMPLATE_STORAGE` and `STORAGE` to skip the menus. The community script chooses or downloads its Debian template on the selected template storage. `--reconfigure` and dry runs skip these Proxmox queries.
+On an interactive new install, `provision-lxc.sh` asks for the Gitea CT ID,
+IP/CIDR (or `dhcp`), and a gateway for a static IP. It lists eligible template
+and `rootdir` storage. Preset `CT_ID`, `IP_CIDR`, `GATEWAY`,
+`TEMPLATE_STORAGE`, and `STORAGE` to skip those prompts. No CT ID or IP is
+selected automatically. The community script chooses or downloads its Debian
+template. `--reconfigure` and dry runs skip these Proxmox queries.
 
 Gitea holds the router's **configuration repository**. The router clones it at
 provisioning, and `manage-model-servers commit` pushes every change to it (see
@@ -17,11 +22,7 @@ an existing router, or to create Gitea first.
 ## Provision on the Proxmox host
 
 ```bash
-CT_ID=276 IP_CIDR=192.168.11.76/24 GATEWAY=192.168.11.1 STORAGE=local-lvm \
-bash targets/gitea/provision-lxc.sh --dry-run      # print the plan
-
-CT_ID=276 IP_CIDR=192.168.11.76/24 GATEWAY=192.168.11.1 STORAGE=local-lvm \
-bash targets/gitea/provision-lxc.sh                # pick "Default" in the community menu
+bash targets/gitea/provision-lxc.sh
 ```
 
 The community script shows its own menu: choose **Default** to accept the
@@ -52,7 +53,7 @@ with `pct exec <CT_ID> -- cat /etc/gitea-target/<file>`.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `CT_ID`, `IP_CIDR`, `GATEWAY`, `STORAGE`, `BRIDGE`, `NAMESERVER`, `VLAN_TAG`, `SSH_PUBLIC_KEY` | next free ID, DHCP | CT settings, passed to the community script as its `var_*` presets. Use a static address: it is the router's Gitea URL. |
+| `CT_ID`, `IP_CIDR`, `GATEWAY`, `STORAGE`, `BRIDGE`, `NAMESERVER`, `VLAN_TAG`, `SSH_PUBLIC_KEY` | CT ID and IP required; gateway required for static IP | CT settings, passed to the community script as its `var_*` presets. Use a static address: it is the router's Gitea URL. |
 | `CORES`, `MEMORY_MB`, `ROOTFS_GB` | 1, 1024, 8 | CT size. |
 | `GITEA_SITE_ADMIN`, `GITEA_SITE_ADMIN_EMAIL` | `gitea-admin`, `<name>@<address>.local` | The administrator. |
 | `GITEA_ROUTER_USER`, `GITEA_ROUTER_EMAIL` | `ollama-router`, … | The router's account. Gitea reserves `admin` and other route names. |

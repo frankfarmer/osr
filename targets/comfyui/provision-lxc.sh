@@ -16,8 +16,6 @@ readonly COMMUNITY_SCRIPT_DEFAULT_URL=https://raw.githubusercontent.com/communit
 usage() {
     cat <<'USAGE'
 Usage: bash provision-lxc.sh [--dry-run] [--integrate-only | --no-webui]
-   or: CT_ID=286 IP_CIDR=192.168.11.86/24 GATEWAY=192.168.11.1 ROUTER=280 \
-       bash provision-lxc.sh [--dry-run] [--integrate-only | --no-webui]
 
 Runs the community script
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/comfyui.sh)"
@@ -37,15 +35,16 @@ The community script still shows its own menu; pick "Default" (or "My
 Defaults") to accept the presets below. Its install takes a long time
 (PyTorch alone is several GB).
 An interactive run asks for CT_ID: the new ComfyUI CT ID, or the existing CT ID
-with --integrate-only. It does not silently choose another CT when rerun.
+with --integrate-only. New installs also ask for IP_CIDR (or dhcp) and a
+gateway when using a static IP. No CT ID or IP is chosen automatically.
 
 The router (the LXC or VM running Open WebUI) is given as ROUTER:
-  ROUTER=280                a CT on this Proxmox host, reached with pct
-  ROUTER=192.168.11.80      any LXC or VM, reached as root over SSH
+  ROUTER=<CT ID>            a CT on this Proxmox host, reached with pct
+  ROUTER=<IP or hostname>   any LXC or VM, reached as root over SSH
 ROUTER_CT_ID or ROUTER_SSH_HOST force one kind. Without ROUTER the script asks.
 
 Settings (environment; all optional unless noted):
-  CT_ID=<next free>  CT_HOSTNAME=comfyui  CORES=4  MEMORY_MB=16384  ROOTFS_GB=64
+  CT_ID=<required>  CT_HOSTNAME=comfyui  CORES=4  MEMORY_MB=16384  ROOTFS_GB=64
   TEMPLATE_STORAGE=<vztmpl storage>  STORAGE=<rootdir storage>
   BRIDGE=vmbr0  IP_CIDR=<a.b.c.d/nn|dhcp>  GATEWAY=<a.b.c.d>
   NAMESERVER=<a.b.c.d>  VLAN_TAG=<1-4094>  SSH_PUBLIC_KEY=<file>
@@ -58,7 +57,7 @@ Settings (environment; all optional unless noted):
                                    device nodes are kept (plus /dev/kfd and the shared
                                    NVIDIA nodes)
   COMFYUI_PORT=8188
-  UI_ALLOW_CIDR='192.168.11.0/24'  also admit these addresses/CIDRs to the web UI
+  UI_ALLOW_CIDR='<trusted CIDR>'    also admit these addresses/CIDRs to the web UI
   FIREWALL=1                       0 leaves the CT unfiltered (ComfyUI is then open
                                    to anyone who can reach it)
   READY_TIMEOUT=600                seconds to wait for ComfyUI after adoption
@@ -361,6 +360,10 @@ if [[ -z $CT_ID ]]; then
     [[ -n $CT_ID ]] || die 'CT_ID is required.'
 fi
 valid_container_id "$CT_ID" || die 'ComfyUI CT_ID must be a numeric ID of 100 or more.'
+if [[ $mode != integrate ]]; then
+    pve_prompt_required IP_CIDR 'ComfyUI IP/CIDR (or dhcp)'
+    if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'ComfyUI gateway IP'; fi
+fi
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die 'CT_HOSTNAME must be a DNS label.'
 for name in CORES MEMORY_MB ROOTFS_GB READY_TIMEOUT; do positive_int "$name" "${!name}"; done
 (( MEMORY_MB >= 8192 )) || die 'MEMORY_MB must be at least 8192; image models need several GB of RAM.'

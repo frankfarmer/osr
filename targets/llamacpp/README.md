@@ -105,9 +105,7 @@ building. `GPU_LAYERS` defaults to `auto`. A backend switch by `--upgrade` stays
 on the CT's Debian release: CPU and Vulkan on Debian 13, CPU and CUDA on 12.
 
 ```bash
-CT_ID=251 TEMPLATE=local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
-STORAGE=local-lvm IP_CIDR=192.0.2.51/24 GATEWAY=192.0.2.1 \
-BACKEND=vulkan GPU_DEVICES=/dev/dri/renderD128 \
+BACKEND=vulkan \
 MODEL_ALIAS=qwen3:8b MODEL_DOWNLOAD_URL=https://huggingface.co/<org>/<repo>/resolve/<rev>/<file>.gguf \
 bash provision-lxc.sh --install-target
 ```
@@ -142,8 +140,8 @@ bash targets/llamacpp/provision-lxc.sh
 
 The script prompts for the **CT template, name, IPv4/CIDR (or `dhcp`), CPU
 cores, RAM in MiB, root disk storage ID, and disk size in GiB**. It also asks
-for the CT ID, network bridge, and an optional static gateway. The next free
-cluster ID is suggested when available. Downloaded Debian 13 and 12 templates (13 first) and
+for the CT ID, network bridge, and an optional static gateway. No CT ID or IP
+is suggested or selected automatically. Downloaded Debian 13 and 12 templates (13 first) and
 active storage that supports container root disks appear in numbered selectors.
 Choose a number, paste an exact listed ID, or enter `m` to provide a manual
 value. CUDA runs also present a numbered NVIDIA GPU selector. Templates are not
@@ -171,12 +169,13 @@ For unattended setup, provide the settings explicitly:
 
 ```bash
 export NONINTERACTIVE=true
-export CT_ID=230
 export CT_HOSTNAME=llama-target-01
-export TEMPLATE='local:vztmpl/REPLACE_WITH_DOWNLOADED_DEBIAN_12_AMD64_TEMPLATE.tar.zst'
-export STORAGE=local-lvm
-export IP_CIDR=192.168.11.30/24
-export GATEWAY=192.168.11.1
+: "${CT_ID:?Set an unused CT ID before running this example}"
+: "${TEMPLATE:?Set the downloaded Debian template volume}"
+: "${STORAGE:?Set an active root-disk storage ID}"
+: "${IP_CIDR:?Set the target IP/CIDR or dhcp}"
+export CT_ID TEMPLATE STORAGE IP_CIDR
+# Set and export GATEWAY too if this network uses a static gateway.
 export BRIDGE=vmbr0
 export CORES=8 MEMORY_MB=32768 ROOTFS_GB=100
 export GPU_DEVICES='/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools'
@@ -387,7 +386,8 @@ Keep their aliases and model paths synchronized, then restart both services.
 Run from a machine allowed to reach the target; use its actual alias:
 
 ```bash
-export TARGET=http://192.168.11.30:11434
+read -r -p 'llama.cpp target IP: ' TARGET_IP
+export TARGET="http://${TARGET_IP}:11434"
 curl --fail "$TARGET/api/tags"
 curl --fail "$TARGET/v1/models"
 curl --fail "$TARGET/v1/chat/completions" -H 'Content-Type: application/json' \
@@ -404,8 +404,9 @@ Only **configuration registration** happens on the existing router. Its
 services and runtime remain where they are:
 
 ```bash
-manage-model-servers add 192.168.11.30 --tier fast
-manage-model-servers set-server-model fast 192.168.11.30 model:tag --apply
+read -r -p 'llama.cpp target IP: ' TARGET_IP
+manage-model-servers add "$TARGET_IP" --tier fast
+manage-model-servers set-server-model fast "$TARGET_IP" model:tag --apply
 manage-model-servers discover
 ```
 

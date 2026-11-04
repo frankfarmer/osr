@@ -182,7 +182,7 @@ fresh() {
   rm -rf -- "$tmp/ct" "$tmp/uv" "$tmp/bun" "$fake"/active-* "$fake"/pg-* "$fake/db-data" "$fake/user-honcho" "$fake/probe.json"
   rm -f "$fake/chat-status" "$fake/chat-warning" "$fake/dims"
   mkdir -p "$tmp/ct/deploy" "$tmp/ct/units"
-  cp "$here"/honcho-*.service "$tmp/ct/deploy/"
+  cp "$here"/honcho-*.service "$here/budgets.py" "$tmp/ct/deploy/"
   cp "$fake/router-key" "$tmp/ct/deploy/router-api-key"
   printf 'flags : fpu sse2 avx avx2\n' > "$tmp/ct/cpuinfo"
   make_uv; make_bun
@@ -196,10 +196,18 @@ guest() {
     HONCHO_BUN_DIR="$tmp/bun" HONCHO_UNIT_DIR="$tmp/ct/units" HONCHO_CPUINFO="$tmp/ct/cpuinfo" \
     HONCHO_HEALTH_TRIES=2 ROUTER_URL="$router" \
     HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_DIMENSIONS=768 \
+    HONCHO_EMBEDDING_BASE_URL= \
     "$@" bash "$script" 2>&1
 }
 calls() { cat "$FAKE_LOG"; }
 etc=$tmp/ct/etc
+
+describe honcho_required_inputs
+out=$(env PATH="$bin:$PATH" ROUTER_URL="$router" \
+  HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_DIMENSIONS=768 \
+  NONINTERACTIVE=true env -u HONCHO_EMBEDDING_BASE_URL bash "$script" 2>&1 || true)
+assert_contains "an unattended guest must choose its embedding endpoint" \
+  'Set HONCHO_EMBEDDING_BASE_URL' "$out"
 
 describe honcho_fresh_install
 fresh
@@ -298,6 +306,38 @@ assert_ne "a new admin key" "$admin_key" "$(<"$etc/api-key")"
 assert_ne "and a new client key" "$client_key" "$(<"$etc/client-api-key")"
 assert_contains "made with the new secret" "jwt-$(head -c 8 "$etc/jwt-secret")" "$(<"$etc/client-api-key")"
 assert_contains "env file uses the new secret" "AUTH_JWT_SECRET=$(<"$etc/jwt-secret")" "$(<"$etc/honcho.env")"
+
+describe honcho_budgets
+out=$(guest HONCHO_CONTEXT_TOKENS=32768) && rc=0 || rc=$?
+assert_eq "a 32k context window installs" 0 "$rc"
+assert_contains "and says which budgets it set" "Honcho budgets for a 32768-token context" "$out"
+assert_contains "the dialectic input fits the window" "DIALECTIC_MAX_INPUT_TOKENS=24576" "$(<"$etc/honcho.env")"
+assert_contains "dreams get a smaller output cap" "DREAM_DEDUCTION_MODEL_CONFIG__MAX_OUTPUT_TOKENS=4096" "$(<"$etc/honcho.env")"
+assert_eq "the choice is recorded for later runs" "HONCHO_CONTEXT_TOKENS=32768" "$(<"$etc/budgets.env")"
+assert_eq "root-only" 600 "$(stat -c %a "$etc/budgets.env")"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "a rerun without the variable succeeds" 0 "$rc"
+assert_contains "and keeps the budgets" "DIALECTIC_MAX_INPUT_TOKENS=24576" "$(<"$etc/honcho.env")"
+out=$(guest HONCHO_DIALECTIC_MAX_INPUT_TOKENS=20000 HONCHO_DREAM_ENABLED=false) && rc=0 || rc=$?
+assert_eq "an override succeeds" 0 "$rc"
+assert_contains "and wins over the derived value" "DIALECTIC_MAX_INPUT_TOKENS=20000" "$(<"$etc/honcho.env")"
+assert_contains "dreams can be turned off" "DREAM_ENABLED=false" "$(<"$etc/honcho.env")"
+before_env=$(<"$etc/honcho.env") before_record=$(<"$etc/budgets.env")
+out=$(guest HONCHO_CONTEXT_TOKENS=4096) && rc=0 || rc=$?
+assert_ne "a window too small for a request is refused" 0 "$rc"
+assert_contains "naming the range" "HONCHO_CONTEXT_TOKENS must be a whole number from 8192" "$out"
+assert_not_contains "before anything is stopped" "systemctl stop" "$(calls)"
+assert_eq "the env file is untouched" "$before_env" "$(<"$etc/honcho.env")"
+out=$(guest HONCHO_CONTEXT_TOKENS=65536 FAKE_UNHEALTHY_COMMIT="$(<"$tmp/ct/opt/.git/FAKE_HEAD")") && rc=0 || rc=$?
+assert_ne "a run that fails after changing the budgets is rolled back" 0 "$rc"
+assert_eq "with the previous budget record" "$before_record" "$(<"$etc/budgets.env")"
+assert_eq "and env file" "$before_env" "$(<"$etc/honcho.env")"
+rm -rf -- "$tmp/ct/state/rollback"
+out=$(guest HONCHO_CONTEXT_TOKENS= HONCHO_DIALECTIC_MAX_INPUT_TOKENS= HONCHO_DREAM_ENABLED=) && rc=0 || rc=$?
+assert_eq "empty values return to Honcho's defaults" 0 "$rc"
+assert_not_contains "no budget settings remain" "DIALECTIC_MAX_INPUT_TOKENS" "$(<"$etc/honcho.env")"
+assert_eq "and the record is empty" "" "$(<"$etc/budgets.env")"
+assert_contains "the run says so" "Honcho budgets: Honcho's defaults." "$out"
 
 describe honcho_model_probe
 fresh

@@ -1,6 +1,11 @@
 # Ollama inference target
 
-On an interactive run, `provision-lxc.sh` lists active LXC template storage and `rootdir` storage with enough free space for `ROOTFS_GB`. Set `TEMPLATE_STORAGE` and `STORAGE` to skip the menus. The community script chooses or downloads its template on the selected template storage. Dry runs make no Proxmox queries.
+On an interactive run, `provision-lxc.sh` asks for an unused CT ID, the CT
+IP/CIDR (or `dhcp`), and a gateway for a static IP. It lists eligible
+template and `rootdir` storage. Preset `CT_ID`, `IP_CIDR`, `GATEWAY`,
+`TEMPLATE_STORAGE`, and `STORAGE` to skip those prompts. No CT ID or IP is
+selected automatically. The community script chooses or downloads its
+template. Dry runs make no Proxmox queries.
 
 A plain Ollama server in its own CT, for the router to use like any other
 Ollama host. The CT and the initial Ollama install come from the Proxmox VE
@@ -36,9 +41,7 @@ community unit is never edited and its `update` command keeps working.
 On the PVE host, from this directory:
 
 ```bash
-CT_ID=270 IP_CIDR=192.0.2.70/24 GATEWAY=192.0.2.1 STORAGE=local-lvm \
-OLLAMA_PULL_MODELS='qwen3:8b qwen3:14b' \
-bash provision-lxc.sh --install-target
+OLLAMA_PULL_MODELS='qwen3:8b qwen3:14b' bash provision-lxc.sh --install-target
 ```
 
 This downloads and runs

@@ -27,7 +27,8 @@ model=${HONCHO_MODEL:-fast}
 router_url=${ROUTER_URL:-}
 embedding_model=${HONCHO_EMBEDDING_MODEL:-}
 embedding_dimensions=${HONCHO_EMBEDDING_DIMENSIONS:-}
-embedding_url=${HONCHO_EMBEDDING_BASE_URL:-${router_url}/v1}
+embedding_endpoint_chosen=${HONCHO_EMBEDDING_BASE_URL+x}
+embedding_url=${HONCHO_EMBEDDING_BASE_URL:-}
 embedding_dimensions_mode=${HONCHO_EMBEDDING_DIMENSIONS_MODE:-never}
 # Empty keeps upstream's default (JSON-schema output); json_object is for
 # backends that only do JSON mode.
@@ -49,7 +50,45 @@ units=(honcho-api honcho-deriver honcho-mcp)
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 
+if [[ ${1:-} == --help ]]; then
+  cat <<'USAGE'
+Usage: bash install-target.sh
+
+Run as root inside an existing Honcho CT after the Proxmox provisioner has
+staged router-api-key. An interactive run asks for ROUTER_URL, the embedding
+model and its vector dimensions when unset. It also asks for the embedding
+/v1 endpoint when HONCHO_EMBEDDING_BASE_URL is unset; a blank answer chooses
+the router explicitly. For unattended runs set ROUTER_URL,
+HONCHO_EMBEDDING_MODEL, HONCHO_EMBEDDING_DIMENSIONS, and
+HONCHO_EMBEDDING_BASE_URL (empty means the router).
+CT ID and CT IP are chosen by provision-lxc.sh on the Proxmox host.
+USAGE
+  exit 0
+fi
+
 [[ $(id -u) == 0 ]] || die 'Run as root in the Honcho CT.'
+if [[ ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
+  if [[ -z $router_url ]]; then
+    IFS= read -r -p 'Router base URL (http(s)://router-address:port): ' router_url ||
+      die 'No router URL was entered.'
+  fi
+  if [[ -z $embedding_model ]]; then
+    IFS= read -r -p 'Embedding model served by the chosen endpoint: ' embedding_model ||
+      die 'No embedding model was entered.'
+  fi
+  if [[ -z $embedding_dimensions ]]; then
+    IFS= read -r -p 'Embedding vector dimensions: ' embedding_dimensions ||
+      die 'No embedding dimensions were entered.'
+  fi
+  if [[ -z $embedding_endpoint_chosen ]]; then
+    IFS= read -r -p 'Embedding base URL (/v1; blank = router): ' embedding_url ||
+      die 'No embedding endpoint choice was entered.'
+    embedding_endpoint_chosen=yes
+  fi
+fi
+[[ -n $embedding_endpoint_chosen ]] ||
+  die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to choose the router explicitly.'
+embedding_url=${embedding_url:-${router_url}/v1}
 [[ $router_url =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}$ ]] || die 'Set ROUTER_URL to the OSR base URL.'
 [[ $model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HONCHO_MODEL.'
 [[ $embedding_model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Set HONCHO_EMBEDDING_MODEL to a model served by an OpenAI-compatible embedding endpoint.'
@@ -61,6 +100,7 @@ note() { printf '%s\n' "$*" >&2; }
 embedding_url=${embedding_url%/}
 [[ $ref =~ ^(main|v[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$ ]] || die 'HONCHO_REF must be main, a release tag or a full commit SHA.'
 [[ -s $deploy/router-api-key ]] || die "Missing $deploy/router-api-key."
+[[ -s $deploy/budgets.py ]] || die "Missing $deploy/budgets.py."
 [[ $bun_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'HONCHO_BUN_VERSION must be a release such as 1.4.4.'
 for sha in "$bun_sha256_x64" "$bun_sha256_baseline"; do
   [[ -z $sha || $sha =~ ^[0-9a-f]{64}$ ]] || die 'HONCHO_BUN_SHA256 and HONCHO_BUN_BASELINE_SHA256 are SHA-256 hex digests.'
@@ -69,6 +109,11 @@ done
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   ca-certificates curl git openssl python3 python3-venv postgresql postgresql-client
+# Token budgets for the model's context window (HONCHO_CONTEXT_TOKENS and the
+# HONCHO_<SETTING> overrides; see the README), checked before anything changes.
+# Unset variables keep the last run's values from $etc/budgets.env.
+python3 "$deploy/budgets.py" "$etc/budgets.env" "$deploy/budgets.record" "$deploy/budgets.settings" ||
+  die 'Invalid Honcho budget settings; nothing was changed.'
 # Before anything is changed: the router serves Honcho's model with tools and
 # structured output (the deriver asks for JSON-schema output, the dialectic and
 # dreams call tools), and the embedding endpoint returns vectors of the size set.
@@ -181,7 +226,7 @@ targets/honcho/README.md), remove the directory with: rm -r -- $backup
 Then run the reconfigure again. Nothing was changed by this run."
   fi
   install -d -m 0700 "$backup"
-  for file in "$etc/honcho.env" "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key" "$bun" \
+  for file in "$etc/honcho.env" "$etc/budgets.env" "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key" "$bun" \
               "$unit_dir/honcho-api.service" "$unit_dir/honcho-deriver.service" "$unit_dir/honcho-mcp.service"; do
     if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file")"; fi
   done
@@ -194,7 +239,7 @@ rollback() {
   trap - EXIT
   note 'Honcho setup failed; restoring the previous installation.'
   systemctl stop "${units[@]/%/.service}" >/dev/null 2>&1 || true
-  for name in honcho.env jwt-secret api-key client-api-key; do
+  for name in honcho.env budgets.env jwt-secret api-key client-api-key; do
     if [[ -f $backup/$name ]]; then cp -a -- "$backup/$name" "$etc/$name"
     else rm -f -- "$etc/$name"; fi
   done
@@ -297,9 +342,11 @@ router_key=$(<"$deploy/router-api-key")
     printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY=no-key\n'
   fi
   printf 'EMBEDDING_MODEL_CONFIG__DIMENSIONS_MODE=%s\n' "$embedding_dimensions_mode"
+  cat "$deploy/budgets.settings"
 } > "$etc/honcho.env"
 chown root:honcho "$etc/honcho.env"
 chmod 0640 "$etc/honcho.env"
+install -m 0600 "$deploy/budgets.record" "$etc/budgets.env"
 
 # Upstream's bootstrap: the first migration creates vector(1536) columns, then
 # configure_embeddings.py sets them to the model's size. Later runs migrate

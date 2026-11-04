@@ -11,6 +11,139 @@ blocked. Honcho uses JWT authentication with two keys in its CT:
 `/etc/honcho-target/client-api-key` is scoped to the shared `osr` workspace
 and is the only key Open WebUI, Hermes and OpenClaw receive.
 
+## Requirements
+
+Honcho itself needs no GPU; the models it calls run on your model servers
+(an Ollama CT or another target behind the router). Before installing, check
+that you have all of the following.
+
+**The Honcho CT (this target)**
+
+- A Debian 13 amd64 LXC template: Honcho needs Python 3.13, which Debian 12
+  does not ship.
+- 4 cores, 8 GiB RAM and 48 GiB disk by default, plus room in
+  `/var/lib/honcho-target/` for a database dump during each reconfigure.
+- Network access to GitHub (the Honcho release and Bun) and the Debian
+  mirrors during install, and to the router API and embedding endpoint at all
+  times. The router CT's Proxmox firewall must admit the Honcho CT; the
+  provisioner adds that rule when the router CT has a firewall file.
+- An Open WebUI admin API key, to register Honcho's MCP tools.
+
+**A chat model, served through the router, that has all of these:**
+
+- **Tool calling.** Honcho's question answering (the dialectic) and its
+  background consolidation (dreams) call tools in loops of up to 10-12 steps.
+- **Structured JSON output.** The memory worker (the deriver) asks for output
+  that matches a JSON schema and cannot store anything it cannot parse. A
+  backend that only does JSON mode works with
+  `HONCHO_STRUCTURED_OUTPUT_MODE=json_object`.
+- **A context window that matches Honcho's budgets.** By default the deriver
+  sends up to 25,000 tokens per request, and the dialectic and summaries budget
+  up to 100,000 tokens of input, which assumes a window of about 128k. On a
+  smaller window, tell Honcho its size with `HONCHO_CONTEXT_TOKENS` (see
+  [Fitting a small context window](#fitting-a-small-context-window)); without
+  it, requests larger than the window are cut off by the model server without
+  an error. Ollama's default context window is far smaller than either: raise
+  it with `OLLAMA_CONTEXT_LENGTH` on the model server (or `num_ctx` for the
+  model), and give `HONCHO_CONTEXT_TOKENS` the same number.
+- **Steady capacity.** The deriver works on every batch of new messages, not
+  only when someone asks a question, so it competes with interactive chats on
+  the same GPU.
+
+**An embedding model** on any OpenAI-compatible `/v1` endpoint, with a fixed
+vector size that you choose once: changing it later needs a new Honcho
+database. `nomic-embed-text` (768 dimensions, under 1 GB) in an Ollama CT is
+enough.
+
+### Choosing a model for your GPU
+
+Match the model to the GPU of the model server that will serve it, and leave
+VRAM for the context window: every extra 8-16k tokens of context takes roughly
+another 1 GB or more. Point `HONCHO_MODEL` at that model's exact name as the
+router lists it in `/v1/models`, rather than a tier such as `fast`, so Honcho
+is never routed to a model without tool support.
+
+The best options available as of November 3, 2026 are listed below. This
+space changes quickly; the reliability figures behind these picks come from
+small published tests and self-reported benchmarks, none of them of Honcho
+itself, and Ollama tag names change. Check the tags in the Ollama library
+before pulling.
+
+| GPU VRAM | Suggested model (Ollama tag, default 4-bit) | Model size | Why | Alternative |
+|---|---|---|---|---|
+| 8 GB | `qwen3:8b` | ~5.2 GB | Widely used for tool calling (~85% in one 20-request test) and reported to produce structured output reliably under Ollama; leaves ~2.5 GB for context. | `llama3.1:8b` (~4.9 GB, somewhat less accurate) |
+| 10 GB | `qwen3.5:9b` | ~6.6-7.6 GB | Newer model of the same size class with tool support; still leaves room for a 16-32k context. | `qwen3:8b` with a larger context |
+| 12 GB | `gemma4:12b` | ~8 GB | Best all-round pick at this size; the Gemma 4 family was the most stable at chained tool calls (~90%). | `qwen3:14b` (~9.3 GB, less room for context) |
+| 16 GB | `qwen3:14b` | ~9.3 GB | ~88% tool-call reliability, with room for a 32k context, which matters more here than a larger model. | `gemma4:12b` at 8-bit |
+| 24 GB | `gemma4:26b` | ~18 GB | Mixture-of-experts (about 4B active parameters), so it is fast; ~93-95% tool-call reliability and strict JSON-schema adherence in published tests. | A Qwen 3.x 27B model (~18-19 GB) |
+
+On 8 and 10 GB cards a 32k context barely fits next to the model; use a
+16-24k window there and set `HONCHO_CONTEXT_TOKENS` to match. Answers over
+long histories then draw on less of them; a larger card, or a model server
+reserved for Honcho, avoids that.
+
+`gpt-oss:20b` is often recommended for 16 GB cards, but it has documented
+problems producing strict JSON-schema output under Ollama, which the deriver
+depends on. If you use it, set `HONCHO_STRUCTURED_OUTPUT_MODE=json_object` and
+check the deriver's log.
+
+**Checking your choice.** The install sends the model one request with a tool
+and a JSON schema before it changes anything, and stops if that fails. That
+proves the model accepts both, not that it uses them well. After installing,
+talk to Hermes or OpenClaw for a few turns, then check inside the Honcho CT
+that `journalctl -u honcho-deriver` shows no parse errors and that the `user`
+peer gains observations. If the deriver logs no errors but stores nothing, the
+backend is ignoring the JSON schema: switch to
+`HONCHO_STRUCTURED_OUTPUT_MODE=json_object`.
+
+### Fitting a small context window
+
+Set `HONCHO_CONTEXT_TOKENS` to the context window the model server gives the
+model (8192 to 1048576; the installer asks for it). The install then sizes
+every budget Honcho has so that each request, its answer, and the system
+prompt and tool definitions fit in that window. Set it to the same number as
+`OLLAMA_CONTEXT_LENGTH`, or a little less. Suggested windows, next to the
+models above: 16384 on 8 GB, 24576 on 10 GB, 32768 on 12 and 16 GB, and
+32768-65536 on 24 GB.
+
+| `HONCHO_CONTEXT_TOKENS` | Dialectic input / output | Deriver input / output | Summary input / long cap | Dream output | Tool result cap (characters) |
+|---|---|---|---|---|---|
+| 16384 | 12288 / 2048 | 12288 / 2048 | 12288 / 2048 | 2048 | 1706 |
+| 32768 | 24576 / 4096 | 25000 / 2500 | 24576 / 4096 | 4096 | 3413 |
+| 65536 | 53248 / 8192 | 25000 / 2500 | 55440 / 6000 | 8192 | 7509 |
+| unset, or 131072 and up | Honcho's defaults: 100000 / 8192 | 25000 / 2500 | 100000 / 6000 | 8192 | 10000 |
+
+Dreams have no input budget in Honcho: their context grows with every tool
+result over up to 12 rounds. The derived cap on tool results keeps that within
+the window. On a very small window, also lower their rounds or turn them off
+(below). With a reasoning ("thinking") model, the thinking counts against the
+output budgets; if answers end early, raise `HONCHO_DIALECTIC_MAX_OUTPUT_TOKENS`.
+
+Each budget can also be set on its own, which wins over the derived value.
+Each name is Honcho's own setting with a `HONCHO_` prefix:
+
+| Variable | Range | Honcho's default |
+|---|---|---|
+| `HONCHO_DERIVER_MAX_INPUT_TOKENS` | 1024-25000 | 25000 |
+| `HONCHO_DIALECTIC_MAX_INPUT_TOKENS` | 1024-200000 | 100000 |
+| `HONCHO_DIALECTIC_MAX_OUTPUT_TOKENS` | 256-100000 | 8192 |
+| `HONCHO_DIALECTIC_SESSION_HISTORY_MAX_TOKENS` | 0-16384 | 4096 |
+| `HONCHO_SUMMARY_MAX_INPUT_TOKENS` | 1024-200000, at least twice the larger summary cap | 100000 |
+| `HONCHO_SUMMARY_MAX_TOKENS_SHORT` / `_LONG` | 128-10000 / 128-20000 | 1500 / 6000 |
+| `HONCHO_LLM_DEFAULT_MAX_TOKENS` (the deriver's output) | 256-100000 | 2500 |
+| `HONCHO_LLM_MAX_TOOL_OUTPUT_CHARS` | 500-100000 | 10000 |
+| `HONCHO_DREAM_MAX_OUTPUT_TOKENS` (deduction and induction) | 256-100000 | 8192 |
+| `HONCHO_DREAM_DEDUCTION_MAX_TOOL_ITERATIONS` / `_INDUCTION_` | 1-50 | 12 / 10 |
+| `HONCHO_DREAM_ENABLED` | `true` or `false` | `true` |
+
+The values are checked before the install changes anything. They are kept in
+`/etc/honcho-target/budgets.env` in the Honcho CT, so a later `--reconfigure`
+that does not set a variable keeps its last value; set one to an empty value
+(`HONCHO_CONTEXT_TOKENS=`) to return it to Honcho's default. The install prints
+the budgets it set.
+
+## Configuration
+
 The router supplies Honcho's chat model via its OpenAI-compatible `/v1`
 endpoint. `HONCHO_MODEL=fast` is the default; it must resolve to a model with
 tool calling (the dialectic and dreams call tools) and structured output (the
@@ -137,36 +270,75 @@ router port changes; every other line stays). Set `HONCHO_ROUTER_FIREWALL=false`
 to manage that file yourself. An embedding endpoint other than the router must
 be reachable from the Honcho CT too.
 
-The selection menu asks for the embedding model, dimensions and endpoint and
-offers `HONCHO_CT_ID`, `HONCHO_IP_CIDR`, `HONCHO_STORAGE`, and
-`HONCHO_TEMPLATE` presets. The CT defaults to 4 cores, 8 GiB RAM, and 48 GiB
-disk. To override the guest defaults, set any of `HONCHO_MODEL`,
+The selection menu requires you to enter the router CT ID and IP/CIDR and,
+for every selected target, its own CT ID and static IP/CIDR. It does not
+choose IDs or addresses for you. For Honcho it also asks which router chat
+model or tier to use (default `fast`), plus the embedding model, vector
+dimensions, and `/v1` endpoint. Enter the IPs of Hermes and
+OpenClaw at their own target prompts if you select them; Honcho uses those
+addresses for its firewall rules. `HONCHO_CT_ID`, `HONCHO_IP_CIDR`,
+`HONCHO_STORAGE`, and `HONCHO_TEMPLATE` can preset Honcho's answers. The CT
+defaults to 4 cores, 8 GiB RAM, and 48 GiB disk. To override the guest
+defaults, set any of `HONCHO_MODEL`,
 `HONCHO_EMBEDDING_MODEL`, `HONCHO_EMBEDDING_DIMENSIONS`,
 `HONCHO_EMBEDDING_BASE_URL`, `HONCHO_REF`, `HONCHO_STRUCTURED_OUTPUT_MODE` and
 `HONCHO_SKIP_CHAT_PROBE` before launching the installer.
-An Open WebUI admin API key or JWT is required for the MCP registration; a
-run without one stops before it creates anything.
+An Open WebUI admin API key or JWT is required for the MCP registration. The
+installer asks for it before creating Honcho and stops if none is provided.
 
 ## Install or repair separately
 
-On the Proxmox host running the router CT:
+On the Proxmox host running the router CT, run as root:
 
 ```bash
-CT_ID=285 ROUTER_CT_ID=280 \
-  TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst \
-  STORAGE=local-lvm IP_CIDR=192.168.11.85/24 GATEWAY=192.168.11.1 \
-  HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_DIMENSIONS=768 \
-  HONCHO_EMBEDDING_BASE_URL=http://192.168.11.90:11434/v1 \
-  OPENWEBUI_ADMIN_TOKEN=... bash targets/honcho/provision-lxc.sh
+bash targets/honcho/provision-lxc.sh
 ```
 
-Use the same variables with `--reconfigure` to repair or update a CT that
-this target created; existing agent firewall allowances are preserved unless
-`HONCHO_CLIENT_IPS` is explicitly set. `--dry-run` prints its plan. Set `HONCHO_CLIENT_IPS` to
-the agent CT addresses (space separated) if adding Hermes or OpenClaw
-separately. Then run those provisioners with `HONCHO_URL` and
-`HONCHO_CT_ID=285`; they pull the `osr` workspace key without putting it on a
-command line. For an external Honcho instance, supply `HONCHO_API_KEY_FILE`
+The standalone installer asks for the Honcho CT ID and static IP/CIDR, the
+router/Open WebUI CT ID and router IP, and Honcho's gateway. It then asks for
+the embedding model, its actual vector dimensions, and its reachable `/v1`
+base URL. A blank URL uses the router's `/v1/embeddings` route, which must
+already map that embedding model. Give the Hermes and OpenClaw CT IPs at the
+optional prompts if those agents should access Honcho. The router IP must
+match the source address its CT uses to reach Honcho; the installer checks
+this. Open WebUI runs in the router CT, so it needs no separate address.
+
+The installer offers downloaded Debian 13 templates and root-disk storage,
+then asks for the Open WebUI admin API token without echoing it. Have a
+tool-capable chat model with structured output on the router and a reachable
+embedding endpoint before starting. The Proxmox host needs `pct`, `pvesh`,
+`pvesm`, and `curl`. The Honcho CT needs outbound access for package downloads.
+No CT ID or IP address is inferred for a new standalone install. To preset
+answers, set `CT_ID`, `IP_CIDR`, `ROUTER_CT_ID`, `ROUTER_IP`, `GATEWAY`,
+`HONCHO_EMBEDDING_MODEL`, `HONCHO_EMBEDDING_DIMENSIONS`,
+`HONCHO_EMBEDDING_BASE_URL`, and `HONCHO_CLIENT_IPS` (space-separated agent
+IPs). `TEMPLATE` and `STORAGE` may also be set. An unattended run requires
+the mandatory values, template, storage, and `OPENWEBUI_ADMIN_TOKEN`. Set
+`HONCHO_EMBEDDING_BASE_URL=` to choose the router explicitly.
+`--dry-run` prints the plan without needing the token; preset `TEMPLATE` and
+`STORAGE` because their selection menus do not run in dry-run mode.
+
+Inside an existing Honcho CT, `install-target.sh` asks for the router base
+URL, embedding model and dimensions if they are unset. If the embedding base
+URL is unset, it asks for that `/v1` endpoint too; a blank answer explicitly
+uses the router's `/v1/embeddings` route. An unattended guest run needs
+`ROUTER_URL`, `HONCHO_EMBEDDING_MODEL`,
+`HONCHO_EMBEDDING_DIMENSIONS`, and `HONCHO_EMBEDDING_BASE_URL`. Set the last
+one to an empty string to choose the router explicitly. The guest installer
+does not create an LXC or use a CT ID. Use the Proxmox `--reconfigure` path
+when keys or router integration also need updating.
+
+Use `--reconfigure` to repair or update a CT this target created. Supply or
+enter the Honcho and router CT IDs; the provisioner reads the existing
+Honcho address from the CT. Supply the embedding model and dimensions again,
+plus its `/v1` URL if it does not use the router; the Open WebUI admin token
+is requested again. A dry-run reconfigure also needs `IP_CIDR` because it
+does not inspect the CT. Existing agent firewall allowances are preserved
+unless `HONCHO_CLIENT_IPS` is explicitly set. When adding Hermes or OpenClaw
+separately, set their actual IPs in `HONCHO_CLIENT_IPS`. Then run their
+provisioners with `HONCHO_URL` and the actual `HONCHO_CT_ID`; they pull the
+`osr` workspace key without putting it on a command line. For an external
+Honcho instance, supply `HONCHO_API_KEY_FILE`
 instead. Later `--reconfigure` runs of Hermes or OpenClaw keep the Honcho URL,
 key and firewall rule from the last run; set `HONCHO_CT_ID` again to fetch a
 new key, or `HONCHO_URL=` (empty) to turn Honcho off for that agent. A Honcho CT

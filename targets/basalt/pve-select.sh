@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read-only Proxmox template and storage menus. Keep the copy in each target
+# Proxmox template, storage, and required-input prompts. Keep the copy in each target
 # directory identical so a target can still be copied to a PVE host alone.
 
 pve_select_parse_status() {
@@ -55,6 +55,23 @@ pve_select_storage_rows() {
 
 pve_select_available() {
     [[ ${dry_run:-0} == 0 && ${NONINTERACTIVE:-false} != true && -t 0 ]]
+}
+
+# Never infer a new CT ID or address. A caller can preset the value, or an
+# interactive run asks for it before the Proxmox creation steps begin.
+pve_prompt_required() {
+    local variable=$1 label=$2 answer
+    [[ -z ${!variable:-} ]] || return 0
+    [[ ${NONINTERACTIVE:-false} != true && -t 0 ]] ||
+        die "Set $variable for unattended provisioning, or run interactively on the PVE host."
+    while true; do
+        IFS= read -r -p "$label: " answer || die "Input ended while reading $variable."
+        if [[ -n $answer ]]; then
+            printf -v "$variable" '%s' "$answer"
+            return 0
+        fi
+        printf '%s is required.\n' "$label" >&2
+    done
 }
 
 pve_select_template() {

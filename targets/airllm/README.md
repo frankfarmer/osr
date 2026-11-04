@@ -1,6 +1,12 @@
 # AirLLM inference target
 
-On an interactive Proxmox run, `provision-lxc.sh` lists downloaded compatible templates and active `rootdir` storage with enough free space for `ROOTFS_GB`. Set `TEMPLATE` and `STORAGE` to skip the menus. Dry runs make no Proxmox queries, so supply those values explicitly.
+On an interactive Proxmox run, `provision-lxc.sh` asks for an unused CT ID
+and CT IP/CIDR (or `dhcp`); a static address also asks for the gateway. It
+lists downloaded compatible templates and active `rootdir` storage with enough
+free space for `ROOTFS_GB`. Preset `CT_ID`, `IP_CIDR`, `GATEWAY`, `TEMPLATE`,
+and `STORAGE` to skip the corresponding prompts. No CT ID or IP is selected
+automatically. Dry runs make no Proxmox queries, so supply template and
+storage explicitly.
 
 An Ollama-compatible API in front of [AirLLM](https://github.com/lyogavin/airllm),
 so the smart router, LiteLLM and Open WebUI can use a model far larger than the

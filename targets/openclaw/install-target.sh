@@ -38,7 +38,11 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 usage() {
   cat <<'USAGE'
-Usage: ROUTER_URL=http://192.168.11.80:8000 bash install-target.sh [--dry-run]
+Usage: bash install-target.sh [--dry-run]
+
+Inside an existing OpenClaw CT, a direct interactive run asks for the router
+base URL when ROUTER_URL is unset. An unattended run must set ROUTER_URL.
+CT ID and CT IP are chosen by provision-lxc.sh on the Proxmox host.
 
 Installs OpenClaw (nvm, Node through nvm, npm install -g openclaw) and points
 its provider "osr" at a local direct dispatcher. The dispatcher uses the
@@ -312,10 +316,14 @@ targets_source=$TARGETS_FILE
 bind=loopback
 [[ $OPENCLAW_API != true && $OPENCLAW_DASHBOARD != true ]] || bind=lan
 
+if [[ -z $ROUTER_URL && ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
+  IFS= read -r -p 'Router base URL (http(s)://router-address:port): ' ROUTER_URL ||
+    die 'No router URL was entered.'
+fi
 [[ -n $ROUTER_URL ]] ||
-  die 'ROUTER_URL is unset. Resume from the Proxmox host with provision-lxc.sh --reconfigure; direct guest runs must set ROUTER_URL=http://router-address:8000.'
+  die 'ROUTER_URL is unset. Resume from the Proxmox host with provision-lxc.sh --reconfigure; unattended guest runs must set ROUTER_URL=http://router-address:8000.'
 [[ $ROUTER_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] ||
-  die 'ROUTER_URL must be an HTTP(S) host and port, such as http://192.168.11.80:8000.'
+  die 'ROUTER_URL must be an HTTP(S) host and port, such as http://router-address:8000.'
 ROUTER_URL=${ROUTER_URL%/}
 [[ -z $HONCHO_URL || $HONCHO_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] || die 'Invalid HONCHO_URL.'
 HONCHO_URL=${HONCHO_URL%/}

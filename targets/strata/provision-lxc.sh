@@ -8,9 +8,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/../nvidia-lxc.sh"
 usage() {
     cat <<'USAGE'
 Usage: bash provision-lxc.sh [--dry-run]
-   or: CT_ID=280 TEMPLATE=local:vztmpl/ubuntu-24.04-standard_<version>_amd64.tar.zst \
-       STORAGE=local-lvm IP_CIDR=192.0.2.80/24 GATEWAY=192.0.2.1 \
-       bash provision-lxc.sh [--dry-run]
+
+The installer asks for an unused CT ID, IP/CIDR (or dhcp), and a gateway
+for static IPs. Preset CT_ID, IP_CIDR and GATEWAY for unattended runs.
 
 Creates an unprivileged Proxmox VE 9 LXC, passes an NVIDIA GPU through, clones
 https://github.com/Niko1221/Strata.git inside the CT, runs Strata's Linux

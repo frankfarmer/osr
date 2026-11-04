@@ -73,6 +73,8 @@ pass 'an SSH key is passed as its content'
 refuse 'MEMORY_MB must be at least' MEMORY_MB=512
 refuse 'ROOTFS_GB must be at least' ROOTFS_GB=4
 refuse 'IP_CIDR' IP_CIDR=192.0.2.300/24
+refuse 'Set IP_CIDR for unattended provisioning' IP_CIDR=
+refuse 'Set GATEWAY for unattended provisioning' GATEWAY=
 refuse 'CT_ID' CT_ID=12
 refuse 'CT_HOSTNAME' CT_HOSTNAME='bad hostname'
 refuse 'CORES' CORES=0
@@ -180,9 +182,10 @@ has 'did not create CT 275'
 pass 'a cancelled community install is reported before checking readiness'
 
 : > "$log"
-out=$(real --create-only CT_ID=) || fail 'automatic CT ID lookup failed'
-grep -q '^community var_ctid=275 var_ram=1024 var_os=debian var_version=13$' "$log" || fail 'automatic ID presets changed'
-pass 'an omitted CT ID is read from the cluster and passed to the community script'
+if out=$(real --create-only CT_ID=); then fail 'an omitted CT ID was accepted'; fi
+has 'Set CT_ID for unattended provisioning'
+grep -q '^community ' "$log" && fail 'the community script ran without a chosen CT ID'
+pass 'an omitted CT ID is rejected before the community script runs'
 
 : > "$log"; rm -f "$tmp/pings"
 out=$(real) || fail 'a full run failed'

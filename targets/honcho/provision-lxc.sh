@@ -19,19 +19,31 @@ router_fw_with_honcho() {
 source "$(dirname -- "${BASH_SOURCE[0]}")/pve-select.sh"
 usage() {
   cat <<'USAGE'
-Usage: CT_ID=285 ROUTER_CT_ID=280 TEMPLATE=local:vztmpl/debian-13-standard_..._amd64.tar.zst \
-       STORAGE=local-lvm IP_CIDR=192.168.11.85/24 GATEWAY=192.168.11.1 \
-       OPENWEBUI_ADMIN_TOKEN=... bash provision-lxc.sh [--dry-run] [--reconfigure [--rotate-keys]]
+Usage: bash provision-lxc.sh [--dry-run] [--reconfigure [--rotate-keys]]
+
+Run as root on the Proxmox host. For a new CT, the installer asks for the
+Honcho CT ID and IP/CIDR, router/Open WebUI CT ID and IP, gateway, embedding
+model and dimensions, embedding endpoint, and optional Hermes/OpenClaw IPs.
+Set CT_ID, IP_CIDR, ROUTER_CT_ID, ROUTER_IP, GATEWAY,
+HONCHO_EMBEDDING_MODEL, HONCHO_EMBEDDING_DIMENSIONS,
+HONCHO_EMBEDDING_BASE_URL, and HONCHO_CLIENT_IPS to preset these answers.
+Unattended runs require the mandatory values as presets. The admin API token
+is requested without echo unless OPENWEBUI_ADMIN_TOKEN is already set.
 
 Creates an unprivileged Debian 13 LXC with native PostgreSQL/pgvector,
 Honcho API and deriver services, and Honcho's Streamable HTTP MCP server. The
 chat model uses the router; HONCHO_MODEL=fast by default. Set
 HONCHO_EMBEDDING_MODEL and HONCHO_EMBEDDING_DIMENSIONS for an embedding model.
 HONCHO_EMBEDDING_BASE_URL can point directly to its OpenAI-compatible /v1
-endpoint; by default Honcho asks the router /v1/embeddings. HONCHO_REF
+endpoint; set it to an empty string to choose the router /v1/embeddings route.
+HONCHO_REF
 (default v3.5.0) may select another upstream tag, main, or a commit. HONCHO_CLIENT_IPS is a space-separated list of agent CT addresses to
-allow through the Proxmox firewall. The router CT is always allowed.
+allow through the Proxmox firewall. The router CT is always allowed. A blank
+embedding URL uses the router and requires an embedding model mapped there.
 
+HONCHO_CONTEXT_TOKENS sets Honcho's token budgets for the model's context
+window (at least 8192); HONCHO_<SETTING> overrides one budget (see the
+README). Unset, they keep the CT's last values; set and empty, the default.
 HONCHO_STRUCTURED_OUTPUT_MODE=json_object is for a router model whose backend
 lacks JSON-schema output; the install probes the model with tools and
 structured output first (HONCHO_SKIP_CHAT_PROBE=true skips that). Another Bun
@@ -59,6 +71,7 @@ for arg in "$@"; do
 done
 CT_ID=${CT_ID:-}
 ROUTER_CT_ID=${ROUTER_CT_ID:-${ROUTER:-}}
+ROUTER_IP=${ROUTER_IP:-}
 TEMPLATE=${TEMPLATE:-}
 STORAGE=${STORAGE:-}
 IP_CIDR=${IP_CIDR:-}
@@ -77,6 +90,7 @@ HONCHO_MODEL=${HONCHO_MODEL:-fast}
 HONCHO_REF=${HONCHO_REF:-v3.5.0}
 HONCHO_EMBEDDING_MODEL=${HONCHO_EMBEDDING_MODEL:-}
 HONCHO_EMBEDDING_DIMENSIONS=${HONCHO_EMBEDDING_DIMENSIONS:-}
+embedding_url_explicit=${HONCHO_EMBEDDING_BASE_URL+x}
 HONCHO_EMBEDDING_BASE_URL=${HONCHO_EMBEDDING_BASE_URL:-}
 HONCHO_EMBEDDING_DIMENSIONS_MODE=${HONCHO_EMBEDDING_DIMENSIONS_MODE:-never}
 HONCHO_STRUCTURED_OUTPUT_MODE=${HONCHO_STRUCTURED_OUTPUT_MODE:-}
@@ -87,6 +101,52 @@ HONCHO_BUN_SHA256=${HONCHO_BUN_SHA256:-}
 HONCHO_BUN_BASELINE_SHA256=${HONCHO_BUN_BASELINE_SHA256:-}
 honcho_clients_explicit=${HONCHO_CLIENT_IPS+x}
 HONCHO_CLIENT_IPS=${HONCHO_CLIENT_IPS:-}
+
+if (( ! dry_run )); then [[ $(id -u) == 0 ]] || die 'Run as root on the Proxmox host.'; fi
+
+# Read only missing create-time network and model settings. Presets are still
+# checked by the validators below, and a noninteractive run never guesses IDs
+# or addresses. Keep reconfigure's existing-CT address discovery below.
+prompt_missing() {
+  local variable=$1 label=$2 answer
+  [[ -z ${!variable:-} ]] || return 0
+  [[ ${NONINTERACTIVE:-false} != true && -t 0 ]] ||
+    die "Set $variable before a noninteractive install ($label)."
+  while true; do
+    IFS= read -r -p "$label: " answer || die "No $label was entered."
+    [[ -n $answer ]] && { printf -v "$variable" '%s' "$answer"; return 0; }
+    printf '%s is required.\n' "$label" >&2
+  done
+}
+if [[ $mode == create ]]; then
+  printf 'Honcho needs a distinct static CT, a running router with Open WebUI, a tool-capable chat model, and a working embedding model.\n'
+  prompt_missing CT_ID 'Honcho CT ID'
+  prompt_missing IP_CIDR 'Honcho static IP/CIDR'
+  prompt_missing ROUTER_CT_ID 'Router and Open WebUI CT ID'
+  prompt_missing ROUTER_IP 'Router IP reachable from Honcho'
+  prompt_missing GATEWAY 'Honcho gateway IP'
+  printf 'Honcho will ask the router for chat model %s; it must support tools and structured output (set HONCHO_MODEL to change it).\n' "$HONCHO_MODEL"
+  prompt_missing HONCHO_EMBEDDING_MODEL 'Embedding model name'
+  prompt_missing HONCHO_EMBEDDING_DIMENSIONS 'Embedding vector dimensions'
+  if [[ -z $embedding_url_explicit ]]; then
+    [[ ${NONINTERACTIVE:-false} != true && -t 0 ]] ||
+      die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to choose the router explicitly.'
+    printf 'Embedding base URL: use the model host /v1 endpoint, or press Enter for the router /v1/embeddings route.\n'
+    IFS= read -r -p 'Embedding base URL (blank = router): ' HONCHO_EMBEDDING_BASE_URL ||
+      die 'No embedding endpoint choice was entered.'
+  fi
+  if [[ -z $honcho_clients_explicit && ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
+    printf 'Allow existing agent CTs through the Honcho firewall; leave either address blank if absent.\n'
+    IFS= read -r -p 'Hermes CT IP or IP/CIDR (optional): ' hermes_ip || die 'No Hermes address choice was entered.'
+    IFS= read -r -p 'OpenClaw CT IP or IP/CIDR (optional): ' openclaw_ip || die 'No OpenClaw address choice was entered.'
+    hermes_ip=${hermes_ip%%/*}
+    openclaw_ip=${openclaw_ip%%/*}
+    HONCHO_CLIENT_IPS="${hermes_ip:+$hermes_ip }${openclaw_ip:-}"
+  fi
+else
+  prompt_missing CT_ID 'Honcho CT ID'
+  prompt_missing ROUTER_CT_ID 'Router and Open WebUI CT ID'
+fi
 [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ && $ROUTER_CT_ID =~ ^[1-9][0-9]{2,8}$ ]] ||
   die 'Set valid CT_ID and ROUTER_CT_ID (both >=100).'
 if [[ $mode == reconfigure && -z $IP_CIDR && $dry_run == 0 ]]; then
@@ -115,6 +175,25 @@ if [[ -n $HONCHO_BUN_VERSION && $HONCHO_BUN_VERSION != 1.4.4 && -z $HONCHO_BUN_S
   die 'HONCHO_BUN_VERSION needs HONCHO_BUN_SHA256 (bun-linux-x64.zip) or HONCHO_BUN_BASELINE_SHA256 (no AVX2).'
 fi
 [[ $rotate_keys == false || $mode == reconfigure ]] || die '--rotate-keys needs --reconfigure: a new CT gets new keys anyway.'
+# Token budgets for small context windows; budgets.py in the CT checks ranges.
+# A set variable is passed on even when empty (that returns the setting to
+# Honcho's default); an unset one keeps the CT's last value.
+honcho_budget_names=(CONTEXT_TOKENS DERIVER_MAX_INPUT_TOKENS DIALECTIC_MAX_INPUT_TOKENS
+  DIALECTIC_MAX_OUTPUT_TOKENS DIALECTIC_SESSION_HISTORY_MAX_TOKENS SUMMARY_MAX_INPUT_TOKENS
+  SUMMARY_MAX_TOKENS_SHORT SUMMARY_MAX_TOKENS_LONG LLM_DEFAULT_MAX_TOKENS LLM_MAX_TOOL_OUTPUT_CHARS
+  DREAM_MAX_OUTPUT_TOKENS DREAM_DEDUCTION_MAX_TOOL_ITERATIONS DREAM_INDUCTION_MAX_TOOL_ITERATIONS
+  DREAM_ENABLED)
+budget_env=()
+for name in "${honcho_budget_names[@]}"; do
+  var=HONCHO_$name
+  [[ -n ${!var+set} ]] || continue
+  if [[ $name == DREAM_ENABLED ]]; then
+    [[ -z ${!var} || ${!var} =~ ^(true|false)$ ]] || die "$var must be true or false."
+  else
+    [[ ${!var} =~ ^[0-9]*$ ]] || die "$var must be a whole number of tokens (or characters)."
+  fi
+  budget_env+=("$var=${!var}")
+done
 [[ $HONCHO_REF =~ ^(main|v[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$ ]] || die 'Invalid HONCHO_REF.'
 [[ $BRIDGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid BRIDGE.'
 if [[ $mode == create ]]; then [[ $STORAGE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid STORAGE.'; fi
@@ -128,6 +207,7 @@ done
 [[ $IP_CIDR =~ ^[0-9]+(\.[0-9]+){3}/[0-9]{1,2}$ ]] || die 'Set a static IP_CIDR.'
 if [[ $mode == create ]]; then
   [[ $GATEWAY =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die 'Set a static GATEWAY.'
+  [[ $ROUTER_IP =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die 'Set ROUTER_IP to the router address reachable from Honcho.'
   [[ $TEMPLATE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/debian-13-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$ ]] ||
     die 'TEMPLATE must be a downloaded Debian 13 amd64 LXC template.'
 fi
@@ -135,10 +215,14 @@ for ip in $HONCHO_CLIENT_IPS; do
   [[ $ip =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "Invalid HONCHO_CLIENT_IPS address: $ip"
 done
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for file in install-target.sh honcho-api.service honcho-deriver.service honcho-mcp.service integrate-webui.py; do
+for file in install-target.sh budgets.py honcho-api.service honcho-deriver.service honcho-mcp.service integrate-webui.py; do
   [[ -r $source_dir/$file ]] || die "Missing $source_dir/$file"
 done
 honcho_ip=${IP_CIDR%/*}
+[[ $mode != create || $honcho_ip != "$ROUTER_IP" ]] || die 'Honcho and router IP addresses must differ.'
+for ip in $HONCHO_CLIENT_IPS; do
+  [[ $ip != "$honcho_ip" ]] || die 'An agent IP address must differ from the Honcho IP.'
+done
 stage=$(mktemp -d "${TMPDIR:-/tmp}/honcho-target.XXXXXX")
 router_stage="/root/honcho-integration-$$"
 rotation_stage="/root/honcho-rotation-$$"
@@ -256,19 +340,34 @@ trap cleanup EXIT
 if (( dry_run )); then
   printf 'Would %s Honcho CT %s at %s with %s, then register MCP in router CT %s.\n' \
     "$mode" "$CT_ID" "$honcho_ip" "$HONCHO_REF" "$ROUTER_CT_ID"
+  printf 'Router IP: %s; chat model: %s; embedding: %s (%s dimensions) via %s.\n' \
+    "${ROUTER_IP:-detected from router route}" "$HONCHO_MODEL" "$HONCHO_EMBEDDING_MODEL" \
+    "$HONCHO_EMBEDDING_DIMENSIONS" "${HONCHO_EMBEDDING_BASE_URL:-router /v1/embeddings}"
+  printf 'Agent IPs allowed to Honcho: %s.\n' "${HONCHO_CLIENT_IPS:-none}"
   [[ $HONCHO_ROUTER_FIREWALL == false ]] ||
     printf 'Would admit %s to the router API in /etc/pve/firewall/%s.fw, if that file exists.\n' "$honcho_ip" "$ROUTER_CT_ID"
   [[ $rotate_keys == false ]] || printf 'Would replace the JWT secret and both Honcho keys.\n'
+  (( ${#budget_env[@]} == 0 )) || printf 'Would pass these budget settings to the CT: %s\n' "${budget_env[*]}"
   exit 0
 fi
-[[ $(id -u) == 0 ]] || die 'Run as root on the Proxmox host.'
 # Checked before anything is created: the run ends by registering MCP.
-[[ -n ${OPENWEBUI_ADMIN_TOKEN:-} ]] || die 'OPENWEBUI_ADMIN_TOKEN is needed to register Honcho MCP in Open WebUI.'
 for tool in pct pvesh pvesm curl; do command -v "$tool" >/dev/null || die "Missing $tool"; done
+if [[ -z ${OPENWEBUI_ADMIN_TOKEN:-} ]]; then
+  [[ ${NONINTERACTIVE:-false} != true && -t 0 ]] ||
+    die 'Set OPENWEBUI_ADMIN_TOKEN to register Honcho MCP in Open WebUI.'
+  IFS= read -r -s -p 'Open WebUI admin API token (required): ' OPENWEBUI_ADMIN_TOKEN ||
+    die 'No Open WebUI admin token was entered.'
+  printf '\n'
+  [[ -n $OPENWEBUI_ADMIN_TOKEN ]] || die 'Open WebUI admin token is required.'
+fi
 pct status "$ROUTER_CT_ID" 2>/dev/null | grep -q 'status: running' || die "Router CT $ROUTER_CT_ID is not running."
-router_ip=$(pct exec "$ROUTER_CT_ID" -- ip -4 route get "$honcho_ip" |
+router_source_ip=$(pct exec "$ROUTER_CT_ID" -- ip -4 route get "$honcho_ip" |
   sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n1)
-[[ $router_ip =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die 'Cannot detect router source IP for Honcho.'
+[[ $router_source_ip =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die 'Cannot detect router source IP for Honcho.'
+if [[ -n $ROUTER_IP && $ROUTER_IP != "$router_source_ip" ]]; then
+  die "ROUTER_IP=$ROUTER_IP differs from router CT $ROUTER_CT_ID route source $router_source_ip for Honcho $honcho_ip."
+fi
+router_ip=${ROUTER_IP:-$router_source_ip}
 router_port=$(pct exec "$ROUTER_CT_ID" -- sh -c "sed -n 's/^ROUTER_PORT=//p' /app/router/.env | head -n1" | tr -d '\r\n')
 router_port=${router_port:-8000}
 [[ $router_port =~ ^[0-9]{2,5}$ ]] || die 'Invalid router port.'
@@ -357,7 +456,7 @@ for attempt in {1..60}; do
   sleep 2
 done
 pct exec "$CT_ID" -- install -d -m 0700 /root/honcho-deploy
-for file in install-target.sh honcho-api.service honcho-deriver.service honcho-mcp.service; do
+for file in install-target.sh budgets.py honcho-api.service honcho-deriver.service honcho-mcp.service; do
   pct push "$CT_ID" "$source_dir/$file" "/root/honcho-deploy/$file" --perms 0600
 done
 pct push "$CT_ID" "$stage/router-api-key" /root/honcho-deploy/router-api-key --perms 0600
@@ -377,7 +476,7 @@ pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" "HONCHO_MODEL=$HONCHO_MODEL" \
   "HONCHO_EMBEDDING_BASE_URL=$HONCHO_EMBEDDING_BASE_URL" \
   "HONCHO_EMBEDDING_DIMENSIONS_MODE=$HONCHO_EMBEDDING_DIMENSIONS_MODE" \
   "HONCHO_STRUCTURED_OUTPUT_MODE=$HONCHO_STRUCTURED_OUTPUT_MODE" \
-  "HONCHO_SKIP_CHAT_PROBE=$HONCHO_SKIP_CHAT_PROBE" "HONCHO_ROTATE_KEYS=$rotate_keys" \
+  "HONCHO_SKIP_CHAT_PROBE=$HONCHO_SKIP_CHAT_PROBE" "HONCHO_ROTATE_KEYS=$rotate_keys" "${budget_env[@]}" \
   ${HONCHO_BUN_VERSION:+"HONCHO_BUN_VERSION=$HONCHO_BUN_VERSION"} \
   ${HONCHO_BUN_SHA256:+"HONCHO_BUN_SHA256=$HONCHO_BUN_SHA256"} \
   ${HONCHO_BUN_BASELINE_SHA256:+"HONCHO_BUN_BASELINE_SHA256=$HONCHO_BUN_BASELINE_SHA256"} \

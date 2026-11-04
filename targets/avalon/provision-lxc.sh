@@ -8,9 +8,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/../nvidia-lxc.sh"
 usage() {
     cat <<'USAGE'
 Usage: bash provision-lxc.sh [--dry-run]
-   or: CT_ID=283 TEMPLATE=local:vztmpl/ubuntu-24.04-standard_<version>_amd64.tar.zst \
-       STORAGE=local-lvm IP_CIDR=192.0.2.83/24 GATEWAY=192.0.2.1 \
-       bash targets/avalon/provision-lxc.sh [--dry-run]
+
+The installer asks for an unused CT ID, IP/CIDR (or dhcp), and a gateway
+for static IPs. Preset CT_ID, IP_CIDR and GATEWAY for unattended runs.
 
 Creates an unprivileged Proxmox VE 9 LXC, passes one GPU through, clones
 https://github.com/freriadoc/Avalon.git inside the CT, builds its llama-server
@@ -188,6 +188,9 @@ else
     template_names='Ubuntu 22.04/24.04/26.04 or Debian 12/13'
 fi
 
+pve_prompt_required CT_ID 'New Avalon CT ID (unused, at least 100)'
+pve_prompt_required IP_CIDR 'Avalon IP/CIDR (or dhcp)'
+if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'Avalon gateway IP'; fi
 [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] || die 'CT_ID must be an unused numeric ID of 100 or more.'
 pve_select_template TEMPLATE "$template_re"
 positive_int ROOTFS_GB "$ROOTFS_GB"

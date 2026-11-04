@@ -1,6 +1,11 @@
 # ComfyUI image generation target
 
-On an interactive new install, `provision-lxc.sh` lists active LXC template storage and `rootdir` storage with enough free space for `ROOTFS_GB`. Set `TEMPLATE_STORAGE` and `STORAGE` to skip the menus. The community script chooses or downloads its Debian template on the selected template storage. `--integrate-only` and dry runs skip these Proxmox queries.
+On an interactive new install, `provision-lxc.sh` asks for an unused CT ID,
+the CT IP/CIDR (or `dhcp`), and a gateway for a static IP. It also asks for
+the router/Open WebUI CT ID or IP. It lists eligible template and `rootdir`
+storage. Preset `CT_ID`, `IP_CIDR`, `GATEWAY`, `ROUTER`,
+`TEMPLATE_STORAGE`, and `STORAGE` to skip those prompts. No CT ID or IP is
+selected automatically. `--integrate-only` and dry runs skip Proxmox queries.
 
 [ComfyUI](https://github.com/Comfy-Org/ComfyUI) in its own CT, used by the
 router's Open WebUI as its **image generation engine** (the image button in
@@ -49,7 +54,7 @@ community unit is never edited.
 On the PVE host, from the repository checkout (the router installer does the
 same when **comfyui** is picked from its targets menu):
 
-`bash targets/comfyui/provision-lxc.sh` prompts for the **new ComfyUI CT ID**
+`bash targets/comfyui/provision-lxc.sh` prompts for the **new ComfyUI CT ID and IP/CIDR**
 and the existing Open WebUI CT ID or IP address. It never chooses a fresh CT ID
 on a rerun. For a ComfyUI CT already installed, run
 `bash targets/comfyui/provision-lxc.sh --integrate-only` and enter its existing
@@ -57,10 +62,9 @@ CT ID to register it with Open WebUI again. To resume an interrupted guest
 install or upgrade ComfyUI, use the guest `install-target.sh` described below.
 
 ```bash
-CT_ID=286 IP_CIDR=192.0.2.86/24 GATEWAY=192.0.2.1 STORAGE=local-lvm ROUTER=280 \
 bash targets/comfyui/provision-lxc.sh                      # klein-4b
 
-COMFYUI_IMAGE_VARIANT=klein-9b CT_ID=287 ... bash targets/comfyui/provision-lxc.sh
+COMFYUI_IMAGE_VARIANT=klein-9b bash targets/comfyui/provision-lxc.sh
 # asks for a Hugging Face token (or set HF_TOKEN in the environment)
 ```
 

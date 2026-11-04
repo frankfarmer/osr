@@ -75,20 +75,14 @@ nvm downloads Node from nodejs.org and checks it against nodejs.org's
 
 Run `bash targets/openclaw/provision-lxc.sh` interactively to enter the
 existing router CT ID or IP address, then a separate **new OpenClaw CT ID**,
-Debian template, storage and network settings. To resume or update an
+Debian template, storage and network settings. The new CT's static IP/CIDR
+and gateway are required and prompted when unset; no CT ID or IP is selected
+automatically. To resume or update an
 existing OpenClaw CT, use `bash targets/openclaw/provision-lxc.sh --reconfigure`
 with that **existing OpenClaw CT ID**. `--integrate-only` registers its Gateway
 in Open WebUI again.
 
 ```bash
-CT_ID=283 ROUTER=280 \
-TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst \
-STORAGE=local-lvm IP_CIDR=192.168.11.83/24 GATEWAY=192.168.11.1 \
-bash targets/openclaw/provision-lxc.sh --dry-run          # print the plan
-
-CT_ID=283 ROUTER=280 \
-TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst \
-STORAGE=local-lvm IP_CIDR=192.168.11.83/24 GATEWAY=192.168.11.1 \
 bash targets/openclaw/provision-lxc.sh
 ```
 
@@ -159,6 +153,12 @@ models says "nothing to do". A failure while configuring restores
 `openclaw.json`, `.env`, the units and the dispatcher's files, and
 health-checks the previous Gateway: it reports "running again" or "did not
 become healthy either". Node and OpenClaw themselves are not rolled back.
+
+When run directly inside an existing CT, `install-target.sh` asks for the
+router base URL if `ROUTER_URL` is unset. Set it explicitly for unattended
+guest runs. The guest installer does not need a CT ID or the OpenClaw CT IP;
+the Proxmox `provision-lxc.sh` asks for those when creating the container.
+Use `--reconfigure` on the Proxmox host to refresh router and backend keys.
 
 ## Open WebUI
 

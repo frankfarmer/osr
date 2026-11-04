@@ -16,7 +16,8 @@ runs install-target.sh inside it.
 Missing settings are prompted on a terminal: CT ID, template, IPv4/CIDR or
 dhcp, gateway, root disk storage. Downloaded templates and active rootdir
 storage have numbered selectors. NONINTERACTIVE=true disables prompts; then
-CT_ID, TEMPLATE, STORAGE and IP_CIDR are required.
+CT_ID, TEMPLATE, STORAGE and IP_CIDR are required. The CT ID and address are
+entered explicitly; neither is suggested or inferred.
   CT_ID=<id>  TEMPLATE=<storage>:vztmpl/<debian-12|debian-13|ubuntu-24.04|ubuntu-26.04>-..._amd64.tar.zst
   STORAGE=<rootdir storage>  IP_CIDR=<a.b.c.d/nn|dhcp>  GATEWAY=<a.b.c.d>
 Optional: CT_HOSTNAME=airllm-target, BRIDGE=vmbr0, NAMESERVER, VLAN_TAG,
@@ -150,9 +151,7 @@ AIRLLM_MODEL_ALIAS=${AIRLLM_MODEL_ALIAS:-}
 min_disk=$(model_disk_gb "$AIRLLM_MODEL_ID")
 ROOTFS_GB=${ROOTFS_GB:-$min_disk}
 
-next_id=''
-(( dry_run )) || next_id=$(pvesh get /cluster/nextid 2>/dev/null || true)
-prompt_container_setting CT_ID 'CT ID' "$next_id" valid_container_id 'Use a free numeric ID of 100 or more.'
+prompt_container_setting CT_ID 'CT ID (required)' '' valid_container_id 'Use a free numeric ID of 100 or more.'
 pve_select_template TEMPLATE '^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/(debian-1[23]|ubuntu-2[46]\.04)-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
 positive_int ROOTFS_GB "$ROOTFS_GB"
 pve_select_storage STORAGE rootdir "$ROOTFS_GB"

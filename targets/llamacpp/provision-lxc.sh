@@ -9,14 +9,13 @@ usage() {
 Usage: GPU_DEVICES='/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools' \
        bash provision-lxc.sh [--dry-run]    # select container settings and create the CT
 
-       CT_ID=250 TEMPLATE=local:vztmpl/debian-12-standard_<version>_amd64.tar.zst \
-       STORAGE=local-lvm IP_CIDR=192.0.2.50/24 GATEWAY=192.0.2.1 \
        MODEL_ALIAS=<name:tag> MODEL_DOWNLOAD_URL=https://huggingface.co/org/repo/resolve/revision/model.gguf \
        GPU_DEVICES='/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools' \
        bash provision-lxc.sh --install-target [--dry-run]
 
 Missing settings are prompted on a terminal: CT ID, template, name, IPv4/CIDR
 or DHCP, bridge/gateway, CPU cores, RAM (MiB), root disk storage ID and size (GiB).
+The CT ID and address are required choices; neither is suggested or inferred.
 Choose downloaded Debian templates (12 or 13 for CUDA and CPU builds, 13 for
 Vulkan; Debian 13 is listed first) and active rootdir storage by number.
 Each template includes its storage ID. Enter m for manual entry; if inventory
@@ -418,12 +417,7 @@ configure_gpu_devices() {
 configure_container() {
     NONINTERACTIVE=${NONINTERACTIVE:-false}
     [[ $NONINTERACTIVE == true || $NONINTERACTIVE == false ]] || die 'NONINTERACTIVE must be true or false.'
-    local next_id=''
-    if [[ -z ${CT_ID:-} ]] && container_prompt_available && command -v pvesh >/dev/null; then
-        next_id=$(pvesh get /cluster/nextid 2>/dev/null) || next_id=''
-        valid_container_id "$next_id" || next_id=''
-    fi
-    prompt_container_setting CT_ID 'Container ID' "$next_id" valid_container_id 'Enter an unused CT ID from 100 to 999999999.'
+    prompt_container_setting CT_ID 'Container ID (required)' '' valid_container_id 'Enter an unused CT ID from 100 to 999999999.'
     if [[ $(template_release) == 13 ]]; then
         select_container_setting TEMPLATE 'CT template volume' valid_container_template \
             'Enter an existing Debian 13 template volume (Vulkan needs Debian 13), e.g. local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst.' list_container_templates
@@ -432,7 +426,7 @@ configure_container() {
             'Enter an existing Debian 13 or 12 template volume, e.g. local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst.' list_container_templates
     fi
     prompt_container_setting CT_HOSTNAME 'Container name' llama-target valid_container_name 'Enter a DNS hostname label, up to 63 characters.'
-    prompt_container_setting IP_CIDR 'IPv4 address/CIDR or dhcp' '' valid_container_ip 'Enter a valid IPv4/CIDR (e.g. 192.168.11.30/24), or dhcp.'
+    prompt_container_setting IP_CIDR 'IPv4 address/CIDR or dhcp' '' valid_container_ip 'Enter a valid IPv4/CIDR (e.g. 192.0.2.30/24), or dhcp.'
     prompt_container_setting BRIDGE 'Network bridge' vmbr0 valid_container_bridge 'Enter a Proxmox bridge name, e.g. vmbr0.'
     if [[ $IP_CIDR == dhcp ]]; then
         [[ -z ${GATEWAY:-} ]] || die 'Do not set GATEWAY with IP_CIDR=dhcp.'

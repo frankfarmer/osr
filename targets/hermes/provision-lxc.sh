@@ -13,9 +13,6 @@ note() { printf '%s\n' "$*" >&2; }
 usage() {
   cat <<'USAGE'
 Usage: bash provision-lxc.sh [--dry-run] [--reconfigure | --integrate-only]
-   or: CT_ID=282 ROUTER=280 TEMPLATE=local:vztmpl/debian-13-standard_..._amd64.tar.zst \
-       STORAGE=local-lvm IP_CIDR=192.168.11.82/24 GATEWAY=192.168.11.1 \
-       bash provision-lxc.sh [--dry-run] [--reconfigure | --integrate-only]
 
 Creates a dedicated unprivileged Debian 12/13 LXC, installs Hermes Agent with
 its official installer, configures a CT-local dispatcher to discover models
@@ -24,8 +21,8 @@ model "hermes-agent". It asks for an Open WebUI admin API key or session JWT
 unless OPENWEBUI_ADMIN_TOKEN is set (or OPENWEBUI=false).
 
 The router is given as ROUTER:
-  ROUTER=280                a CT on this Proxmox host, reached with pct
-  ROUTER=192.168.11.80      any LXC or VM, reached as root over SSH
+  ROUTER=<CT ID>            a CT on this Proxmox host, reached with pct
+  ROUTER=<IP or hostname>   any LXC or VM, reached as root over SSH
 When ROUTER is not set, the script asks for it. ROUTER_CT_ID or ROUTER_SSH_HOST
 force one kind.
 
@@ -533,7 +530,7 @@ fi
 [[ $TASK_MODEL != "$HERMES_API_MODEL_NAME" ]] || die 'TASK_MODEL must be a router model, not Hermes itself.'
 if [[ -n $ROUTER_URL ]]; then
   [[ $ROUTER_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}/?$ ]] ||
-    die 'ROUTER_URL must be an HTTP(S) host and port, such as http://192.168.11.80:8000 (no /v1).'
+    die 'ROUTER_URL must be an HTTP(S) host and port, such as http://router-address:8000 (no /v1).'
   ROUTER_URL=${ROUTER_URL%/}
 fi
 [[ $HERMES_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HERMES_MODEL.'

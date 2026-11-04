@@ -67,4 +67,13 @@ dry_run=1
 TEMPLATE=''
 pve_select_template TEMPLATE '^.*$' <<< ''
 [[ -z $TEMPLATE ]] || die 'dry run queried the template menu'
-printf 'Template and storage selector tests passed.\n'
+CT_ID=159
+pve_prompt_required CT_ID 'Container ID'
+[[ $CT_ID == 159 ]] || die 'an explicit CT ID was changed'
+CT_ID=''
+NONINTERACTIVE=true
+if message=$(pve_prompt_required CT_ID 'Container ID' 2>&1); then
+    die 'an unattended install accepted a missing CT ID'
+fi
+[[ $message == *'Set CT_ID for unattended provisioning'* ]] || die "missing CT ID gave the wrong error: $message"
+printf 'Template, storage and required-input selector tests passed.\n'

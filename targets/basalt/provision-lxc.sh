@@ -14,9 +14,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/../nvidia-lxc.sh"
 usage() {
     cat <<'USAGE'
 Usage: bash provision-lxc.sh [--dry-run]
-   or: CT_ID=250 TEMPLATE=local:vztmpl/ubuntu-24.04-standard_<version>_amd64.tar.zst \
-       STORAGE=local-lvm IP_CIDR=192.0.2.80/24 GATEWAY=192.0.2.1 \
-       bash targets/basalt/provision-lxc.sh [--dry-run]
+
+The installer asks for an unused CT ID, IP/CIDR (or dhcp), and a gateway
+for static IPs. Preset CT_ID, IP_CIDR and GATEWAY for unattended runs.
 
 Creates an unprivileged Proxmox VE 9 LXC, passes an NVIDIA GPU through, clones
 https://github.com/jesdga95/basalt.git inside the CT, installs host-matched
@@ -130,6 +130,9 @@ BASALT_PORT=${BASALT_PORT:-8080}
 BASALT_READY_TIMEOUT=${BASALT_READY_TIMEOUT:-3600}
 BASALT_ALLOW_NO_KEY=${BASALT_ALLOW_NO_KEY:-false}
 
+pve_prompt_required CT_ID 'New Basalt CT ID (unused, at least 100)'
+pve_prompt_required IP_CIDR 'Basalt IP/CIDR (or dhcp)'
+if [[ $IP_CIDR != dhcp ]]; then pve_prompt_required GATEWAY 'Basalt gateway IP'; fi
 [[ $CT_ID =~ ^[1-9][0-9]{2,8}$ ]] || die 'CT_ID must be an unused numeric ID of 100 or more.'
 pve_select_template TEMPLATE '^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/(ubuntu-(22\.04|24\.04|26\.04)|debian-(12|13))-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
 positive_int ROOTFS_GB "$ROOTFS_GB"
