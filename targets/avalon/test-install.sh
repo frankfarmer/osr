@@ -348,14 +348,14 @@ grep -q -- "$key" "$envfile" && fail 'the key is in the unit environment'
 grep -q -- "$key" "$log" && fail 'the key reached a command line'
 contains "rocm-toolkit.sh --check ROCM_VERSION=7.2.4 ROCM_DIR=$rocm" "$log"
 contains 'The AMD card is gfx1100.' "$tmp_root/out"
-contains 'context 262144 tokens' "$tmp_root/out"
+grep -q 'of VRAM: context' "$tmp_root/out" && fail 'the default context was sized from the VRAM'
 contains '-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100' "$log"
 contains "-DCMAKE_CXX_COMPILER=$rocm/bin/amdclang++" "$log"
 contains "ROCM_PATH=$rocm" "$log"
 contains 'cmake --build build --target llama-server' "$log"
 contains 'usermod -aG video avalon' "$log"
 contains 'systemctl enable avalon.service' "$log"
-contains ' -c 262144 ' "$envfile"
+contains ' -c 65536 ' "$envfile"
 contains 'gpu_target=gfx1100' "$tree/etc/avalon-target/installed-settings"
 contains 'AVALON_BACKEND=rocm' "$tree/etc/avalon-target/installed-env"
 pass 'fresh ROCm install as the avalon account: llama-server built for the card'\''s gfx target, the key only in root:avalon files'
@@ -545,11 +545,18 @@ grep -q "download ${MTP_FILE#MTP/}" "$log" && fail 'the MTP head was downloaded 
 grep -q 'draft-mtp' "$envfile" && fail 'MTP arguments without MTP'
 pass 'AVALON_MTP=false skips the draft head and its arguments'
 
+reset_tree
+AVALON_CONTEXT=auto run_target > "$tmp_root/out" 2>&1 || { cat "$tmp_root/out"; fail 'auto context install'; }
+contains 'context 262144 tokens' "$tmp_root/out"
+contains ' -c 262144 ' "$envfile"
+contains 'AVALON_CONTEXT=262144' "$tree/etc/avalon-target/installed-env"
+pass 'AVALON_CONTEXT=auto gives the full 256k on a 20 GB card'
+
 FAKE_VRAM_BYTES=17163091968 reset_tree
-run_target > "$tmp_root/out" 2>&1 || { cat "$tmp_root/out"; fail 'install on a 16 GB card'; }
+AVALON_CONTEXT=auto run_target > "$tmp_root/out" 2>&1 || { cat "$tmp_root/out"; fail 'install on a 16 GB card'; }
 contains 'The GPU has 16368 MiB of VRAM: context 65536 tokens.' "$tmp_root/out"
 contains ' -c 65536 ' "$envfile"
-pass 'a 16 GB card gets the 64k context upstream suggests below 20 GB'
+pass 'with auto, a 16 GB card gets the 64k context upstream suggests below 20 GB'
 
 # --- CUDA ---------------------------------------------------------------------
 FAKE_NVIDIA=1 reset_tree
@@ -560,7 +567,7 @@ contains '-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89' "$log"
 contains "-DCMAKE_CUDA_COMPILER=$nvcc" "$log"
 grep -q 'rocm-toolkit.sh' "$log" && fail 'a CUDA install used the ROCm installer'
 contains 'AVALON_BACKEND=cuda' "$tree/etc/avalon-target/installed-env"
-contains ' -c 262144 ' "$envfile"
+contains ' -c 65536 ' "$envfile"
 pass 'without /dev/kfd the target builds with CUDA for GPU 0'\''s compute capability'
 
 FAKE_NVIDIA=1 reset_tree

@@ -339,13 +339,19 @@ export MODEL_QUANTIZATION=Q4_K_M
 export BACKEND=cuda
 unset CUDA_COMPILER  # Let the installer discover the installed nvcc.
 export CUDA_ARCHITECTURES=auto  # or a value from the table above
-export CONTEXT_SIZE=8192 PARALLEL_SLOTS=1 THREADS=8 BUILD_JOBS=4
+export CONTEXT_SIZE=65536 PARALLEL_SLOTS=1 THREADS=8 BUILD_JOBS=4
 export GPU_LAYERS=auto  # preserve llama.cpp VRAM auto-fitting
 bash install-target.sh
 ```
 
 Replace the example alias and metadata with the **actual** model's values;
-parameter size influences the smart router's selection. The installer creates
+parameter size influences the smart router's selection. `CONTEXT_SIZE`
+(65536 by default) is shared by the `PARALLEL_SLOTS`, so each request gets
+`CONTEXT_SIZE / PARALLEL_SLOTS` tokens; agents need 65536 per request. On a
+card under 16 GB, a 65536-token KV cache may not fit beside the model: lower
+it, quantize the cache (`--cache-type-k q8_0 --cache-type-v q8_0` in
+`LLAMA_EXTRA_ARGS`) or use a smaller GGUF. The router installer asks for the
+per-request window and sets `CONTEXT_SIZE` to it times the slots. The installer creates
 the `llama-target` account (group 993), builds the server, installs the bridge
 and units, and enables the services. It leaves them stopped after downloading
 or staging the model. It refuses to overwrite an existing target installation

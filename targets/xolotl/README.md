@@ -140,7 +140,7 @@ Settings (environment variables of either script):
 | `XOLOTL_CUDA_VERSION` | `13.0` | the toolkit the engine is built with (12.8 or newer; RTX 50 needs 13.x) |
 | `XOLOTL_CUDA_ARCH` | `auto` | the GPU's compute capability as a number (`86`, `89`, `120`); `auto` reads GPU 0 |
 | `XOLOTL_PORT` | `8080` | the API port |
-| `XOLOTL_CONTEXT` | `131072` | the context (`--ctx`); the engine supports up to 512K with its 4-bit KV cache |
+| `XOLOTL_CONTEXT` | `65536` | the context (`--ctx`); the engine supports up to 512K with its 4-bit KV cache, and upstream's own default on a 24 GB card is 131072 |
 | `XOLOTL_ARENA_GIB` | `60` | the pinned RAM expert arena (`--arena-gib`) |
 | `XOLOTL_DSPARK` | `true` | speculative decoding with the DSpark sidecar; `false` skips its 5.7 GB download and keeps ~2.9 GB of VRAM free for experts |
 | `XOLOTL_MODEL_NAME` | `deepseek-v4.1-flash` | the model id the API lists |

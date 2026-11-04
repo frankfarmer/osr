@@ -71,6 +71,11 @@ _DEFAULTS = {
         # is known to lack tool support. false: route it anyway, flagged with
         # an X-Router-Warning header.
         "tools_strict": "false",
+        # Server kinds listed at /v1/models whose text models are reported
+        # tool-capable. Their APIs say nothing per model, but each of these
+        # servers parses "tools" and returns OpenAI tool_calls. A kind left
+        # out is reported unknown. Blank: none.
+        "tool_kinds": "strata, basalt, maya, xolotl, avalon",
     },
     "http": {
         # Seconds to establish a TCP connection to a backend. Short on purpose:
@@ -354,6 +359,11 @@ if TOOLS_MIN_CLASS and TOOLS_MIN_CLASS not in CLASS_ORDER:
                 "or blank)", TOOLS_MIN_CLASS, ", ".join(CLASS_ORDER))
     TOOLS_MIN_CLASS = ""
 TOOLS_STRICT = _cfg.getboolean("classification", "tools_strict")
+TOOL_KINDS = frozenset(k for k in _json_list(_cfg, "classification", "tool_kinds")
+                       if k in OPENAI_KINDS)
+for _kind in sorted(set(_json_list(_cfg, "classification", "tool_kinds")) - TOOL_KINDS):
+    log.warning("ignoring [classification] tool_kinds entry %r (use %s)",
+                _kind, ", ".join(sorted(OPENAI_KINDS)))
 CONNECT_TIMEOUT = _cfg.getfloat("http", "connect_timeout_seconds")
 READ_TIMEOUT = _cfg.getfloat("http", "read_timeout_seconds")
 
@@ -699,6 +709,8 @@ async def fetch_openai_models(client: httpx.AsyncClient, server: str) -> tuple:
             if not modalities and isinstance(architecture, dict):
                 modalities = architecture.get("input_modalities") or []
             caps = ["completion"] + (["vision"] if "image" in modalities else [])
+            outputs = architecture.get("output_modalities") if isinstance(architecture, dict) else None
+            meta = model.get("meta") if isinstance(model.get("meta"), dict) else {}
             state = model.get("status", model.get("state"))
             if isinstance(state, dict):
                 state = state.get("value")
@@ -711,10 +723,17 @@ async def fetch_openai_models(client: httpx.AsyncClient, server: str) -> tuple:
                    "details": {"parameter_size": size},
                    "loaded": state == "loaded" if state is not None else None,
                    # Field names used by OpenAI-style servers (vLLM-style
-                   # max_model_len included); none of them is required.
+                   # max_model_len included), then the served context that
+                   # llama-server and Strata-style servers give as meta.n_ctx
+                   # (not n_ctx_train, the model's own limit). None required.
                    "context_length": next(filter(None, (
-                       positive_int(model.get(k)) for k in
-                       ("context_length", "max_model_len", "context_window"))), None)}
+                       *(positive_int(model.get(k)) for k in
+                         ("context_length", "max_model_len", "context_window")),
+                       positive_int(meta.get("n_ctx")))), None)}
+            # An image generator listed beside the chat model (Strata's
+            # /v1/images model) outputs no text, so it takes no tools.
+            if server_kind(server) in TOOL_KINDS:
+                raw["tools"] = True if not isinstance(outputs, list) or "text" in outputs else None
             entries.append(build_entry(server, raw, caps))
         return server, entries, None
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:

@@ -62,7 +62,7 @@ Environment:
   BASALT_HF_REPO=https://huggingface.co/jesdga/Qwen3.8-Flash-Next-Basalt
   BASALT_ALIAS=qwen3.8-flash-next   (the served model name)
   BASALT_GPUS=0                     (--gpu list, e.g. 0 or 0,1)
-  BASALT_CONTEXT=32768              (maximum context tokens)
+  BASALT_CONTEXT=65536              (maximum context tokens)
   BASALT_PORT=8080
   BASALT_READY_TIMEOUT=3600         (seconds; the model load is long)
   BASALT_ALLOW_NO_KEY=false         (true: accept an unauthenticated API)
@@ -741,7 +741,7 @@ BASALT_HF_REPO=${BASALT_HF_REPO:-https://huggingface.co/jesdga/Qwen3.8-Flash-Nex
 BASALT_MODEL=${BASALT_MODEL:-Qwen3.8-FN-GSQ-RCO-IQ3_S.basalt}
 BASALT_ALIAS=${BASALT_ALIAS:-qwen3.8-flash-next}
 BASALT_GPUS=${BASALT_GPUS:-0}
-BASALT_CONTEXT=${BASALT_CONTEXT:-32768}
+BASALT_CONTEXT=${BASALT_CONTEXT:-65536}
 BASALT_PORT=${BASALT_PORT:-8080}
 BASALT_READY_TIMEOUT=${BASALT_READY_TIMEOUT:-3600}
 BASALT_ALLOW_NO_KEY=${BASALT_ALLOW_NO_KEY:-false}

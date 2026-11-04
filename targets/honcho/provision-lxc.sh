@@ -16,6 +16,34 @@ router_fw_with_honcho() {
   ' "$1"
 }
 # End router firewall helper.
+# Honcho firewall helpers
+# honcho_rules ROUTER_IP [AGENT_IP...]: the Honcho CT's inbound rules. The
+# router (Open WebUI) and every agent reach the API (8000) and MCP (3000):
+# Hermes and OpenClaw use the API, DeepSeek Harness the MCP server, and each
+# holds the same workspace key. An agent's MCP rule has its own tag, so the
+# router stays distinguishable when the rules are read back.
+honcho_rules() {
+  local router=$1 ip
+  shift
+  for ip in "$router" "$@"; do
+    printf 'IN ACCEPT -source %s/32 -p tcp -dport 8000 -log nolog # osr-honcho-api\n' "$ip"
+    if [[ $ip == "$router" ]]; then
+      printf 'IN ACCEPT -source %s/32 -p tcp -dport 3000 -log nolog # osr-honcho-mcp\n' "$ip"
+    else
+      printf 'IN ACCEPT -source %s/32 -p tcp -dport 3000 -log nolog # osr-honcho-client-mcp\n' "$ip"
+    fi
+  done
+}
+# honcho_fw_clients FILE: the agent IPs FILE admits (API rules that are not the
+# router's), space-separated.
+honcho_fw_clients() {
+  awk '
+    / # osr-honcho-api$/ { split($4, parts, "/"); clients[parts[1]]=1 }
+    / # osr-honcho-mcp$/ { split($4, parts, "/"); router[parts[1]]=1 }
+    END { for (ip in clients) if (!(ip in router)) print ip }
+  ' "$1" | sort -u | paste -sd' ' -
+}
+# End Honcho firewall helpers.
 source "$(dirname -- "${BASH_SOURCE[0]}")/pve-select.sh"
 usage() {
   cat <<'USAGE'
@@ -23,7 +51,7 @@ Usage: bash provision-lxc.sh [--dry-run] [--reconfigure [--rotate-keys]]
 
 Run as root on the Proxmox host. For a new CT, the installer asks for the
 Honcho CT ID and IP/CIDR, router/Open WebUI CT ID and IP, gateway, embedding
-model and dimensions, embedding endpoint, and optional Hermes/OpenClaw IPs.
+model and dimensions, embedding endpoint, and optional agent CT IPs.
 Set CT_ID, IP_CIDR, ROUTER_CT_ID, ROUTER_IP, GATEWAY,
 HONCHO_EMBEDDING_MODEL, HONCHO_EMBEDDING_DIMENSIONS,
 HONCHO_EMBEDDING_BASE_URL, and HONCHO_CLIENT_IPS to preset these answers.
@@ -31,23 +59,26 @@ Unattended runs require the mandatory values as presets. The admin API token
 is requested without echo unless OPENWEBUI_ADMIN_TOKEN is already set.
 
 Creates an unprivileged Debian 13 LXC with native PostgreSQL/pgvector,
-Honcho API and deriver services, and Honcho's Streamable HTTP MCP server. The
-chat model uses the router; HONCHO_MODEL=fast by default. Set
+Honcho API and deriver services, Honcho's Streamable HTTP MCP server and a
+loopback model proxy. The proxy selects from router inventory and contacts
+model targets directly; HONCHO_MODEL=fast by default. Set
 HONCHO_EMBEDDING_MODEL and HONCHO_EMBEDDING_DIMENSIONS for an embedding model.
 HONCHO_EMBEDDING_BASE_URL can point directly to its OpenAI-compatible /v1
-endpoint; set it to an empty string to choose the router /v1/embeddings route.
+endpoint; set it to an empty string to find the model through router inventory.
 HONCHO_REF
-(default v3.5.0) may select another upstream tag, main, or a commit. HONCHO_CLIENT_IPS is a space-separated list of agent CT addresses to
-allow through the Proxmox firewall. The router CT is always allowed. A blank
-embedding URL uses the router and requires an embedding model mapped there.
+(default v3.5.0) may select another upstream tag, main, or a commit. HONCHO_CLIENT_IPS is a space-separated list of agent CT addresses (Hermes,
+OpenClaw, DeepSeek Harness) allowed to the API and MCP ports through the
+Proxmox firewall. The router CT is always allowed. A blank
+embedding URL requires that model in the router's live inventory.
 
 HONCHO_CONTEXT_TOKENS sets Honcho's token budgets for the model's context
 window (at least 8192); HONCHO_<SETTING> overrides one budget (see the
-README). Unset, they keep the CT's last values; set and empty, the default.
+README). Unset, they keep the CT's last values (a first install sizes them
+for 65536 tokens); set and empty, Honcho's default.
 HONCHO_REF, HONCHO_MODEL, HONCHO_STRUCTURED_OUTPUT_MODE,
 HONCHO_EMBEDDING_DIMENSIONS_MODE and the HONCHO_BUN_* pins are kept the same
 way: a reconfigure only changes the ones it sets.
-HONCHO_STRUCTURED_OUTPUT_MODE=json_object is for a router model whose backend
+HONCHO_STRUCTURED_OUTPUT_MODE=json_object is for a selected model whose backend
 lacks JSON-schema output; the install probes the model with tools and
 structured output first (HONCHO_SKIP_CHAT_PROBE=true skips that). Another Bun
 than 1.4.4 needs HONCHO_BUN_VERSION with HONCHO_BUN_SHA256 (bun-linux-x64.zip)
@@ -59,7 +90,7 @@ This target registers the MCP server in Open WebUI. --reconfigure updates an
 existing Honcho CT and the registration without deleting its PostgreSQL data;
 every reconfigure dumps the database before migrations and restores it if the
 guest setup fails. --rotate-keys (with --reconfigure) replaces the JWT secret and
-both keys; reconfigure Hermes and OpenClaw with HONCHO_CT_ID afterwards.
+both keys; reconfigure Hermes, OpenClaw and DeepSeek Harness with HONCHO_CT_ID afterwards.
 USAGE
 }
 mode=create; dry_run=0; rotate_keys=false
@@ -140,23 +171,26 @@ if [[ $mode == create ]]; then
   prompt_missing ROUTER_CT_ID 'Router and Open WebUI CT ID'
   prompt_missing ROUTER_IP 'Router IP reachable from Honcho'
   prompt_missing GATEWAY 'Honcho gateway IP'
-  printf 'Honcho will ask the router for chat model %s; it must support tools and structured output (set HONCHO_MODEL to change it).\n' "$HONCHO_MODEL"
+  printf 'Honcho will use router inventory to select chat model %s and contact its host directly; it must support tools and structured output (set HONCHO_MODEL to change it).\n' "$HONCHO_MODEL"
   prompt_missing HONCHO_EMBEDDING_MODEL 'Embedding model name'
   prompt_missing HONCHO_EMBEDDING_DIMENSIONS 'Embedding vector dimensions'
   if [[ -z $embedding_url_explicit ]]; then
     [[ ${NONINTERACTIVE:-false} != true && -t 0 ]] ||
-      die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to choose the router explicitly.'
-    printf 'Embedding base URL: use the model host /v1 endpoint, or press Enter for the router /v1/embeddings route.\n'
-    IFS= read -r -p 'Embedding base URL (blank = router): ' HONCHO_EMBEDDING_BASE_URL ||
+      die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to use router inventory.'
+    printf 'Embedding base URL: use the model host /v1 endpoint, or press Enter to find it in router inventory.\n'
+    IFS= read -r -p 'Embedding base URL (blank = inventory): ' HONCHO_EMBEDDING_BASE_URL ||
       die 'No embedding endpoint choice was entered.'
   fi
   if [[ -z $honcho_clients_explicit && ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
     printf 'Allow existing agent CTs through the Honcho firewall; leave either address blank if absent.\n'
     IFS= read -r -p 'Hermes CT IP or IP/CIDR (optional): ' hermes_ip || die 'No Hermes address choice was entered.'
     IFS= read -r -p 'OpenClaw CT IP or IP/CIDR (optional): ' openclaw_ip || die 'No OpenClaw address choice was entered.'
+    IFS= read -r -p 'DeepSeek Harness CT IP or IP/CIDR (optional): ' dsh_ip || die 'No DeepSeek Harness address choice was entered.'
     hermes_ip=${hermes_ip%%/*}
     openclaw_ip=${openclaw_ip%%/*}
-    HONCHO_CLIENT_IPS="${hermes_ip:+$hermes_ip }${openclaw_ip:-}"
+    dsh_ip=${dsh_ip%%/*}
+    HONCHO_CLIENT_IPS="${hermes_ip:+$hermes_ip }${openclaw_ip:+$openclaw_ip }${dsh_ip:-}"
+    HONCHO_CLIENT_IPS=${HONCHO_CLIENT_IPS% }
   fi
 else
   prompt_missing CT_ID 'Honcho CT ID'
@@ -230,7 +264,7 @@ for ip in $HONCHO_CLIENT_IPS; do
   [[ $ip =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "Invalid HONCHO_CLIENT_IPS address: $ip"
 done
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for file in install-target.sh budgets.py honcho-api.service honcho-deriver.service honcho-mcp.service integrate-webui.py; do
+for file in install-target.sh budgets.py honcho-proxy.py direct_dispatch.py honcho-proxy.service honcho-api.service honcho-deriver.service honcho-mcp.service integrate-webui.py; do
   [[ -r $source_dir/$file ]] || die "Missing $source_dir/$file"
 done
 honcho_ip=${IP_CIDR%/*}
@@ -339,7 +373,7 @@ cleanup() {
         "$ROUTER_CT_ID" "$router_stage" >&2
       printf 'Open WebUI may hold a key Honcho no longer accepts. Once Honcho is healthy, run this provisioner\n' >&2
       printf 'again with --reconfigure (without --rotate-keys): it registers Open WebUI with the key Honcho has\n' >&2
-      printf 'now. Then reconfigure Hermes and OpenClaw with HONCHO_CT_ID=%s, and remove %s from CT %s.\n' \
+      printf 'now. Then reconfigure the agents (Hermes, OpenClaw, DeepSeek Harness) with HONCHO_CT_ID=%s, and remove %s from CT %s.\n' \
         "$CT_ID" "$rotation_stage" "$CT_ID" >&2
       printf 'After recovery, also remove %s from router CT %s.\n' "$router_stage" "$ROUTER_CT_ID" >&2
     fi
@@ -359,7 +393,7 @@ if (( dry_run )); then
     "$mode" "$CT_ID" "$honcho_ip" "$ref_label" "$ROUTER_CT_ID"
   printf 'Router IP: %s; chat model: %s; embedding: %s (%s dimensions) via %s.\n' \
     "${ROUTER_IP:-detected from router route}" "$HONCHO_MODEL" "$HONCHO_EMBEDDING_MODEL" \
-    "$HONCHO_EMBEDDING_DIMENSIONS" "${HONCHO_EMBEDDING_BASE_URL:-router /v1/embeddings}"
+    "$HONCHO_EMBEDDING_DIMENSIONS" "${HONCHO_EMBEDDING_BASE_URL:-router inventory (direct target)}"
   printf 'Agent IPs allowed to Honcho: %s.\n' "${HONCHO_CLIENT_IPS:-none}"
   [[ $HONCHO_ROUTER_FIREWALL == false ]] ||
     printf 'Would admit %s to the router API in /etc/pve/firewall/%s.fw, if that file exists.\n' "$honcho_ip" "$ROUTER_CT_ID"
@@ -393,6 +427,8 @@ router_url="http://${router_ip}:${router_port}"
 pct exec "$ROUTER_CT_ID" -- awk -F= '$1=="ROUTER_API_KEY" {sub(/^[^=]*=/,""); print; exit}' \
   /app/router/secrets.env > "$stage/router-api-key"
 [[ -s $stage/router-api-key ]] || printf 'no-key\n' > "$stage/router-api-key"
+pct exec "$ROUTER_CT_ID" -- awk -F= '$1 ~ /^(LMSTUDIO_API_TOKEN|STRATA_API_KEY|BASALT_API_KEY|MAYA_API_KEY|XOLOTL_API_KEY|AVALON_API_KEY)$/ {print}' \
+  /app/router/secrets.env > "$stage/backend-keys"
 # Validate the admin token and endpoint before creating or modifying a Honcho CT.
 printf '%s\n' "$OPENWEBUI_ADMIN_TOKEN" > "$stage/openwebui-admin-token"
 router_stage_created=true
@@ -410,11 +446,7 @@ fi
 fw_file="/etc/pve/firewall/${CT_ID}.fw"
 if [[ $mode == create && -e $fw_file ]]; then die "Refusing to replace $fw_file"; fi
 if [[ $mode == reconfigure && -z $honcho_clients_explicit && -f $fw_file ]]; then
-  HONCHO_CLIENT_IPS=$(awk '
-    / # osr-honcho-api$/ { split($4, parts, "/"); clients[parts[1]]=1 }
-    / # osr-honcho-mcp$/ { split($4, parts, "/"); router[parts[1]]=1 }
-    END { for (ip in clients) if (!(ip in router)) print ip }
-  ' "$fw_file" | sort -u | paste -sd' ' -)
+  HONCHO_CLIENT_IPS=$(honcho_fw_clients "$fw_file")
 fi
 for ip in $HONCHO_CLIENT_IPS; do
   [[ $ip =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "Invalid HONCHO_CLIENT_IPS address: $ip"
@@ -438,17 +470,11 @@ else
     die "CT $CT_ID is not marked as this target's Honcho CT."
 fi
 
-honcho_rules() {
-  for ip in $router_ip $HONCHO_CLIENT_IPS; do
-    printf 'IN ACCEPT -source %s/32 -p tcp -dport 8000 -log nolog # osr-honcho-api\n' "$ip"
-    [[ $ip != "$router_ip" ]] || printf 'IN ACCEPT -source %s/32 -p tcp -dport 3000 -log nolog # osr-honcho-mcp\n' "$ip"
-  done
-}
-rules=$(honcho_rules)
+rules=$(honcho_rules "$router_ip" $HONCHO_CLIENT_IPS)
 if [[ $mode == reconfigure && -f $fw_file ]]; then
   awk -v rules="$rules" '
     $0 == "[RULES]" { print; print rules; seen=1; next }
-    $0 !~ / # osr-honcho-(api|mcp)$/ { print }
+    $0 !~ / # osr-honcho-(api|mcp|client-mcp)$/ { print }
     END { if (!seen) { print "[RULES]"; print rules } }
   ' "$fw_file" > "$stage/firewall.new"
   cat "$stage/firewall.new" > "$fw_file"
@@ -474,10 +500,11 @@ for attempt in {1..60}; do
   sleep 2
 done
 pct exec "$CT_ID" -- install -d -m 0700 /root/honcho-deploy
-for file in install-target.sh budgets.py honcho-api.service honcho-deriver.service honcho-mcp.service; do
+for file in install-target.sh budgets.py honcho-proxy.py direct_dispatch.py honcho-proxy.service honcho-api.service honcho-deriver.service honcho-mcp.service; do
   pct push "$CT_ID" "$source_dir/$file" "/root/honcho-deploy/$file" --perms 0600
 done
 pct push "$CT_ID" "$stage/router-api-key" /root/honcho-deploy/router-api-key --perms 0600
+pct push "$CT_ID" "$stage/backend-keys" /root/honcho-deploy/backend-keys --perms 0600
 if [[ $rotate_keys == true ]]; then
   pct exec "$CT_ID" -- install -d -m 0700 "$rotation_stage"
   rotation_staged=true
@@ -515,7 +542,8 @@ if [[ $rotate_keys == true ]]; then
 fi
 printf 'Honcho API: http://%s:8000; MCP: http://%s:3000/mcp\n' "$honcho_ip" "$honcho_ip"
 if [[ $rotate_keys == true ]]; then
-  printf 'The keys changed: Hermes and OpenClaw lose Honcho until each is reconfigured, e.g.\n'
+  printf 'The keys changed: the agents lose Honcho until each is reconfigured, e.g.\n'
   printf '  CT_ID=<agent CT> ROUTER_CT_ID=%s HONCHO_CT_ID=%s bash targets/hermes/provision-lxc.sh --reconfigure\n' "$ROUTER_CT_ID" "$CT_ID"
   printf '  CT_ID=<agent CT> ROUTER_CT_ID=%s HONCHO_CT_ID=%s bash targets/openclaw/provision-lxc.sh --reconfigure\n' "$ROUTER_CT_ID" "$CT_ID"
+  printf '  CT_ID=<agent CT> ROUTER_CT_ID=%s HONCHO_CT_ID=%s bash targets/deepseek-harness/provision-lxc.sh --reconfigure\n' "$ROUTER_CT_ID" "$CT_ID"
 fi

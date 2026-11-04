@@ -34,7 +34,7 @@ bash ollama-smart-router-install.sh
 
 The installer asks which targets to create: Gitea and Mattermost services;
 Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl and Avalon model servers; and
-Honcho memory, Hermes and OpenClaw agents, and Open Terminal and ComfyUI tools. Enter comma-separated names or
+Honcho memory, Hermes, OpenClaw and DeepSeek Harness agents, and Open Terminal and ComfyUI tools. Enter comma-separated names or
 menu numbers, or press Enter for none. Gitea stores configuration history and
 Mattermost receives alerts; both are optional and can also be installed
 separately from [targets/gitea](targets/gitea/README.md) and
@@ -47,7 +47,7 @@ Strata, Basalt, Maya, Xolotl and Avalon also ask for a template. The installer t
 checks the host GPU, creates selected service CTs, verifies the Gitea token,
 creates the router CT, provisions model targets, then Honcho and the selected
 agents and tools. The menu groups CPU and GPU targets by purpose. Choose **Default** in the Gitea, Mattermost and
-ComfyUI community-script menus. Open WebUI companions require an admin API key:
+ComfyUI community-script menus. Companions that register with Open WebUI require an admin API key:
 create the first admin account in the browser, enable API keys and create one
 when prompted. A failed service stops the install before the router is built;
 a failed model or companion target leaves the router running and is listed with
@@ -67,7 +67,7 @@ Generated Gitea and Mattermost admin passwords are in
 | LXC | Default | Other supported releases |
 |---|---|---|
 | Router, Gitea, ComfyUI | Debian 13 | — |
-| Open Terminal, Hermes, OpenClaw | Debian 13 | Debian 12 |
+| Open Terminal, Hermes, OpenClaw, DeepSeek Harness | Debian 13 | Debian 12 |
 | Honcho | Debian 13 | — |
 | Ollama | Debian 13 | Debian 12; Ubuntu 22.04, 24.04, 26.04 (`OLLAMA_CT_OS`, `OLLAMA_CT_VERSION`) |
 | Mattermost | Ubuntu 24.04 | Ubuntu 22.04 (`MATTERMOST_CT_VERSION`); Ubuntu only |
@@ -121,6 +121,28 @@ Presets: `OLLAMA_GPU_CARD`, `LLAMACPP_GPU_CARD`, `AVALON_GPU_CARD`, `COMFYUI_GPU
 address such as `0000:03:00.0`, or `none`). Strata, Basalt, Maya, Xolotl and
 AirLLM run on NVIDIA only and are not asked; they use the NVIDIA driver's
 GPU 0 (or their `GPU_DEVICES`).
+
+**Each model target's context window.** Next, the installer asks for the
+context window (tokens per request) of each selected Ollama, llama.cpp,
+Strata, Basalt, Maya, Xolotl and Avalon target. Every one defaults to 65536.
+Each prompt shows a recommendation that weighs three things:
+
+- the target's GPU memory, read from `nvidia-smi` or amdgpu's sysfs file.
+  It is unknown on a host whose driver is not set up yet;
+- the target's engine: Avalon follows its own `auto` rule, Xolotl's 128k needs
+  a 24 GB card, and Strata, Basalt and Maya keep a small KV cache. Ollama and
+  llama.cpp are sized for full-attention models, whose cache grows fastest;
+- the selected agents: Hermes needs 64000 tokens or more, OpenClaw 32768,
+  DeepSeek Harness 16384, and Honcho runs its full budgets at 131072.
+
+A window too small for a selected agent is flagged. Honcho's and DeepSeek
+Harness's windows are asked last and default to the smallest window chosen
+above. A llama.cpp window is multiplied by its `PARALLEL_SLOTS` for
+`CONTEXT_SIZE`. Presets are the defaults: `OLLAMA_CONTEXT_LENGTH`,
+`LLAMACPP_CONTEXT` (or `CONTEXT_SIZE`), `STRATA_CONTEXT`, `BASALT_CONTEXT`,
+`MAYA_CONTEXT`, `XOLOTL_CONTEXT`, `AVALON_CONTEXT` (also `auto`),
+`HONCHO_CONTEXT_TOKENS` and `DEEPSEEK_HARNESS_CONTEXT_WINDOW`. AirLLM, which
+streams layers from disk, keeps its own small window.
 
 Before creating CTs, the installer checks for a working host driver for each
 chosen card, and once for the NVIDIA-only targets. If one is missing, [tools/setup-host-gpu.sh](tools/setup-host-gpu.sh) identifies the
@@ -238,8 +260,17 @@ and recovery steps. Provisioners support `--dry-run`.
 MCP tool server for Open WebUI. Selecting it with Hermes or OpenClaw connects
 their native memory integrations to the same `osr` workspace. Honcho needs an
 OpenAI-compatible embedding model; the installer asks for its name, vector
-dimensions and `/v1` endpoint.
+dimensions and `/v1` endpoint. Its loopback proxy uses router inventory to
+select a compatible chat model and sends inference directly to model hosts.
+Reconfigure Honcho after router or model backend key rotation to refresh its
+proxy credentials.
 [Open Terminal](targets/open-terminal/README.md) adds a terminal tool.
+[DeepSeek Harness](targets/deepseek-harness/README.md) runs as a separate agent
+in its own CPU-only LXC, with a Web UI on port 3080 and OSR as its model
+provider. It does not require an Open WebUI admin token. With Honcho selected
+it connects to Honcho's MCP server for the shared `osr` memory; its model
+calls the memory tools itself (Hermes and OpenClaw record every turn through
+their plugins).
 [Hermes](targets/hermes/README.md) is an agent client, registered in Open
 WebUI as `hermes-agent`, not a pool model; it needs a tool-capable model with
 at least 64K context. Re-run its provisioner with `--reconfigure` after a
@@ -263,7 +294,7 @@ servers, services and companions); the last tag names the target.
 |---|---|
 | Router (`ollama-smart-router-install.sh`) | `ai`, `ai-tools`, `osr-router`, `openwebui` |
 | Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl, Avalon, ComfyUI | `ai`, `ai-model`, `osr-target`, `<target>` |
-| Gitea, Mattermost, Honcho, Open Terminal, Hermes, OpenClaw | `ai`, `ai-tools`, `osr-target`, `<target>` |
+| Gitea, Mattermost, Honcho, Open Terminal, Hermes, OpenClaw, DeepSeek Harness | `ai`, `ai-tools`, `osr-target`, `<target>` |
 
 `<target>` is the target's directory name under `targets/` (`ollama`,
 `llamacpp`, `open-terminal` and so on). The Proxmox community script that

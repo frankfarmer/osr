@@ -54,13 +54,14 @@ reach this HTTP endpoint only over a trusted LAN or VPN.
   tokens of context for agent work with tools.
   Every model the dispatcher may select needs this context; the router's
   inventory does not report configured context length.
-  - The pool's defaults are smaller: the Ollama target ships
-    `OLLAMA_CONTEXT_LENGTH=8192`, and llama.cpp `CONTEXT_SIZE=8192` is split
-    across `PARALLEL_SLOTS`.
-  - Raise the host that will serve Hermes: `OLLAMA_CONTEXT_LENGTH=65536` in
-    `/etc/ollama-target/ollama.env`, or `CONTEXT_SIZE` of at least
-    65536 × `PARALLEL_SLOTS` for llama.cpp. Otherwise Ollama silently drops the
-    start of the prompt (Hermes's tool definitions), and llama.cpp rejects it.
+  - The model targets default to 65536 tokens (the OSR installer asks for each
+    one's window and flags one below Hermes's need). llama.cpp's
+    `CONTEXT_SIZE` is split across `PARALLEL_SLOTS`, so it needs
+    65536 × `PARALLEL_SLOTS`; the installer sets it so.
+  - A host made before that default may serve less: raise it with
+    `OLLAMA_CONTEXT_LENGTH=65536` in `/etc/ollama-target/ollama.env`, or
+    `CONTEXT_SIZE` for llama.cpp. Otherwise Ollama silently drops the start of
+    the prompt (Hermes's tool definitions), and llama.cpp rejects it.
   - The router does not know context sizes (ARCHITECTURE §14), so
     `HERMES_CONTEXT_LENGTH` must match what the host really serves.
   - llama.cpp models need `tools` in the bridge's `MODEL_CAPABILITIES` before

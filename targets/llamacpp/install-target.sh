@@ -32,7 +32,7 @@ to /resolve/ before download.
 NONINTERACTIVE=true disables prompts and requires MODEL_ALIAS plus a GGUF file
 setting or a valid MODEL_DOWNLOAD_URL.
 Optional: LLAMA_CPP_REF=<release-tag-or-full-commit> ($LLAMA_CPP_DEFAULT_REF),
-          BACKEND=cuda|vulkan|cpu (cuda), BUILD_JOBS=4, CONTEXT_SIZE=8192,
+          BACKEND=cuda|vulkan|cpu (cuda), BUILD_JOBS=4, CONTEXT_SIZE=65536,
           PARALLEL_SLOTS=1, THREADS=4, GPU_LAYERS=auto (0 for cpu),
           MODEL_PARAMETER_SIZE=unknown, MODEL_FAMILY=unknown,
           MODEL_QUANTIZATION=unknown, MODEL_CAPABILITIES=completion,
@@ -1041,7 +1041,7 @@ fi
 configure_model
 BACKEND=${BACKEND:-cuda}
 BUILD_JOBS=${BUILD_JOBS:-4}
-CONTEXT_SIZE=${CONTEXT_SIZE:-8192}
+CONTEXT_SIZE=${CONTEXT_SIZE:-65536}
 PARALLEL_SLOTS=${PARALLEL_SLOTS:-1}
 THREADS=${THREADS:-4}
 if [[ $BACKEND != cpu ]]; then GPU_LAYERS=${GPU_LAYERS:-auto}; else GPU_LAYERS=${GPU_LAYERS:-0}; fi

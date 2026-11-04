@@ -42,6 +42,8 @@ Settings (environment; values shown here are presets or defaults):
                       of the vendor, then only this card's device nodes are kept
                       (plus /dev/kfd, /dev/nvidiactl and /dev/nvidia-uvm)
   OLLAMA_PULL_MODELS='qwen3:8b qwen3:14b'
+  OLLAMA_CONTEXT_LENGTH=65536   the context a request gets when it does not set
+                      num_ctx (install-target.sh writes it to ollama.env)
   OLLAMA_CT_OS=debian  OLLAMA_CT_VERSION=13   the CT's distribution: debian 12|13 or
                       ubuntu 22.04|24.04|26.04 (the community script's own
                       installer handles Debian 13; Ollama's release bundles its
@@ -211,6 +213,7 @@ SSH_PUBLIC_KEY=${SSH_PUBLIC_KEY:-}
 GPU=${GPU:-auto}
 GPU_CARD=${GPU_CARD:-}
 OLLAMA_PULL_MODELS=${OLLAMA_PULL_MODELS:-}
+OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-65536}
 COMMUNITY_SCRIPT_URL=${COMMUNITY_SCRIPT_URL:-$COMMUNITY_SCRIPT_DEFAULT_URL}
 COMMUNITY_SCRIPT_SHA256=${COMMUNITY_SCRIPT_SHA256:-}
 OLLAMA_CT_OS=${OLLAMA_CT_OS:-debian}
@@ -232,6 +235,8 @@ for name in CORES MEMORY_MB ROOTFS_GB; do positive_int "$name" "${!name}"; done
 if [[ -n $VLAN_TAG ]]; then positive_int VLAN_TAG "$VLAN_TAG"; (( VLAN_TAG <= 4094 )) || die 'VLAN_TAG must be 1..4094.'; fi
 [[ -z $SSH_PUBLIC_KEY || -r $SSH_PUBLIC_KEY || $dry_run == 1 ]] || die "SSH_PUBLIC_KEY is not readable: $SSH_PUBLIC_KEY"
 valid_models "$OLLAMA_PULL_MODELS" || die 'OLLAMA_PULL_MODELS is a space-separated list of name[:tag] entries.'
+[[ $OLLAMA_CONTEXT_LENGTH =~ ^[1-9][0-9]{3,6}$ ]] && (( OLLAMA_CONTEXT_LENGTH >= 2048 && OLLAMA_CONTEXT_LENGTH <= 1048576 )) ||
+    die 'OLLAMA_CONTEXT_LENGTH must be a whole number of tokens from 2048 to 1048576.'
 [[ $COMMUNITY_SCRIPT_URL =~ ^https://[A-Za-z0-9./_-]+\.sh$ ]] || die 'COMMUNITY_SCRIPT_URL must be an https URL of a .sh file.'
 [[ -z $COMMUNITY_SCRIPT_SHA256 || $COMMUNITY_SCRIPT_SHA256 =~ ^[0-9A-Fa-f]{64}$ ]] || die 'COMMUNITY_SCRIPT_SHA256 must be 64 hex digits.'
 valid_ct_os "$OLLAMA_CT_OS" "$OLLAMA_CT_VERSION" ||
@@ -371,11 +376,12 @@ if (( INSTALL_TARGET )); then
             nvidia_lxc_install_guest "$CT_ID" "$nvidia_host_version" /root/ollama-target-deploy/install-nvidia-driver.sh
         fi
     fi
-    run pct exec "$CT_ID" -- env "OLLAMA_GPU=$gpu" "OLLAMA_PULL_MODELS=$OLLAMA_PULL_MODELS" bash /root/ollama-target-deploy/install-target.sh
+    run pct exec "$CT_ID" -- env "OLLAMA_GPU=$gpu" "OLLAMA_PULL_MODELS=$OLLAMA_PULL_MODELS" \
+        "OLLAMA_CONTEXT_LENGTH=$OLLAMA_CONTEXT_LENGTH" bash /root/ollama-target-deploy/install-target.sh
 else
     printf '\nOllama is installed as the community script left it (running as root).\n'
     printf 'To adopt it into the target layout, inside the CT (pct enter %s) run:\n' "$CT_ID"
     if [[ $gpu == nvidia ]]; then printf '  DRIVER_VERSION=%s bash /root/ollama-target-deploy/install-nvidia-driver.sh lxc   # if NVML or CUDA does not match the host\n' "$nvidia_host_version"; fi
-    printf '  OLLAMA_GPU=%s bash /root/ollama-target-deploy/install-target.sh\n' "$gpu"
+    printf '  OLLAMA_GPU=%s OLLAMA_CONTEXT_LENGTH=%s bash /root/ollama-target-deploy/install-target.sh\n' "$gpu" "$OLLAMA_CONTEXT_LENGTH"
 fi
 printf 'Register it with the router: manage-model-servers add http://<CT %s address>:11434\n' "$CT_ID"

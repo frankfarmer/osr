@@ -1207,9 +1207,76 @@ def test_openai_kind_context_length(router):
     assert {e["name"]: e["context_length"] for e in entries} == {"a": 65536, "b": 32768, "c": None}
 
 
-def test_openai_kind_tool_support_is_unknown(router):
+def test_openai_kind_tool_support_is_unknown_without_a_listing(router):
+    """build_entry alone knows nothing: tool_kinds is applied to a /v1/models listing."""
     entry = router.build_entry("maya+http://h:8080", {"name": "glm-5.3-flash"}, ["completion"])
     assert entry["tools"] is None
+
+
+def _openai_listing(router, server, data):
+    import asyncio
+
+    def handler(request):
+        return httpx.Response(200, json={"object": "list", "data": data})
+
+    async def fetch():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await router.fetch_openai_models(client, server)
+
+    _, entries, error = asyncio.run(fetch())
+    assert error is None
+    return {e["name"]: e for e in entries}
+
+
+def test_openai_kind_context_from_meta_n_ctx(router):
+    """Strata, Basalt, Xolotl and llama-server (Avalon) give the served context as
+    meta.n_ctx; n_ctx_train is the model's own limit and is never used. A named
+    field still comes first (Maya sends both)."""
+    entries = _openai_listing(router, "avalon+http://h:8080", [
+        {"id": "served", "meta": {"n_ctx": 131072, "n_ctx_train": 262144}},
+        {"id": "train-only", "meta": {"n_ctx_train": 262144}},
+        {"id": "named", "context_length": 32768, "meta": {"n_ctx": 65536}},
+        {"id": "odd", "meta": {"n_ctx": True}},
+        {"id": "no-meta", "meta": "n_ctx"},
+    ])
+    assert {n: e["context_length"] for n, e in entries.items()} == {
+        "served": 131072, "train-only": None, "named": 32768, "odd": None, "no-meta": None}
+
+
+@pytest.mark.parametrize("kind", ["strata", "basalt", "maya", "xolotl", "avalon"])
+def test_openai_kind_text_models_report_tools(router, kind):
+    """Each of these servers takes "tools" and returns tool_calls, so its text
+    models are tool-capable; an image generator listed beside them is not."""
+    entries = _openai_listing(router, f"{kind}+http://h:8080", [
+        {"id": "chat", "meta": {"n_ctx": 32768}},
+        {"id": "chat-alias", "architecture": {"output_modalities": ["text"]}},
+        {"id": "images", "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]}},
+    ])
+    assert {n: e["tools"] for n, e in entries.items()} == {
+        "chat": True, "chat-alias": True, "images": None}
+
+
+def test_tool_kinds_setting(monkeypatch, tmp_path, caplog):
+    """A kind left out of tool_kinds is unknown again; a name that is not a
+    /v1/models kind is ignored with a warning."""
+    ini = (ROOT / "services/ollama-router/router.ini").read_text()
+    assert "\ntool_kinds = strata, basalt, maya, xolotl, avalon\n" in ini
+    custom = tmp_path / "router.ini"
+    custom.write_text(ini.replace("tool_kinds = strata, basalt, maya, xolotl, avalon",
+                                  "tool_kinds = Avalon, ollama, nonsense"))
+    with caplog.at_level("WARNING", logger="router"):
+        router = load_router(monkeypatch, ROUTER_INI=str(custom))
+    assert router.TOOL_KINDS == {"avalon"}
+    assert sorted(r.getMessage() for r in caplog.records if "tool_kinds" in r.getMessage()) == [
+        "ignoring [classification] tool_kinds entry 'nonsense' (use avalon, basalt, maya, strata, xolotl)",
+        "ignoring [classification] tool_kinds entry 'ollama' (use avalon, basalt, maya, strata, xolotl)"]
+    assert _openai_listing(router, "avalon+http://h:8080", [{"id": "m"}])["m"]["tools"] is True
+    assert _openai_listing(router, "strata+http://h:8080", [{"id": "m"}])["m"]["tools"] is None
+    custom.write_text(ini.replace("tool_kinds = strata, basalt, maya, xolotl, avalon", "tool_kinds ="))
+    assert load_router(monkeypatch, ROUTER_INI=str(custom)).TOOL_KINDS == frozenset()
+    # The built-in default matches router.ini, for a router.ini without the line.
+    assert load_router(monkeypatch, ROUTER_INI=str(tmp_path / "missing.ini")).TOOL_KINDS == {
+        "strata", "basalt", "maya", "xolotl", "avalon"}
 
 
 @pytest.mark.parametrize("body,expected", [

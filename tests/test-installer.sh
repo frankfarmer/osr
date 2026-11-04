@@ -137,7 +137,7 @@ unset MATTERMOST_WEBHOOK_URL CONFIG_SOURCE BRIDGE NAMESERVER MATTERMOST_CHANNEL 
 # and restored by re-sourcing the extracted functions at the end.
 _tt="$(mktemp -d)"
 TARGETS_DIR="$_tt/targets"
-for _name in gitea mattermost ollama airllm llamacpp strata basalt maya xolotl avalon honcho hermes openclaw open-terminal comfyui; do
+for _name in gitea mattermost ollama airllm llamacpp strata basalt maya xolotl avalon honcho hermes openclaw deepseek-harness open-terminal comfyui; do
   mkdir -p "$TARGETS_DIR/$_name"
   # The fake provisioner records what it was given: settings, flags, and
   # whether the admin token reached it (by value, compared to $EXPECT_TOKEN).
@@ -160,6 +160,8 @@ printf 'provision %s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$(basename "$(dirna
   printf 'chat-model %s\n' "${HONCHO_MODEL:-}" >> "$MOCK_LOG"
 [[ -z ${GPU:-}${BACKEND:-}${GPU_DEVICES:-}${GPU_CARD:-} ]] ||
   printf 'gpu-env %s|%s|%s|%s\n' "${GPU:-}" "${BACKEND:-}" "${GPU_DEVICES:-}" "${GPU_CARD:-}" >> "$MOCK_LOG"
+_ctx="${OLLAMA_CONTEXT_LENGTH:-}|${CONTEXT_SIZE:-}|${STRATA_CONTEXT:-}|${AVALON_CONTEXT:-}|${HONCHO_CONTEXT_TOKENS-unset}|${DEEPSEEK_HARNESS_CONTEXT_WINDOW:-}"
+[[ $_ctx == '||||unset|' ]] || printf 'context-env %s\n' "$_ctx" >> "$MOCK_LOG"
 [[ -z ${CUDA_VERSION:-}${MAYA_CUDA_VERSION:-}${XOLOTL_CUDA_VERSION:-}${AVALON_CUDA_VERSION:-} ]] ||
   printf 'cuda-env %s|%s|%s|%s\n' "${CUDA_VERSION:-}" "${MAYA_CUDA_VERSION:-}" "${XOLOTL_CUDA_VERSION:-}" "${AVALON_CUDA_VERSION:-}" >> "$MOCK_LOG"
 if [[ -n ${HF_TOKEN:-} ]]; then
@@ -171,8 +173,8 @@ done
 unset _name
 
 describe target_table
-assert_eq "lists the fifteen targets in menu order" \
-  "gitea mattermost ollama airllm llamacpp strata basalt maya xolotl avalon honcho hermes openclaw open-terminal comfyui" \
+assert_eq "lists the sixteen targets in menu order" \
+  "gitea mattermost ollama airllm llamacpp strata basalt maya xolotl avalon honcho hermes openclaw deepseek-harness open-terminal comfyui" \
   "$(target_table | cut -d'|' -f1 | paste -sd' ')"
 
 describe target_field
@@ -181,6 +183,8 @@ assert_eq "companion phase" companion "$(target_field hermes phase)"
 assert_eq "ComfyUI is a companion of Open WebUI" companion "$(target_field comfyui phase)"
 assert_eq "and not a model server" "" "$(target_field comfyui entry)"
 assert_eq "OpenClaw is a companion" companion "$(target_field openclaw phase)"
+assert_eq "DeepSeek Harness is a separate companion" companion "$(target_field deepseek-harness phase)"
+assert_eq "and not a model server" "" "$(target_field deepseek-harness entry)"
 assert_eq "Honcho is a CPU memory companion" companion "$(target_field honcho phase)"
 assert_eq "and has no GPU requirement" "" "$(target_field honcho gpu)"
 assert_eq "and runs without a GPU" "" "$(target_field openclaw gpu)"
@@ -528,13 +532,14 @@ assert_ok "Avalon takes a template" target_needs_template avalon
 assert_fail "llama.cpp prompts for its own" target_needs_template llamacpp
 assert_fail "Hermes uses the router's" target_needs_template hermes
 assert_fail "OpenClaw uses the router's" target_needs_template openclaw
+assert_fail "DeepSeek Harness uses the router's" target_needs_template deepseek-harness
 assert_fail "ComfyUI's community script picks its own" target_needs_template comfyui
 
 describe valid_target_selection
 for _sel in "" none "1,10" "ollama hermes" " 2 , strata " "8" "13" "14" "comfyui" "xolotl" "avalon" "openclaw"; do
   assert_ok "accepts '${_sel}'" valid_target_selection "$_sel"
 done
-for _sel in 0 16 bogus "ollama,bogus"; do
+for _sel in 0 17 bogus "ollama,bogus"; do
   assert_fail "rejects '${_sel}'" valid_target_selection "$_sel"
 done
 unset _sel
@@ -561,13 +566,14 @@ assert_fail "also when the menu would be shown" prompt_target_selection <<< $'\n
 NONINTERACTIVE=true
 NONINTERACTIVE=false; INSTALL_TARGETS=""
 _out="$(mktemp)"
-prompt_target_selection > "$_out" 2>&1 <<< $'16\n5,hermes\n'
+prompt_target_selection > "$_out" 2>&1 <<< $'17\n5,hermes\n'
 assert_eq "re-prompts until valid, then keeps the choice" "llamacpp hermes" "$TARGETS"
 assert_contains "the menu lists the model servers" "9) xolotl" "$(cat "$_out")"
 assert_contains "Avalon among them" "10) avalon" "$(cat "$_out")"
 assert_contains "the menu lists the companions" "12) hermes" "$(cat "$_out")"
-assert_contains "ComfyUI among them" "15) comfyui" "$(cat "$_out")"
+assert_contains "ComfyUI among them" "16) comfyui" "$(cat "$_out")"
 assert_contains "OpenClaw is grouped with agents" "13) openclaw" "$(cat "$_out")"
+assert_contains "DeepSeek Harness has its own menu choice" "14) deepseek-harness" "$(cat "$_out")"
 assert_contains "memory comes before agents" "Memory infrastructure (CPU)" "$(cat "$_out")"
 assert_contains "the GPU model group is explicit" "Model servers (GPU required by default)" "$(cat "$_out")"
 assert_contains "the CPU model group is explicit" "Model servers (CPU or optional GPU)" "$(cat "$_out")"
@@ -987,6 +993,15 @@ assert_fail "too large" valid_honcho_context_tokens 2097152
 assert_fail "a unit suffix" valid_honcho_context_tokens 32k
 assert_fail "a leading zero" valid_honcho_context_tokens 032768
 
+describe valid_dsh_context_tokens
+assert_ok "a 32k Harness window" valid_dsh_context_tokens 32768
+assert_ok "Harness minimum" valid_dsh_context_tokens 16384
+assert_ok "Harness maximum" valid_dsh_context_tokens 1048576
+assert_fail "Harness refuses an 8k window" valid_dsh_context_tokens 8192
+assert_fail "Harness refuses excessive context" valid_dsh_context_tokens 1048577
+assert_fail "Harness refuses a unit suffix" valid_dsh_context_tokens 32k
+assert_fail "Harness refuses a leading zero" valid_dsh_context_tokens 032768
+
 describe valid_honcho_model
 assert_ok "a router tier" valid_honcho_model fast
 assert_ok "an Ollama tag with a namespace" valid_honcho_model "hf.co/nomic-ai/nomic-embed-text:v1.5"
@@ -1009,6 +1024,7 @@ assert_eq "CPU model servers" 'Model servers (CPU or optional GPU):' "$(target_m
 assert_eq "GPU model servers" 'Model servers (GPU required by default):' "$(target_menu_group llamacpp)"
 assert_eq "Honcho alone" 'Memory infrastructure (CPU): created before agents.' "$(target_menu_group honcho)"
 assert_eq "the agents" "$(target_menu_group hermes)" "$(target_menu_group openclaw)"
+assert_eq "DeepSeek Harness is grouped with agents" "$(target_menu_group hermes)" "$(target_menu_group deepseek-harness)"
 assert_contains "Open Terminal's group" "Open WebUI tools" "$(target_menu_group open-terminal)"
 assert_contains "ComfyUI's group" "Image generation" "$(target_menu_group comfyui)"
 _groups=""
@@ -1056,6 +1072,169 @@ preset_target_model_servers > /dev/null
 assert_eq "companions alone change nothing" "3 10.0.0.51" "$MODEL_SERVER_COUNT $MODEL_SERVER_1"
 for _i in 1 2 3 4 5; do unset "MODEL_SERVER_$_i"; done; unset _i
 
+describe target_context_var
+assert_eq "Ollama's window is OLLAMA_CONTEXT_LENGTH" OLLAMA_CONTEXT_LENGTH "$(target_context_var ollama)"
+assert_eq "llama.cpp's is per request, not CONTEXT_SIZE" LLAMACPP_CONTEXT "$(target_context_var llamacpp)"
+assert_eq "the Strata-style targets use <NAME>_CONTEXT" "STRATA_CONTEXT BASALT_CONTEXT MAYA_CONTEXT XOLOTL_CONTEXT AVALON_CONTEXT" \
+  "$(for _n in strata basalt maya xolotl avalon; do target_context_var "$_n"; done | paste -sd' ')"
+assert_fail "AirLLM keeps its own small window" target_context_var airllm
+assert_fail "an agent has none" target_context_var hermes
+
+describe llamacpp_slots
+assert_eq "one slot by default" 1 "$(unset PARALLEL_SLOTS; llamacpp_slots)"
+assert_eq "PARALLEL_SLOTS when set" 3 "$(PARALLEL_SLOTS=3 llamacpp_slots)"
+assert_eq "one for a value that is not a count" 1 "$(PARALLEL_SLOTS=0 llamacpp_slots)"
+
+describe target_context_preset
+assert_eq "no preset" "" "$(unset STRATA_CONTEXT; target_context_preset strata)"
+assert_eq "a target's own preset" 32768 "$(STRATA_CONTEXT=32768 target_context_preset strata)"
+assert_eq "llama.cpp's CONTEXT_SIZE is divided among its slots" 32768 \
+  "$(unset LLAMACPP_CONTEXT; CONTEXT_SIZE=65536 PARALLEL_SLOTS=2 target_context_preset llamacpp)"
+assert_eq "an explicit LLAMACPP_CONTEXT wins" 16384 \
+  "$(LLAMACPP_CONTEXT=16384 CONTEXT_SIZE=65536 target_context_preset llamacpp)"
+assert_fail "a target without a window" target_context_preset hermes
+
+describe target_context_env
+assert_eq "nothing before a window is chosen" "" "$(unset STRATA_CONTEXT; target_context_env strata)"
+assert_eq "a model target gets its own variable" STRATA_CONTEXT=65536 "$(STRATA_CONTEXT=65536 target_context_env strata)"
+assert_eq "Ollama's server default" OLLAMA_CONTEXT_LENGTH=32768 "$(OLLAMA_CONTEXT_LENGTH=32768 target_context_env ollama)"
+assert_eq "llama.cpp gets the window times its slots" CONTEXT_SIZE=131072 \
+  "$(LLAMACPP_CONTEXT=65536 PARALLEL_SLOTS=2 target_context_env llamacpp)"
+assert_eq "Avalon's auto is passed as it is" AVALON_CONTEXT=auto "$(AVALON_CONTEXT=auto target_context_env avalon)"
+assert_eq "an agent gets none" "" "$(target_context_env hermes)"
+
+describe valid_target_context
+assert_ok "the default" valid_target_context 65536
+assert_ok "the smallest" valid_target_context 4096
+assert_ok "the largest" valid_target_context 1048576
+assert_fail "too small" valid_target_context 2048
+assert_fail "too large" valid_target_context 2097152
+assert_fail "a unit suffix" valid_target_context 64k
+assert_fail "a leading zero" valid_target_context 065536
+assert_fail "auto is Avalon's only" valid_target_context auto
+
+describe valid_avalon_context
+assert_ok "auto" valid_avalon_context auto
+assert_ok "256k, its largest" valid_avalon_context 262144
+assert_fail "more than llama-server takes" valid_avalon_context 524288
+assert_fail "too small" valid_avalon_context 2048
+
+describe avalon_auto_context
+assert_eq "256k from 19 GB" 262144 "$(avalon_auto_context 24564)"
+assert_eq "64k below" 65536 "$(avalon_auto_context 16376)"
+assert_eq "64k when the card is not known" 65536 "$(avalon_auto_context '')"
+
+describe gpu_vram_mib
+_sys="$(mktemp -d)"; mkdir -p "$_sys/0000:03:00.0"
+echo 17163091968 > "$_sys/0000:03:00.0/mem_info_vram_total"
+assert_eq "an AMD card's from amdgpu's sysfs file" 16368 "$(HOST_PCI_SYSFS="$_sys" gpu_vram_mib 03:00.0)"
+nvidia-smi() { printf '00000000:01:00.0, 24564\n00000000:02:00.0, 12288\n'; }
+assert_eq "an NVIDIA card's from nvidia-smi, by address" 12288 "$(HOST_PCI_SYSFS="$_sys" gpu_vram_mib 0000:02:00.0)"
+assert_eq "GPU 0 without an address" 24564 "$(HOST_PCI_SYSFS="$_sys" gpu_vram_mib)"
+assert_eq "nothing for a card nvidia-smi does not list" "" "$(HOST_PCI_SYSFS="$_sys" gpu_vram_mib 0000:09:00.0)"
+nvidia-smi() { echo 'No devices were found'; return 6; }
+assert_eq "nothing when the driver has no answer" "" "$(HOST_PCI_SYSFS="$_sys" gpu_vram_mib)"
+unset -f nvidia-smi
+assert_eq "nothing without nvidia-smi" "" "$(PATH=/nonexistent HOST_PCI_SYSFS="$_sys" gpu_vram_mib)"
+
+describe target_vram
+nvidia-smi() { printf '00000000:01:00.0, 24564\n'; }
+HOST_GPU_CARDS=""
+assert_eq "an NVIDIA-only target uses GPU 0" 24564 "$(HOST_PCI_SYSFS="$_sys" target_vram strata)"
+assert_eq "Ollama with GPU=none runs on the CPU" cpu "$(GPU=none target_vram ollama)"
+assert_eq "so does llama.cpp's CPU build" cpu "$(BACKEND=cpu target_vram llamacpp)"
+assert_eq "a target given no card runs on the CPU" cpu "$(OLLAMA_GPU_CARD=none target_vram ollama)"
+assert_eq "an optional target with no usable card too" cpu "$(OLLAMA_GPU_CARD='' target_vram ollama)"
+assert_eq "a prompted target uses its chosen card" 16368 \
+  "$(HOST_PCI_SYSFS="$_sys" AVALON_GPU_CARD=0000:03:00.0 target_vram avalon)"
+assert_eq "unknown when a required card was not found" "" "$(LLAMACPP_GPU_CARD='' target_vram llamacpp)"
+unset -f nvidia-smi
+rm -rf "$_sys"; unset _sys
+
+describe context_recommendation
+TARGETS="strata"
+assert_eq "65536 when the GPU fits more and nothing needs it" \
+  "65536|the default; its 24564 MiB GPU fits about 131072" "$(context_recommendation strata 24564)"
+assert_eq "the GPU's ceiling below that" \
+  "32768|its 8192 MiB GPU fits about 32768; the default would use 65536" "$(context_recommendation strata 8192)"
+TARGETS="strata honcho"
+assert_eq "Honcho's full budgets raise it to 131072" \
+  "131072|Honcho's full budgets; its 24564 MiB GPU fits about 131072" "$(context_recommendation strata 24564)"
+assert_eq "Avalon by its auto rule" \
+  "131072|Honcho's full budgets; its 20480 MiB GPU fits about 262144" "$(context_recommendation avalon 20480)"
+assert_eq "Xolotl's 128k needs its 24 GB card" \
+  "65536|its 16384 MiB GPU fits about 65536; Honcho's full budgets would use 131072" "$(context_recommendation xolotl 16384)"
+assert_eq "Ollama and llama.cpp are sized for full attention" \
+  "65536|its 24564 MiB GPU fits about 65536; Honcho's full budgets would use 131072" "$(context_recommendation ollama 24564)"
+assert_eq "a 48 GB card for 128k there" "131072" "$(context_recommendation llamacpp 49152 | cut -d'|' -f1)"
+assert_eq "32768 on the CPU" \
+  "32768|it runs on the CPU, where long prompts are slow; Honcho's full budgets would use 131072" "$(context_recommendation ollama cpu)"
+TARGETS="maya"
+assert_eq "the default when the card's memory is not known" \
+  "65536|the default; its GPU's memory is not known yet" "$(context_recommendation maya '')"
+TARGETS=""
+
+describe context_agent_needs
+TARGETS="ollama open-terminal"
+assert_eq "nothing without agents" "" "$(context_agent_needs)"
+TARGETS="ollama honcho hermes openclaw deepseek-harness"
+_out="$(context_agent_needs)"
+assert_contains "Hermes's minimum" "Hermes needs 64000 tokens or more" "$_out"
+assert_contains "OpenClaw's" "OpenClaw needs 32768 tokens or more" "$_out"
+assert_contains "Honcho's budgets" "131072 or more runs its full budgets" "$_out"
+assert_contains "DeepSeek Harness's" "DeepSeek Harness needs 16384 tokens or more" "$_out"
+TARGETS=""
+
+describe context_shortfall
+TARGETS="ollama hermes openclaw"
+assert_eq "nothing when the window fits every agent" "" "$(context_shortfall 65536)"
+assert_contains "Hermes skips a server under 64000" "Hermes will not use this server" "$(context_shortfall 32768)"
+assert_not_contains "OpenClaw fits 32768" "OpenClaw" "$(context_shortfall 32768)"
+assert_contains "but not 16384" "OpenClaw will not fit" "$(context_shortfall 16384)"
+TARGETS="ollama"
+assert_eq "no agents, no notes" "" "$(context_shortfall 8192)"
+TARGETS=""
+
+describe prompt_target_contexts
+nvidia-smi() { printf '00000000:01:00.0, 24564\n'; }
+HOST_GPU_CARDS=""
+unset STRATA_CONTEXT XOLOTL_CONTEXT HONCHO_CONTEXT_TOKENS DEEPSEEK_HARNESS_CONTEXT_WINDOW OLLAMA_CONTEXT_LENGTH
+TARGETS="open-terminal comfyui"
+assert_eq "no target with a window, nothing asked" "" "$(prompt_target_contexts)"
+TARGETS="strata xolotl honcho hermes"
+_out="$(mktemp)"
+prompt_target_contexts > "$_out" 2>&1 <<< $'\n32768\n\n'
+assert_eq "Enter keeps the 65536 default" 65536 "$STRATA_CONTEXT"
+assert_eq "an answer is kept" 32768 "$XOLOTL_CONTEXT"
+assert_contains "each target shows its recommendation" "strata: 131072 tokens recommended (Honcho's full budgets; its 24564 MiB GPU fits about 131072)." "$(cat "$_out")"
+assert_contains "the selected agents' needs are listed" "Hermes needs 64000 tokens or more" "$(cat "$_out")"
+assert_contains "a window too small for Hermes is flagged" "Hermes will not use this server" "$(cat "$_out")"
+assert_eq "Honcho defaults to the smallest window chosen" 32768 "$HONCHO_CONTEXT_TOKENS"
+assert_contains "and says which that is" "the smallest above is 32768" "$(cat "$_out")"
+STRATA_CONTEXT=131072; HONCHO_CONTEXT_TOKENS=""; TARGETS="strata honcho"
+prompt_target_contexts > "$_out" 2>&1 <<< $'\n\n'
+assert_eq "a preset is the default" 131072 "$STRATA_CONTEXT"
+assert_eq "an empty Honcho preset keeps Honcho's own budgets" "" "$HONCHO_CONTEXT_TOKENS"
+unset STRATA_CONTEXT HONCHO_CONTEXT_TOKENS
+TARGETS="avalon"; AVALON_GPU_CARD=""; unset AVALON_CONTEXT
+prompt_target_contexts > "$_out" 2>&1 <<< $'100\nauto\n'
+assert_contains "a value out of range is asked again" "Not a valid value: '100'" "$(cat "$_out")"
+assert_eq "Avalon takes auto" auto "$AVALON_CONTEXT"
+TARGETS="llamacpp deepseek-harness"; LLAMACPP_GPU_CARD=0000:01:00.0; PARALLEL_SLOTS=2; unset LLAMACPP_CONTEXT CONTEXT_SIZE
+prompt_target_contexts > "$_out" 2>&1 <<< $'\n\n'
+assert_eq "llama.cpp asks per request" 65536 "$LLAMACPP_CONTEXT"
+assert_contains "and says what CONTEXT_SIZE becomes" "CONTEXT_SIZE=131072" "$(cat "$_out")"
+assert_eq "Harness defaults to the smallest window too" 65536 "$DEEPSEEK_HARNESS_CONTEXT_WINDOW"
+TARGETS="honcho"; unset HONCHO_CONTEXT_TOKENS
+prompt_target_contexts > "$_out" 2>&1 <<< $'\n'
+assert_eq "without model targets, Honcho defaults to 65536" 65536 "$HONCHO_CONTEXT_TOKENS"
+TARGETS="strata"; STRATA_CONTEXT=64k
+assert_fail "an invalid preset with no more input stops the prompts" prompt_target_contexts <<< $'\n'
+unset -f nvidia-smi
+unset STRATA_CONTEXT XOLOTL_CONTEXT HONCHO_CONTEXT_TOKENS DEEPSEEK_HARNESS_CONTEXT_WINDOW AVALON_CONTEXT AVALON_GPU_CARD \
+  LLAMACPP_GPU_CARD LLAMACPP_CONTEXT PARALLEL_SLOTS
+TARGETS=""
+
 describe run_target_provisioner
 CT_ID=910; GATEWAY=192.0.2.1; BRIDGE=vmbr2; NAMESERVER=""; OPENWEBUI_PORT=8080
 TEMPLATE_REF=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst
@@ -1065,6 +1244,7 @@ STRATA_CT_ID=912; STRATA_STORAGE=gpu-store; STRATA_TEMPLATE=local:vztmpl/ubuntu-
 LLAMACPP_CT_ID=913; LLAMACPP_IP_CIDR=192.0.2.93/24; LLAMACPP_STORAGE=t-store
 HERMES_CT_ID=914; HERMES_IP_CIDR=192.0.2.94/24; HERMES_STORAGE=t-store
 OPENCLAW_CT_ID=918; OPENCLAW_IP_CIDR=192.0.2.98/24; OPENCLAW_STORAGE=t-store
+DEEPSEEK_HARNESS_CT_ID=921; DEEPSEEK_HARNESS_IP_CIDR=192.0.2.101/24; DEEPSEEK_HARNESS_STORAGE=t-store
 HONCHO_CT_ID=920; HONCHO_IP_CIDR=192.0.2.100/24; HONCHO_STORAGE=t-store
 TARGET_ADMIN_TOKEN=owui-admin-secret; export EXPECT_TOKEN=owui-admin-secret
 mock_reset_log
@@ -1119,17 +1299,42 @@ mock_reset_log
 run_target_provisioner openclaw
 assert_eq "OpenClaw too gets the router CT, the router's template and the token" \
   "provision openclaw|918|192.0.2.98/24|192.0.2.1|t-store|vmbr2|local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst|||910|8080|match|" "$(mock_calls)"
-TARGETS="honcho hermes openclaw"; HONCHO_READY=false
+mock_reset_log
+run_target_provisioner deepseek-harness
+assert_eq "Harness gets its own CT and router, without the Open WebUI admin token" \
+  "provision deepseek-harness|921|192.0.2.101/24|192.0.2.1|t-store|vmbr2|local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst|||910|8080|no|
+context-env ||||unset|65536" "$(mock_calls)"
+mock_reset_log
+DEEPSEEK_HARNESS_CONTEXT_WINDOW=32768 run_target_provisioner deepseek-harness
+assert_contains "and the window chosen for it" "context-env ||||unset|32768" "$(mock_calls)"
+mock_reset_log
+STRATA_CONTEXT=131072 run_target_provisioner strata
+assert_contains "a model target gets its chosen window" "context-env ||131072||unset|" "$(mock_calls)"
+mock_reset_log
+OLLAMA_CONTEXT_LENGTH=32768 run_target_provisioner ollama
+assert_contains "Ollama as its server default" "context-env 32768||||unset|" "$(mock_calls)"
+mock_reset_log
+LLAMACPP_CONTEXT=65536 PARALLEL_SLOTS=2 run_target_provisioner llamacpp
+assert_contains "llama.cpp as CONTEXT_SIZE for all its slots" "context-env |131072|||unset|" "$(mock_calls)"
+
+TARGETS="honcho hermes openclaw deepseek-harness"; HONCHO_READY=false
 mock_reset_log
 run_target_provisioner honcho
 assert_contains "Honcho reuses the router's Debian 13 template" \
   "provision honcho|920|192.0.2.100/24|192.0.2.1|t-store|vmbr2|local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst" "$(mock_calls)"
-assert_contains "Honcho gets both selected agent addresses" \
-  "honcho-env 192.0.2.94 192.0.2.98||" "$(mock_calls)"
+assert_contains "Honcho gets every selected agent address" \
+  "honcho-env 192.0.2.94 192.0.2.98 192.0.2.101||" "$(mock_calls)"
 assert_contains "Honcho gets the prompted embedding settings" \
   "embedding-env nomic-embed-text|768|http://192.0.2.90:11434/v1" "$(mock_calls)"
 assert_contains "Honcho gets the router IP entered earlier" "router-ip 192.0.2.80" "$(mock_calls)"
 assert_contains "Honcho gets the selected router chat model" "chat-model fast" "$(mock_calls)"
+assert_not_contains "an unset Honcho window is not passed (a first install sizes for 65536)" "context-env" "$(mock_calls)"
+mock_reset_log
+HONCHO_CONTEXT_TOKENS=32768 run_target_provisioner honcho
+assert_contains "a chosen Honcho window is passed" "context-env ||||32768|" "$(mock_calls)"
+mock_reset_log
+HONCHO_CONTEXT_TOKENS='' run_target_provisioner honcho
+assert_contains "and a blank one, for Honcho's own budgets" "context-env |||||" "$(mock_calls)"
 HONCHO_READY=true
 mock_reset_log
 run_target_provisioner hermes
@@ -1138,6 +1343,10 @@ assert_contains "Hermes gets the provisioned Honcho endpoint and CT" \
 mock_reset_log
 run_target_provisioner openclaw
 assert_contains "OpenClaw gets it too" "honcho-env |http://192.0.2.100:8000|920" "$(mock_calls)"
+mock_reset_log
+run_target_provisioner deepseek-harness
+assert_contains "and DeepSeek Harness (for Honcho's MCP server)" "honcho-env |http://192.0.2.100:8000|920" "$(mock_calls)"
+assert_contains "still without the Open WebUI admin token" "|no|" "$(mock_calls)"
 COMFYUI_CT_ID=917; COMFYUI_IP_CIDR=192.0.2.97/24; COMFYUI_STORAGE=t-store
 COMFYUI_COMMUNITY_SCRIPT_SHA256=def456
 COMFYUI_IMAGE_VARIANT=klein-4b
@@ -1316,6 +1525,16 @@ FAKE_FAIL=openclaw provision_selected_targets > "$_out" 2>&1; _rc=$?
 assert_eq "a failed OpenClaw companion fails the run" 1 "$_rc"
 assert_contains "and gives its partial CT recovery command" \
   "CT_ID=918 ROUTER_CT_ID=910 bash targets/openclaw/provision-lxc.sh --reconfigure" "$(cat "$_out")"
+TARGETS="deepseek-harness"
+mock_reset_log
+provision_selected_targets > "$_out" 2>&1; _rc=$?
+assert_eq "Harness alone succeeds without Open WebUI admin setup" 0 "$_rc"
+assert_eq "it provisions directly" "run deepseek-harness" "$(mock_calls)"
+TARGETS="hermes deepseek-harness"
+mock_reset_log
+FAKE_NO_TOKEN=1 provision_selected_targets > "$_out" 2>&1; _rc=$?
+assert_eq "Harness still runs when Open WebUI has no admin key" "$(printf '%s\n' wait token 'run deepseek-harness')" "$(mock_calls)"
+assert_contains "Hermes is skipped" "skipped (no Open WebUI admin key)" "$(cat "$_out")"
 TARGETS="ollama strata hermes"
 FAKE_NO_TOKEN=1 provision_selected_targets > "$_out" 2>&1; _rc=$?
 assert_eq "no admin key fails the run" 1 "$_rc"

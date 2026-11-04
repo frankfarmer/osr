@@ -57,6 +57,26 @@ printf '[OPTIONS]\nenable: 1\n' > "$fw"
 assert_contains "a file without rules gets a [RULES] section" "$(printf '[RULES]\nIN ACCEPT -source 192.0.2.85/32')" "$(router_fw_with_honcho "$fw" 192.0.2.85 8000)"
 rm -f "$fw"
 
+describe honcho_rules
+# shellcheck disable=SC1090
+source <(awk '/^# Honcho firewall helpers$/{c=1;next} /^# End Honcho firewall helpers\.$/{c=0} c' "$provision")
+rules=$(honcho_rules 192.0.2.80 192.0.2.81 192.0.2.82)
+assert_contains "the router reaches the API" "-source 192.0.2.80/32 -p tcp -dport 8000 -log nolog # osr-honcho-api" "$rules"
+assert_contains "and MCP (Open WebUI)" "-source 192.0.2.80/32 -p tcp -dport 3000 -log nolog # osr-honcho-mcp" "$rules"
+assert_contains "an agent reaches the API" "-source 192.0.2.81/32 -p tcp -dport 8000 -log nolog # osr-honcho-api" "$rules"
+assert_contains "and MCP (DeepSeek Harness uses it), under its own tag" "-source 192.0.2.82/32 -p tcp -dport 3000 -log nolog # osr-honcho-client-mcp" "$rules"
+assert_eq "one API and one MCP rule each" 6 "$(grep -c '^IN ACCEPT' <<< "$rules")"
+fw=$(mktemp)
+printf '[RULES]\n%s\nIN ACCEPT -source 192.0.2.0/24 -p tcp -dport 22\n' "$rules" > "$fw"
+assert_eq "a reconfigure reads back the agents, not the router" "192.0.2.81 192.0.2.82" "$(honcho_fw_clients "$fw")"
+printf '[RULES]\n%s\n' "$(honcho_rules 192.0.2.80)" > "$fw"
+assert_eq "no agents: an empty list" "" "$(honcho_fw_clients "$fw")"
+# A Honcho CT from before agents had MCP rules reads back the same.
+printf '[RULES]\nIN ACCEPT -source 192.0.2.80/32 -p tcp -dport 8000 -log nolog # osr-honcho-api\nIN ACCEPT -source 192.0.2.80/32 -p tcp -dport 3000 -log nolog # osr-honcho-mcp\nIN ACCEPT -source 192.0.2.81/32 -p tcp -dport 8000 -log nolog # osr-honcho-api\n' > "$fw"
+assert_eq "older rule sets read back too" "192.0.2.81" "$(honcho_fw_clients "$fw")"
+assert_contains "replacing the rules drops the agents' MCP rules too" 'osr-honcho-(api|mcp|client-mcp)$' "$(cat "$provision")"
+rm -f "$fw"
+
 describe rotation_recovery
 # shellcheck disable=SC1090
 source <(awk '/^# Rotation recovery helper$/{c=1;next} /^# End rotation recovery helper\.$/{c=0} c' "$provision")
@@ -152,7 +172,10 @@ assert_not_contains "unset ones are not" "HONCHO_REF=" "$plan"
 plan=$(env "${common[@]}" HONCHO_REF=v3.6.0 bash "$provision" --dry-run --reconfigure)
 assert_contains "a given release is used" "with v3.6.0" "$plan"
 assert_not_contains "and the guest is never handed a default it did not ask for" "HONCHO_MODEL=fast" "$(env "${common[@]}" bash "$provision" --dry-run --reconfigure)"
-assert_contains "budgets.py is pushed with the guest installer" "install-target.sh budgets.py honcho-api.service" "$(cat "$provision")"
+assert_contains "budgets.py is pushed with the guest installer" "install-target.sh budgets.py honcho-proxy.py" "$(cat "$provision")"
+assert_contains "the local proxy is staged" "honcho-proxy.py direct_dispatch.py honcho-proxy.service" "$(cat "$provision")"
+assert_contains "backend keys are staged for the proxy" '"$stage/backend-keys" /root/honcho-deploy/backend-keys' "$(cat "$provision")"
+assert_ok "the vendored direct dispatcher matches Hermes" cmp -s "$here/direct_dispatch.py" "$here/../hermes/direct-dispatch.py"
 
 describe honcho_guest_files
 install=$here/install-target.sh
@@ -161,12 +184,15 @@ assert_contains "Bun comes from a checksum-pinned release zip" 'sha256sum -c --q
 assert_not_contains "and never from a piped install script" 'bun.sh/install' "$(cat "$install")"
 assert_contains "clients get a key scoped to the osr workspace" 'generate_key --workspace osr' "$(cat "$install")"
 assert_contains "Open WebUI is given that key" '/etc/honcho-target/client-api-key' "$(cat "$provision")"
+assert_contains "Honcho uses a stable local chat endpoint" '%s_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1' "$(cat "$install")"
+assert_contains "Honcho uses a stable local embedding endpoint" 'EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1' "$(cat "$install")"
+assert_contains "the proxy runs as a dedicated user" 'User=honcho-proxy' "$(cat "$here/honcho-proxy.service")"
 assert_not_contains "and never the admin key" 'cat /etc/honcho-target/api-key' "$(cat "$provision")"
 for unit in honcho-api honcho-deriver; do
   assert_contains "$unit runs the locked environment" 'uv run --frozen --no-dev' "$(cat "$here/$unit.service")"
 done
 assert_contains "the MCP unit runs the pinned Bun" 'ExecStart=/opt/honcho-bun/bun run http' "$(cat "$here/honcho-mcp.service")"
-for agent in hermes openclaw; do
+for agent in hermes openclaw deepseek-harness; do
   assert_not_contains "$agent never takes the Honcho admin key" '/etc/honcho-target/api-key' "$(cat "$here/../$agent/provision-lxc.sh")"
 done
 summary

@@ -38,7 +38,7 @@ Optional: CT_HOSTNAME=strata-target, BRIDGE=vmbr0, CORES=8, MEMORY_MB=65536,
           STRATA_REF=<branch or tag> (explicitly follow it when no commit is set),
           STRATA_MODEL=IQ2_XS (IQ1_M for coder, UD-IQ4_XS for unsloth), STRATA_FAMILY=qwen (or swift, coder,
           unsloth: whatever the checkout's setup.sh offers),
-          STRATA_CONTEXT=32768,
+          STRATA_CONTEXT=65536,
           STRATA_VISION=no, STRATA_PORT=8080 (or 11434),
           STRATA_READY_TIMEOUT=900, STRATA_ALLOW_NO_KEY=false.
 
@@ -133,7 +133,7 @@ case $STRATA_FAMILY in
     unsloth) STRATA_MODEL=${STRATA_MODEL:-UD-IQ4_XS} ;;
     *) STRATA_MODEL=${STRATA_MODEL:-IQ2_XS} ;;
 esac
-STRATA_CONTEXT=${STRATA_CONTEXT:-32768}
+STRATA_CONTEXT=${STRATA_CONTEXT:-65536}
 STRATA_VISION=${STRATA_VISION:-no}
 STRATA_PORT=${STRATA_PORT:-8080}
 STRATA_READY_TIMEOUT=${STRATA_READY_TIMEOUT:-900}

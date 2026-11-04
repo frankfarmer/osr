@@ -33,8 +33,8 @@ it, which:
   [Qwen3.8-Flash-Next-Avalon-GGUF](https://huggingface.co/freriadoc/Qwen3.8-Flash-Next-Avalon-GGUF)
   files: the 33 shards of the model, its MTP draft head and the expert ranking
   that prefills the GPU cache (`avalon-weights.txt`);
-- serves it with upstream's launcher settings (256k context, q8_0/q4_0 KV
-  cache, MTP with 2 draft tokens, `--parallel 1`) as a hardened systemd
+- serves it with upstream's launcher settings (q8_0/q4_0 KV cache, MTP with
+  2 draft tokens, `--parallel 1`) and a 64k context by default as a hardened systemd
   service under its own `avalon` account, with a generated API key.
 
 The router recognizes the target as `avalon://<CT address>` (port 8080), and
@@ -50,8 +50,9 @@ sizes its model id `qwen3.8-flash-next-avalon` as 125B.
   driver; the CT gets `/dev/kfd` and the card's render node.
 - **GPU, NVIDIA:** compute capability 7.5 or newer. Upstream measured an
   RTX 4090 once; its kernels are tuned for RDNA 3, not NVIDIA, yet.
-- **VRAM:** 16 GB or more. With 19 GB or more the context is the full 256k
-  tokens (`AVALON_CONTEXT=auto`); below that, 64k, as upstream suggests.
+- **VRAM:** 16 GB or more. The context is 64k tokens by default;
+  `AVALON_CONTEXT=auto` gives upstream's full 256k with 19 GB or more and 64k
+  below that, as upstream suggests.
 - **CPU:** AVX2 (any recent x86 CPU; the experts that miss the GPU are
   computed with it). The CT gets 8 cores by default.
 - **RAM:** the ~90 GiB model is memory-mapped, so what does not fit is read
@@ -111,7 +112,7 @@ Settings (environment variables of either script):
 | `AVALON_CUDA_VERSION` | `12.9` | the CUDA toolkit (12.4 or newer; RTX 50 needs 12.8 or newer) |
 | `AVALON_CUDA_ARCH` | `auto` | the compute capability as a number (`86`, `89`, `120`); `auto` reads GPU 0 |
 | `AVALON_PORT` | `8080` | the API port |
-| `AVALON_CONTEXT` | `auto` | the context (`-c`), 4096-262144; `auto` is 262144 with 19 GB of VRAM or more, else 65536 |
+| `AVALON_CONTEXT` | `65536` | the context (`-c`), 4096-262144; `auto` is 262144 with 19 GB of VRAM or more, else 65536 |
 | `AVALON_MTP` | `true` | MTP speculative decoding with the 1.4 GB draft head; `false` skips its download |
 | `AVALON_MODEL_NAME` | `qwen3.8-flash-next-avalon` | the model id the API lists (`--alias`) |
 | `AVALON_READY_TIMEOUT` | `1800` | seconds to wait for the model to load |
@@ -193,7 +194,7 @@ Every rerun of the installer, with or without `--upgrade`, keeps the
 installation's settings from `/etc/avalon-target/installed-env`. Non-empty
 environment settings override the corresponding saved values; a new
 `AVALON_CUDA_VERSION` without `AVALON_NVCC` takes that release's default nvcc,
-and a new `AVALON_BACKEND` detects its GPU target and context again. Only a
+and a new `AVALON_BACKEND` detects its GPU target again and sets the context to `auto` unless `AVALON_CONTEXT` is given. Only a
 fresh install uses the defaults. A fresh install records the settings it runs
 with in `/etc/avalon-target/pending-env` before its first change, so an install
 that stops part-way resumes with them. An existing checkout or unit with no

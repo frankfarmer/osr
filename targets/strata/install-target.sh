@@ -54,7 +54,7 @@ Environment: STRATA_COMMIT=a0116b2782a5b82622358c04a06496485d12b2d6 (tested defa
 STRATA_REF=<branch or tag> (follow it when no commit is set); STRATA_COMMIT=
 explicitly follows main,
 STRATA_MODEL=IQ2_XS (IQ1_M for coder, UD-IQ4_XS for unsloth), STRATA_FAMILY=qwen (any family the
-checkout's setup.sh lists, e.g. swift, coder, unsloth), STRATA_CONTEXT=32768,
+checkout's setup.sh lists, e.g. swift, coder, unsloth), STRATA_CONTEXT=65536,
 STRATA_VISION=no, STRATA_PORT=8080, STRATA_READY_TIMEOUT=900 (seconds),
 STRATA_ALLOW_NO_KEY=false (true: accept a checkout without --api-key support).
 USAGE
@@ -811,7 +811,7 @@ case $STRATA_FAMILY in
     unsloth) STRATA_MODEL=${STRATA_MODEL:-UD-IQ4_XS} ;;
     *) STRATA_MODEL=${STRATA_MODEL:-IQ2_XS} ;;
 esac
-STRATA_CONTEXT=${STRATA_CONTEXT:-32768}
+STRATA_CONTEXT=${STRATA_CONTEXT:-65536}
 STRATA_VISION=${STRATA_VISION:-no}
 STRATA_PORT=${STRATA_PORT:-8080}
 STRATA_READY_TIMEOUT=${STRATA_READY_TIMEOUT:-900}

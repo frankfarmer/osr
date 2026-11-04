@@ -73,7 +73,7 @@ inspection if setup fails.
 The guest installer uses `MAYA_MODEL=Maya-S-v2-IQ2_XXS` by default. Set
 `MAYA_MODEL` to another name listed by the checked-out `setup.sh --help`,
 such as `Maya-S24`, `Maya-M`, or `Maya-L`. Other settings include
-`MAYA_CONTEXT=32768`, `MAYA_DRAFT=mtp`, `MAYA_NO_VISION=false`,
+`MAYA_CONTEXT=65536`, `MAYA_DRAFT=mtp`, `MAYA_NO_VISION=false`,
 `MAYA_CUDA_VERSION=12.8`, `MAYA_PORT=8080`, and
 `MAYA_READY_TIMEOUT=900`. Setup receives `--yes --download-model --no-start`,
 so it downloads and builds without an interactive prompt; the service then

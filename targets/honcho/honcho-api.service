@@ -1,8 +1,8 @@
 [Unit]
 Description=Honcho API
-After=network-online.target postgresql.service
+After=network-online.target postgresql.service honcho-proxy.service
 Wants=network-online.target
-Requires=postgresql.service
+Requires=postgresql.service honcho-proxy.service
 
 [Service]
 User=honcho

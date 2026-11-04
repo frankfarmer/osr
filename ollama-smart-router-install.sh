@@ -963,6 +963,7 @@ target_table() {
     'honcho|companion|Honcho AI: shared agent memory and MCP tools; CPU, needs an embedding endpoint|||' \
     'hermes|companion|Hermes Agent: offered in Open WebUI as the model hermes-agent|||' \
     'openclaw|companion|OpenClaw: agent offered in Open WebUI as the model openclaw|||' \
+    'deepseek-harness|companion|DeepSeek Harness: agent Web UI in its own LXC, using OSR models|||' \
     'open-terminal|companion|Open Terminal: a shell tool for Open WebUI|||' \
     'comfyui|companion|ComfyUI: image generation for Open WebUI (NVIDIA, AMD or Intel Arc GPU when present)|||optional:nvidia,amd,intel'
 }
@@ -1427,7 +1428,7 @@ target_menu_group() {
         model) echo 'Model servers (GPU required by default):' ;;
         companion)
           case "$1" in
-            hermes|openclaw) echo 'Agents (CPU): connected to Open WebUI and optional Honcho memory.' ;;
+            hermes|openclaw|deepseek-harness) echo 'Agents (CPU): OSR-backed, with optional Honcho memory.' ;;
             open-terminal) echo 'Open WebUI tools (CPU):' ;;
             comfyui) echo 'Image generation (GPU optional):' ;;
           esac ;;
@@ -1542,6 +1543,7 @@ valid_honcho_model() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; }
 valid_honcho_embedding_url() { [[ -z $1 || $1 =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]]; }
 # Blank: Honcho's own token budgets (fine for a context window of 128k or more).
 valid_honcho_context_tokens() { [[ -z $1 || ( $1 =~ ^[1-9][0-9]{3,6}$ && $1 -ge 8192 && $1 -le 1048576 ) ]]; }
+valid_dsh_context_tokens() { [[ $1 =~ ^[1-9][0-9]{4,6}$ && $1 -ge 16384 && $1 -le 1048576 ]]; }
 valid_hf_token() { [[ $1 =~ ^hf_[A-Za-z0-9]{30,}$ ]]; }
 
 # host_gpu_cuda_arch: GPU 0's compute capability (86), from the GPU step or,
@@ -1641,9 +1643,11 @@ prompt_target_settings() {
       prompt_until_valid "    Embedding model" HONCHO_EMBEDDING_MODEL "${HONCHO_EMBEDDING_MODEL:-}" valid_honcho_model || return 1
       prompt_until_valid "    Embedding dimensions" HONCHO_EMBEDDING_DIMENSIONS "${HONCHO_EMBEDDING_DIMENSIONS:-}" valid_positive_int || return 1
       prompt_until_valid "    Embedding base URL" HONCHO_EMBEDDING_BASE_URL "${HONCHO_EMBEDDING_BASE_URL:-}" valid_honcho_embedding_url || return 1
-      echo "    The chat model's context window in tokens sizes Honcho's budgets (e.g. 32768 on a"
-      echo "    small GPU). Leave it blank for Honcho's defaults, which assume about 128k."
-      prompt_until_valid "    Model context window" HONCHO_CONTEXT_TOKENS "${HONCHO_CONTEXT_TOKENS:-}" valid_honcho_context_tokens || return 1
+      echo "    Its context window is asked with the model targets' windows, below."
+    fi
+    if [[ $name == deepseek-harness ]]; then
+      echo "    Harness runs its own tools; choose an OSR model that supports tool calls."
+      prompt_until_valid "    Model or tier" DEEPSEEK_HARNESS_MODEL "${DEEPSEEK_HARNESS_MODEL:-auto}" valid_honcho_model || return 1
     fi
     if [[ $name == comfyui ]]; then
       echo "    Image model; the CT install downloads its diffusion model, text encoder and VAE:"
@@ -1684,6 +1688,204 @@ prompt_target_settings() {
       fi
     fi
   done
+}
+
+# --- context windows ----------------------------------------------------------
+# A model target's context window is the most tokens one request can hold
+# (prompt, history, tool definitions and reply). Every target that has the
+# setting defaults to 65536; prompt_target_contexts asks for each one and
+# recommends a size from the target's engine, its GPU's memory and the agents
+# selected with it.
+
+# target_context_var NAME: the variable holding a model target's per-request
+# context window; fails for a target without one. llama.cpp's CONTEXT_SIZE is
+# shared by its PARALLEL_SLOTS, so its per-request window is LLAMACPP_CONTEXT
+# here. AirLLM streams layers from disk and keeps its own AIRLLM_MAX_SEQ_LEN.
+target_context_var() {
+  case "$1" in
+    ollama) echo OLLAMA_CONTEXT_LENGTH ;;
+    llamacpp) echo LLAMACPP_CONTEXT ;;
+    strata|basalt|maya|xolotl|avalon) echo "$(target_var_prefix "$1")_CONTEXT" ;;
+    *) return 1 ;;
+  esac
+}
+# llamacpp_slots: PARALLEL_SLOTS when it is a positive number, else 1.
+llamacpp_slots() {
+  if [[ ${PARALLEL_SLOTS:-} =~ ^[1-9][0-9]*$ ]]; then echo "$PARALLEL_SLOTS"; else echo 1; fi
+}
+# target_context_preset NAME: the context window preset for a target, or
+# nothing. A preset llama.cpp CONTEXT_SIZE is divided among its slots.
+target_context_preset() {
+  local var
+  var="$(target_context_var "$1")" || return 1
+  if [[ $1 == llamacpp && -z ${LLAMACPP_CONTEXT:-} && ${CONTEXT_SIZE:-} =~ ^[1-9][0-9]*$ ]]; then
+    echo $(( CONTEXT_SIZE / $(llamacpp_slots) ))
+    return 0
+  fi
+  printf '%s\n' "${!var:-}"
+}
+# target_context_env NAME: the setting the target's provisioner reads, as
+# VAR=value, or nothing when no window was chosen. llama.cpp gets CONTEXT_SIZE,
+# the window times its slots.
+target_context_env() {
+  local var
+  var="$(target_context_var "$1")" || return 0
+  [[ -n ${!var:-} ]] || return 0
+  if [[ $1 == llamacpp ]]; then
+    echo "CONTEXT_SIZE=$(( ${!var} * $(llamacpp_slots) ))"
+  else
+    echo "${var}=${!var}"
+  fi
+}
+valid_target_context() { [[ $1 =~ ^[1-9][0-9]{3,6}$ ]] && (( $1 >= 4096 && $1 <= 1048576 )); }
+# Avalon's llama-server takes 4096..262144, or auto (from the card's VRAM).
+valid_avalon_context() { [[ $1 == auto ]] || { valid_target_context "$1" && (( $1 <= 262144 )); }; }
+# avalon_auto_context VRAM_MIB: what AVALON_CONTEXT=auto gives (65536 when the
+# card's memory is not known).
+avalon_auto_context() {
+  if [[ $1 =~ ^[0-9]+$ ]] && (( $1 >= 19000 )); then echo 262144; else echo 65536; fi
+}
+
+# gpu_vram_mib [ADDRESS]: a GPU's memory in MiB, or nothing when it is not known
+# (its driver is not loaded yet). ADDRESS (0000:03:00.0) picks the card: an
+# AMD card's from amdgpu's sysfs file, an NVIDIA card's from nvidia-smi.
+# Without one, NVIDIA GPU 0 (the card the NVIDIA-only targets use).
+gpu_vram_mib() {
+  local address="${1,,}" sysfs="${HOST_PCI_SYSFS:-/sys/bus/pci/devices}" bytes bus mib
+  [[ -z $address || $address == *:*:* ]] || address="0000:${address}"
+  if [[ -n $address && -r $sysfs/$address/mem_info_vram_total ]]; then
+    bytes="$(< "$sysfs/$address/mem_info_vram_total")"
+    if [[ $bytes =~ ^[0-9]+$ ]] && (( bytes > 0 )); then echo $(( bytes / 1048576 )); return 0; fi
+  fi
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  while IFS=', ' read -r bus mib; do
+    [[ $mib =~ ^[0-9]+$ ]] || continue
+    # nvidia-smi writes the domain with 8 digits (00000000:03:00.0).
+    if [[ -z $address || ${bus,,} == *":${address#*:}" ]]; then echo "$mib"; return 0; fi
+  done < <(nvidia-smi --query-gpu=pci.bus_id,memory.total --format=csv,noheader,nounits 2>/dev/null)
+  return 0
+}
+# target_vram NAME: the memory of the GPU a model target will use in MiB, cpu
+# when it runs on the CPU, or nothing when that is not known yet.
+target_vram() {
+  local name="$1" card
+  [[ -n "$(target_gpu_need "$name")" ]] || { echo cpu; return 0; }
+  if target_gpu_prompted "$name"; then
+    card="$(target_setting "$name" GPU_CARD)"
+    if [[ ${card,,} == none || ( -z $card && "$(target_gpu_need "$name")" == optional ) ]]; then
+      echo cpu; return 0
+    fi
+    [[ -z $card ]] || gpu_vram_mib "$card"
+    return 0
+  fi
+  gpu_vram_mib
+}
+# context_recommendation NAME VRAM: TOKENS|REASON, the window to suggest for a
+# model target. VRAM is target_vram's answer. The GPU sets a ceiling: Avalon
+# and Xolotl by their upstream sizing (Avalon's auto rule; Xolotl's 128k on a
+# 24 GB card), Strata, Basalt and Maya (hybrid or compressed attention, a small
+# KV cache) from their card's size, and Ollama and llama.cpp more cautiously, as
+# a full-attention model's KV cache grows fastest. Under that ceiling, 65536,
+# or 131072 when Honcho is selected (its full budgets).
+context_recommendation() {
+  local name="$1" vram="$2" ceiling reason want=65536 why="the default"
+  if [[ " ${TARGETS:-} " == *" honcho "* ]]; then want=131072; why="Honcho's full budgets"; fi
+  if [[ $vram == cpu ]]; then
+    ceiling=32768; reason="it runs on the CPU, where long prompts are slow"
+  elif [[ ! $vram =~ ^[0-9]+$ ]]; then
+    ceiling=65536; reason="its GPU's memory is not known yet"
+  else
+    case "$name" in
+      avalon) ceiling="$(avalon_auto_context "$vram")" ;;
+      xolotl) if (( vram >= 24000 )); then ceiling=131072; else ceiling=65536; fi ;;
+      strata|basalt|maya)
+        if (( vram >= 24000 )); then ceiling=131072
+        elif (( vram >= 12000 )); then ceiling=65536
+        else ceiling=32768; fi ;;
+      *)
+        if (( vram >= 48000 )); then ceiling=131072
+        elif (( vram >= 16000 )); then ceiling=65536
+        else ceiling=32768; fi ;;
+    esac
+    reason="its ${vram} MiB GPU fits about ${ceiling}"
+  fi
+  if (( want <= ceiling )); then
+    echo "${want}|${why}; ${reason}"
+  else
+    echo "${ceiling}|${reason}; ${why} would use ${want}"
+  fi
+}
+# context_agent_needs: one line for each selected agent that needs a minimum.
+context_agent_needs() {
+  local name
+  for name in ${TARGETS:-}; do
+    case "$name" in
+      hermes) echo "  Hermes needs 64000 tokens or more; it does not use a server with less." ;;
+      openclaw) echo "  OpenClaw needs 32768 tokens or more (65536 by default)." ;;
+      honcho) echo "  Honcho fits its budgets to its model's window; 131072 or more runs its full budgets." ;;
+      deepseek-harness) echo "  DeepSeek Harness needs 16384 tokens or more." ;;
+    esac
+  done
+}
+# context_shortfall TOKENS: a warning for each selected agent that needs more.
+context_shortfall() {
+  if [[ " ${TARGETS:-} " == *" hermes "* ]] && (( $1 < 64000 )); then
+    echo "    Note: Hermes will not use this server (it needs 64000 tokens or more)."
+  fi
+  if [[ " ${TARGETS:-} " == *" openclaw "* ]] && (( $1 < 32768 )); then
+    echo "    Note: OpenClaw will not fit on this server (it needs 32768 tokens or more)."
+  fi
+  return 0
+}
+
+# prompt_target_contexts: the context window of each selected model target,
+# with a recommendation, then Honcho's and DeepSeek Harness's windows, which
+# default to the smallest window chosen above. Asked after the GPU choices, so
+# each recommendation knows its card. Presets (STRATA_CONTEXT, CONTEXT_SIZE,
+# OLLAMA_CONTEXT_LENGTH, HONCHO_CONTEXT_TOKENS, ...) are the defaults.
+prompt_target_contexts() {
+  local name var vram rec reason default value smallest="" any=false
+  for name in ${TARGETS:-}; do
+    if target_context_var "$name" >/dev/null || [[ $name == honcho || $name == deepseek-harness ]]; then any=true; fi
+  done
+  [[ $any == true ]] || return 0
+  echo
+  echo "--- Context windows ---"
+  echo "  A context window is the most tokens one request can hold: prompt, history,"
+  echo "  tool definitions and reply. Every token costs GPU memory (the KV cache)."
+  context_agent_needs
+  for name in $TARGETS; do
+    var="$(target_context_var "$name")" || continue
+    vram="$(target_vram "$name")"
+    IFS='|' read -r rec reason <<< "$(context_recommendation "$name" "$vram")"
+    echo "  ${name}: ${rec} tokens recommended (${reason})."
+    default="$(target_context_preset "$name")"
+    if [[ $name == avalon ]]; then
+      echo "    auto: 262144 with 19 GB of VRAM or more, else 65536."
+      prompt_until_valid "    Context window (tokens, or auto)" "$var" "${default:-65536}" valid_avalon_context || return 1
+    else
+      prompt_until_valid "    Context window (tokens)" "$var" "${default:-65536}" valid_target_context || return 1
+    fi
+    value="${!var}"
+    [[ $value != auto ]] || value="$(avalon_auto_context "$vram")"
+    if [[ $name == llamacpp && $(llamacpp_slots) -gt 1 ]]; then
+      echo "    llama.cpp shares CONTEXT_SIZE among its ${PARALLEL_SLOTS} slots: CONTEXT_SIZE=$(( value * $(llamacpp_slots) ))."
+    fi
+    context_shortfall "$value"
+    if [[ -z $smallest ]] || (( value < smallest )); then smallest=$value; fi
+  done
+  if [[ " ${TARGETS} " == *" honcho "* ]]; then
+    echo "  honcho: its budgets follow its chat model's context window. Give the window the"
+    echo "    server behind HONCHO_MODEL serves${smallest:+ (the smallest above is ${smallest})}. Blank: Honcho's"
+    echo "    own budgets, which need models that report 131072 tokens or more."
+    prompt_until_valid "    Model context window" HONCHO_CONTEXT_TOKENS \
+      "${HONCHO_CONTEXT_TOKENS-${smallest:-65536}}" valid_honcho_context_tokens || return 1
+  fi
+  if [[ " ${TARGETS} " == *" deepseek-harness "* ]]; then
+    echo "  deepseek-harness: the context its OSR model serves${smallest:+ (the smallest above is ${smallest})}."
+    prompt_until_valid "    Served context tokens" DEEPSEEK_HARNESS_CONTEXT_WINDOW \
+      "${DEEPSEEK_HARNESS_CONTEXT_WINDOW:-${smallest:-65536}}" valid_dsh_context_tokens || return 1
+  fi
 }
 
 # target_server_entry NAME: the router's server entry for a model target.
@@ -1727,7 +1929,7 @@ preset_target_model_servers() {
 # and the like must not reach a target, and the admin token only reaches the
 # companions (as an environment variable, never an argument).
 run_target_provisioner() {
-  local name="$1" phase script id ip storage template image_variant hf_token="" gpu_env cuda_env client_ips="" client
+  local name="$1" phase script id ip storage template image_variant hf_token="" gpu_env cuda_env context_env client_ips="" client
   local -a flags=()
   phase="$(target_field "$name" phase)" || return 1
   script="${TARGETS_DIR}/${name}/provision-lxc.sh"
@@ -1740,7 +1942,7 @@ run_target_provisioner() {
   # Only ComfyUI's gated klein-9b weights need the Hugging Face token.
   if [[ $name == comfyui && $image_variant == klein-9b ]]; then hf_token="${TARGET_HF_TOKEN:-}"; fi
   if [[ $name == honcho ]]; then
-    for client in hermes openclaw; do
+    for client in hermes openclaw deepseek-harness; do
       if [[ " ${TARGETS:-} " == *" ${client} "* ]]; then
         client_ips+="${client_ips:+ }$(target_setting "$client" IP_CIDR | cut -d/ -f1)"
       fi
@@ -1750,7 +1952,7 @@ run_target_provisioner() {
   case "$name" in
     ollama|airllm) flags=(--install-target) ;;
     llamacpp) if llamacpp_model_given; then flags=(--install-target); fi ;;
-    open-terminal|hermes|openclaw) template="${template:-${TEMPLATE_REF:-}}" ;;
+    open-terminal|hermes|openclaw|deepseek-harness) template="${template:-${TEMPLATE_REF:-}}" ;;
     honcho)
       if [[ -z $template && ${TEMPLATE_REF:-} == *:vztmpl/debian-13-* ]]; then
         template=$TEMPLATE_REF
@@ -1761,6 +1963,7 @@ run_target_provisioner() {
   script_sha="$(target_setting "$name" COMMUNITY_SCRIPT_SHA256)"
   gpu_env="$(target_gpu_env "$name")"
   cuda_env="$(target_cuda_env "$name" "$template")"
+  context_env="$(target_context_env "$name")"
   (
     local router_ct="$CT_ID" router_ip="${IP_CIDR%/*}" gateway="$GATEWAY" bridge="$BRIDGE" nameserver="$NAMESERVER"
     local webui_port="$OPENWEBUI_PORT" admin_token="${TARGET_ADMIN_TOKEN:-}"
@@ -1785,6 +1988,7 @@ run_target_provisioner() {
       [[ -z "$setting" ]] || export "${setting?}"
     done <<< "$gpu_env"
     [[ -z "$cuda_env" ]] || export "${cuda_env?}"
+    [[ -z "$context_env" ]] || export "${context_env?}"
     if [[ "$phase" == companion ]]; then
       export ROUTER_CT_ID="$router_ct" OPENWEBUI_PORT="$webui_port"
       if [[ "$name" == honcho ]]; then
@@ -1793,13 +1997,21 @@ run_target_provisioner() {
           HONCHO_EMBEDDING_DIMENSIONS="${HONCHO_EMBEDDING_DIMENSIONS:-}" \
           HONCHO_EMBEDDING_BASE_URL="${HONCHO_EMBEDDING_BASE_URL:-}"
         export HONCHO_CLIENT_IPS="${client_ips:-${HONCHO_CLIENT_IPS:-}}"
-        [[ -z ${HONCHO_CONTEXT_TOKENS:-} ]] || export HONCHO_CONTEXT_TOKENS
+        # Set and empty: Honcho's own budgets (not the first install's 65536).
+        [[ -z ${HONCHO_CONTEXT_TOKENS+set} ]] || export HONCHO_CONTEXT_TOKENS
       fi
       # Only the agents use Honcho, and only once its CT was provisioned.
-      if [[ ( "$name" == hermes || "$name" == openclaw ) && "${HONCHO_READY:-false}" == true ]]; then
+      if [[ ( "$name" == hermes || "$name" == openclaw || "$name" == deepseek-harness ) && "${HONCHO_READY:-false}" == true ]]; then
         local honcho_ct
         honcho_ct="$(target_setting honcho CT_ID)"
         export HONCHO_URL="http://${HONCHO_IP_CIDR%/*}:8000" HONCHO_CT_ID="$honcho_ct"
+      fi
+      # Harness talks to the router, never to Open WebUI: no admin token.
+      if [[ "$name" == deepseek-harness ]]; then
+        export DEEPSEEK_HARNESS_MODEL="${DEEPSEEK_HARNESS_MODEL:-auto}"
+        export DEEPSEEK_HARNESS_CONTEXT_WINDOW="${DEEPSEEK_HARNESS_CONTEXT_WINDOW:-65536}"
+        export DSH_ACCESS_CIDR="${DEEPSEEK_HARNESS_ACCESS_CIDR:-${API_ALLOW_CIDR:-$ip}}"
+        exec bash "$script" "${flags[@]}"
       fi
       OPENWEBUI_ADMIN_TOKEN="$admin_token" exec bash "$script" "${flags[@]}"
     fi
@@ -1903,7 +2115,7 @@ prompt_openwebui_admin_token() {
 # targets, give the router their keys, then add the companions. A failed target
 # leaves the router as it is; the summary says how to retry.
 provision_selected_targets() {
-  local name id companions=false status=0
+  local name id companions=false webui_companions=false webui_ready=true status=0
   local -a key_targets=()
   declare -A result=()
   HONCHO_READY=false
@@ -1913,7 +2125,10 @@ provision_selected_targets() {
       service)
         if [[ " ${SERVICES_DONE:-} " == *" ${name} "* ]]; then result[$name]="ok (created before OSR)"; fi
         continue ;;
-      companion) companions=true; continue ;;
+      companion)
+        companions=true
+        [[ $name == deepseek-harness ]] || webui_companions=true
+        continue ;;
     esac
     id="$(target_setting "$name" CT_ID)"
     echo
@@ -1947,21 +2162,22 @@ provision_selected_targets() {
     fi
   fi
   if $companions; then
-    if wait_for_openwebui && prompt_openwebui_admin_token; then
-      for name in $TARGETS; do
-        [[ "$(target_field "$name" phase)" == companion ]] || continue
-        echo
-        echo "=== Target ${name} (CT $(target_setting "$name" CT_ID)) ==="
-        if run_target_provisioner "$name"; then
-          result[$name]=ok
-          [[ "$name" != honcho ]] || HONCHO_READY=true
-        else result[$name]=failed; fi
-      done
-    else
-      for name in $TARGETS; do
-        [[ "$(target_field "$name" phase)" == companion ]] && result[$name]="skipped (no Open WebUI admin key)"
-      done
+    if $webui_companions && ! { wait_for_openwebui && prompt_openwebui_admin_token; }; then
+      webui_ready=false
     fi
+    for name in $TARGETS; do
+      [[ "$(target_field "$name" phase)" == companion ]] || continue
+      if [[ $name != deepseek-harness ]] && ! $webui_ready; then
+        result[$name]="skipped (no Open WebUI admin key)"
+        continue
+      fi
+      echo
+      echo "=== Target ${name} (CT $(target_setting "$name" CT_ID)) ==="
+      if run_target_provisioner "$name"; then
+        result[$name]=ok
+        [[ "$name" != honcho ]] || HONCHO_READY=true
+      else result[$name]=failed; fi
+    done
     TARGET_ADMIN_TOKEN=""
     TARGET_HF_TOKEN=""
   fi
@@ -1975,7 +2191,7 @@ provision_selected_targets() {
       status=1
       if [[ "${result[$name]}" == "failed (OSR key apply)" ]]; then
         echo "                 run pct exec ${CT_ID} -- /usr/local/bin/manage-model-servers apply"
-      elif [[ ( "$name" == honcho || "$name" == hermes || "$name" == openclaw ) && "${result[$name]}" == failed ]]; then
+      elif [[ ( "$name" == honcho || "$name" == hermes || "$name" == openclaw || "$name" == deepseek-harness ) && "${result[$name]}" == failed ]]; then
         echo "                 see targets/${name}/README.md; if CT ${id} exists, resume on the Proxmox host with:"
         echo "                 CT_ID=${id} ROUTER_CT_ID=${CT_ID} bash targets/${name}/provision-lxc.sh --reconfigure"
       else
@@ -2910,6 +3126,8 @@ prompt_target_settings || exit 1
 # chosen card: set up now, when missing, before anything is created (a reboot
 # then costs nothing but a rerun).
 prompt_target_gpus || exit 1
+# Each model target's context window, recommended from its GPU and the agents.
+prompt_target_contexts || exit 1
 prepare_host_gpu || exit 1
 # Gitea and Mattermost, if selected, are created now: the prompts below take
 # their URL, token and webhook.
@@ -3122,6 +3340,11 @@ _DEFAULTS = {
         # is known to lack tool support. false: route it anyway, flagged with
         # an X-Router-Warning header.
         "tools_strict": "false",
+        # Server kinds listed at /v1/models whose text models are reported
+        # tool-capable. Their APIs say nothing per model, but each of these
+        # servers parses "tools" and returns OpenAI tool_calls. A kind left
+        # out is reported unknown. Blank: none.
+        "tool_kinds": "strata, basalt, maya, xolotl, avalon",
     },
     "http": {
         # Seconds to establish a TCP connection to a backend. Short on purpose:
@@ -3405,6 +3628,11 @@ if TOOLS_MIN_CLASS and TOOLS_MIN_CLASS not in CLASS_ORDER:
                 "or blank)", TOOLS_MIN_CLASS, ", ".join(CLASS_ORDER))
     TOOLS_MIN_CLASS = ""
 TOOLS_STRICT = _cfg.getboolean("classification", "tools_strict")
+TOOL_KINDS = frozenset(k for k in _json_list(_cfg, "classification", "tool_kinds")
+                       if k in OPENAI_KINDS)
+for _kind in sorted(set(_json_list(_cfg, "classification", "tool_kinds")) - TOOL_KINDS):
+    log.warning("ignoring [classification] tool_kinds entry %r (use %s)",
+                _kind, ", ".join(sorted(OPENAI_KINDS)))
 CONNECT_TIMEOUT = _cfg.getfloat("http", "connect_timeout_seconds")
 READ_TIMEOUT = _cfg.getfloat("http", "read_timeout_seconds")
 
@@ -3750,6 +3978,8 @@ async def fetch_openai_models(client: httpx.AsyncClient, server: str) -> tuple:
             if not modalities and isinstance(architecture, dict):
                 modalities = architecture.get("input_modalities") or []
             caps = ["completion"] + (["vision"] if "image" in modalities else [])
+            outputs = architecture.get("output_modalities") if isinstance(architecture, dict) else None
+            meta = model.get("meta") if isinstance(model.get("meta"), dict) else {}
             state = model.get("status", model.get("state"))
             if isinstance(state, dict):
                 state = state.get("value")
@@ -3762,10 +3992,17 @@ async def fetch_openai_models(client: httpx.AsyncClient, server: str) -> tuple:
                    "details": {"parameter_size": size},
                    "loaded": state == "loaded" if state is not None else None,
                    # Field names used by OpenAI-style servers (vLLM-style
-                   # max_model_len included); none of them is required.
+                   # max_model_len included), then the served context that
+                   # llama-server and Strata-style servers give as meta.n_ctx
+                   # (not n_ctx_train, the model's own limit). None required.
                    "context_length": next(filter(None, (
-                       positive_int(model.get(k)) for k in
-                       ("context_length", "max_model_len", "context_window"))), None)}
+                       *(positive_int(model.get(k)) for k in
+                         ("context_length", "max_model_len", "context_window")),
+                       positive_int(meta.get("n_ctx")))), None)}
+            # An image generator listed beside the chat model (Strata's
+            # /v1/images model) outputs no text, so it takes no tools.
+            if server_kind(server) in TOOL_KINDS:
+                raw["tools"] = True if not isinstance(outputs, list) or "text" in outputs else None
             entries.append(build_entry(server, raw, caps))
         return server, entries, None
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
@@ -5261,6 +5498,11 @@ tools_min_class = large
 # true: a tool request fails with HTTP 400 when every discovered model is
 # known to lack tools. false: route it anyway, flagged with X-Router-Warning.
 tools_strict = false
+# Server kinds whose text models are reported tool-capable. Their /v1/models
+# says nothing per model, but each of these servers takes "tools" and returns
+# OpenAI tool_calls. Remove a kind to report its models' tool support as
+# unknown again. Blank: none.
+tool_kinds = strata, basalt, maya, xolotl, avalon
 
 [http]
 # Seconds to open a connection to a backend. This is how long a dead host can
@@ -5323,7 +5565,7 @@ tie_epsilon = 0.05
 # entries are neutral). Small: it breaks near-ties, it does not override fit.
 loaded_bonus = 0.1
 # On a tool request, bonus for a model reported tool-capable over one whose
-# tool support is unknown (Strata/Basalt/Maya/Xolotl/Avalon, LM Studio's untrained models).
+# tool support is unknown (LM Studio's untrained models, a kind left out of tool_kinds).
 tool_match = 0.3
 
 [model_sizes]

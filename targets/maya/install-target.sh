@@ -49,7 +49,7 @@ environment values override them. A fresh install uses the defaults below.
 
 Environment: MAYA_REF=latest (the newest vX.Y.Z tag; or a branch/tag name
 such as main), MAYA_COMMIT=<optional full SHA-1 pin, overrides MAYA_REF>,
-MAYA_MODEL=Maya-S-v2-IQ2_XXS, MAYA_CONTEXT=32768, MAYA_DRAFT=mtp,
+MAYA_MODEL=Maya-S-v2-IQ2_XXS, MAYA_CONTEXT=65536, MAYA_DRAFT=mtp,
 MAYA_NO_VISION=false, MAYA_CUDA_VERSION=12.8, MAYA_PORT=8080,
 MAYA_READY_TIMEOUT=900 (seconds).
 
@@ -751,7 +751,7 @@ MAYA_REF=${MAYA_REF:-latest}
 MAYA_COMMIT=${MAYA_COMMIT:-}
 MAYA_CUDA_VERSION=${MAYA_CUDA_VERSION:-12.8}
 MAYA_MODEL=${MAYA_MODEL:-Maya-S-v2-IQ2_XXS}
-MAYA_CONTEXT=${MAYA_CONTEXT:-32768}
+MAYA_CONTEXT=${MAYA_CONTEXT:-65536}
 MAYA_DRAFT=${MAYA_DRAFT:-mtp}
 MAYA_NVCC=${MAYA_NVCC:-/usr/local/cuda-$MAYA_CUDA_VERSION/bin/nvcc}
 MAYA_NO_VISION=${MAYA_NO_VISION:-false}

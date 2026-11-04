@@ -20,6 +20,9 @@ Usage: bash install-target.sh              # adopt the community-script install 
 
 Settings (environment; all optional):
   OLLAMA_PULL_MODELS='qwen3:8b qwen3:14b'   models to pull once the server is up
+  OLLAMA_CONTEXT_LENGTH=65536               the context a request gets when it does not
+                                            set num_ctx; given, it replaces the value in
+                                            ollama.env (unset keeps the file's, 65536 new)
   OLLAMA_VERSION=$OLLAMA_DEFAULT_VERSION             release for --upgrade
   OLLAMA_SHA256=<hex>                       also require this archive checksum (--upgrade)
   OLLAMA_GPU=auto|nvidia|amd|intel|none     the GPU this CT was given (auto: /dev/kfd
@@ -147,6 +150,16 @@ env_value() {
 ensure_env_key() {
     grep -Eq "^[[:space:]]*$2[[:space:]]*=" "$1" 2>/dev/null || printf '%s=%s\n' "$2" "$3" >> "$1"
 }
+# set_env_key FILE KEY VALUE: KEY=VALUE in place of every KEY line (appended
+# when there is none). The file is rewritten in place: owner and mode stay.
+set_env_key() {
+    local updated
+    updated=$(awk -v k="$2" -v v="$3" '
+        $0 ~ "^[[:space:]]*" k "[[:space:]]*=" { if (!done) print k "=" v; done = 1; next }
+        { print } END { if (!done) print k "=" v }' "$1") || return 1
+    printf '%s\n' "$updated" > "$1"
+}
+valid_context_length() { [[ $1 =~ ^[1-9][0-9]{3,6}$ ]] && (( $1 >= 2048 && $1 <= 1048576 )); }
 # The local API base for this target's OLLAMA_HOST (port only; always loopback).
 api_base() {
     local host port
@@ -221,6 +234,9 @@ valid_version "$OLLAMA_VERSION" || die 'OLLAMA_VERSION must be a release tag suc
 [[ -z ${OLLAMA_SHA256:-} || ${OLLAMA_SHA256} =~ ^[0-9A-Fa-f]{64}$ ]] || die 'OLLAMA_SHA256 must be 64 hex digits.'
 OLLAMA_PULL_MODELS=${OLLAMA_PULL_MODELS:-}
 valid_models "$OLLAMA_PULL_MODELS" || die 'OLLAMA_PULL_MODELS is a space-separated list of name[:tag] entries.'
+OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-}
+[[ -z $OLLAMA_CONTEXT_LENGTH ]] || valid_context_length "$OLLAMA_CONTEXT_LENGTH" ||
+    die 'OLLAMA_CONTEXT_LENGTH must be a whole number of tokens from 2048 to 1048576.'
 gpu=$(gpu_vendor) || die 'OLLAMA_GPU must be auto, nvidia, amd, intel or none.'
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -322,6 +338,10 @@ if [[ -f $TARGET_ENV ]]; then
     ensure_env_key "$TARGET_ENV" OLLAMA_MODELS "$TARGET_STATE/models"
 else
     install -o root -g "$TARGET_USER" -m 0640 "$source_dir/ollama.env.example" "$TARGET_ENV"
+fi
+if [[ -n $OLLAMA_CONTEXT_LENGTH ]]; then
+    set_env_key "$TARGET_ENV" OLLAMA_CONTEXT_LENGTH "$OLLAMA_CONTEXT_LENGTH"
+    printf 'Default context: %s tokens (OLLAMA_CONTEXT_LENGTH in %s).\n' "$OLLAMA_CONTEXT_LENGTH" "$TARGET_ENV"
 fi
 
 # The GPU's runtime: ROCm libraries matching the installed release (AMD), or

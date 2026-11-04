@@ -288,6 +288,14 @@ describe single_management_tool
 assert_ok "the root script only wraps install/" grep -q 'exec bash "\$target"' "${ROOT}/manage-model-servers.sh"
 assert_ok "and is tiny" test "$(wc -l < "${ROOT}/manage-model-servers.sh")" -lt 30
 
+describe honcho_dispatch_copy
+# Honcho's proxy imports the Hermes dispatcher from its own directory; the copy
+# must stay the same file, or a fix to one would silently miss the other.
+assert_ok "targets/honcho/direct_dispatch.py is the same as targets/hermes/direct-dispatch.py" \
+  cmp -s "${ROOT}/targets/honcho/direct_dispatch.py" "${ROOT}/targets/hermes/direct-dispatch.py"
+assert_contains "the proxy unit runs it from a directory of its own" \
+  "/usr/local/lib/honcho-proxy/honcho-proxy.py" "$(cat "${ROOT}/targets/honcho/honcho-proxy.service")"
+
 describe litellm_venv
 req="${ROOT}/services/litellm-proxy/requirements.txt"
 assert_ok "requirements pin the [proxy] extra" grep -Eq '^litellm\[proxy\]==' "$req"

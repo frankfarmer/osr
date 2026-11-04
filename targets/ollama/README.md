@@ -77,6 +77,14 @@ and restarts the CT before `install-target.sh` runs. It warns if the CT does
 not pass the chosen card at all. The router installer asks which card Ollama
 should use and passes `GPU` and `GPU_CARD`.
 
+The context window: `OLLAMA_CONTEXT_LENGTH` (65536 by default, 2048 to
+1048576) is the context a request gets when it does not set `num_ctx`.
+`install-target.sh` writes it to `ollama.env`; a rerun that does not set it
+keeps the file's value. Every token of it costs VRAM for the KV cache, so on a
+card under 16 GB lower it (32768) or use a smaller model. Agents need 65536
+(Hermes at least 64000). The router installer asks for it and recommends a size
+from the card's memory and the agents selected.
+
 | GPU | Passed through | `install-target.sh` adds |
 |---|---|---|
 | NVIDIA | `/dev/nvidia*` | NVIDIA user-space matching the loaded host driver, when NVML or CUDA is missing or mismatched (before adoption) |

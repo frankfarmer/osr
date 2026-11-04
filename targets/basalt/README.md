@@ -64,7 +64,7 @@ pct exec 250 -- journalctl -u basalt -f
 ```
 
 Basalt serves port 8080 by default. `BASALT_PORT`, `BASALT_MODEL`,
-`BASALT_HF_REPO`, `BASALT_ALIAS`, `BASALT_GPUS`, `BASALT_CONTEXT` (32768 tokens
+`BASALT_HF_REPO`, `BASALT_ALIAS`, `BASALT_GPUS`, `BASALT_CONTEXT` (65536 tokens
 by default) and `CUDA_VERSION` can be set on
 the provision command. `BASALT_URL` and `BASALT_REF` select the source checkout;
 `BASALT_COMMIT` pins a full 40 digit commit. For production, pin a commit you

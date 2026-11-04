@@ -19,6 +19,10 @@ uv=${HONCHO_UV_DIR:-/opt/honcho-uv}/bin/uv
 uv_dir=${HONCHO_UV_DIR:-/opt/honcho-uv}
 bun_dir=${HONCHO_BUN_DIR:-/opt/honcho-bun}
 unit_dir=${HONCHO_UNIT_DIR:-/etc/systemd/system}
+# A directory of its own: Python puts a script's directory first on its import
+# path, so nothing else may live beside the proxy.
+proxy_lib_dir=${HONCHO_PROXY_LIB_DIR:-/usr/local/lib/honcho-proxy}
+proxy_url=http://127.0.0.1:8765
 cpuinfo=${HONCHO_CPUINFO:-/proc/cpuinfo}
 health_tries=${HONCHO_HEALTH_TRIES:-60}
 
@@ -60,7 +64,7 @@ if [[ $bun_version == "$default_bun_version" ]]; then
   bun_sha256_baseline=${bun_sha256_baseline:-e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76}
 fi
 bun=$bun_dir/bun
-units=(honcho-api honcho-deriver honcho-mcp)
+units=(honcho-proxy honcho-api honcho-deriver honcho-mcp)
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 (( ${#kept_from_last_run[@]} == 0 )) || note "Kept from the last run: ${kept_from_last_run[*]}"
@@ -72,10 +76,10 @@ Usage: bash install-target.sh
 Run as root inside an existing Honcho CT after the Proxmox provisioner has
 staged router-api-key. An interactive run asks for ROUTER_URL, the embedding
 model and its vector dimensions when unset. It also asks for the embedding
-/v1 endpoint when HONCHO_EMBEDDING_BASE_URL is unset; a blank answer chooses
-the router explicitly. For unattended runs set ROUTER_URL,
+/v1 endpoint when HONCHO_EMBEDDING_BASE_URL is unset; a blank answer uses the
+router inventory to find the model target. For unattended runs set ROUTER_URL,
 HONCHO_EMBEDDING_MODEL, HONCHO_EMBEDDING_DIMENSIONS, and
-HONCHO_EMBEDDING_BASE_URL (empty means the router).
+HONCHO_EMBEDDING_BASE_URL (empty means router inventory).
 CT ID and CT IP are chosen by provision-lxc.sh on the Proxmox host.
 USAGE
   exit 0
@@ -96,13 +100,13 @@ if [[ ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
       die 'No embedding dimensions were entered.'
   fi
   if [[ -z $embedding_endpoint_chosen ]]; then
-    IFS= read -r -p 'Embedding base URL (/v1; blank = router): ' embedding_url ||
+    IFS= read -r -p 'Embedding base URL (/v1; blank = router inventory): ' embedding_url ||
       die 'No embedding endpoint choice was entered.'
     embedding_endpoint_chosen=yes
   fi
 fi
 [[ -n $embedding_endpoint_chosen ]] ||
-  die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to choose the router explicitly.'
+  die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to use router inventory.'
 embedding_url=${embedding_url:-${router_url}/v1}
 [[ $router_url =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}$ ]] || die 'Set ROUTER_URL to the OSR base URL.'
 [[ $model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HONCHO_MODEL.'
@@ -116,6 +120,10 @@ embedding_url=${embedding_url%/}
 [[ $ref =~ ^(main|v[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$ ]] || die 'HONCHO_REF must be main, a release tag or a full commit SHA.'
 [[ -s $deploy/router-api-key ]] || die "Missing $deploy/router-api-key."
 [[ -s $deploy/budgets.py ]] || die "Missing $deploy/budgets.py."
+for file in honcho-proxy.py direct_dispatch.py honcho-proxy.service; do
+  [[ -s $deploy/$file ]] || die "Missing $deploy/$file."
+done
+[[ -f $deploy/backend-keys ]] || : > "$deploy/backend-keys"
 [[ $bun_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'HONCHO_BUN_VERSION must be a release such as 1.4.4.'
 for sha in "$bun_sha256_x64" "$bun_sha256_baseline"; do
   [[ -z $sha || $sha =~ ^[0-9a-f]{64}$ ]] || die 'HONCHO_BUN_SHA256 and HONCHO_BUN_BASELINE_SHA256 are SHA-256 hex digests.'
@@ -126,78 +134,31 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   ca-certificates curl git openssl python3 python3-venv postgresql postgresql-client
 # Token budgets for the model's context window (HONCHO_CONTEXT_TOKENS and the
 # HONCHO_<SETTING> overrides; see the README), checked before anything changes.
-# Unset variables keep the last run's values from $etc/budgets.env.
+# Unset variables keep the last run's values from $etc/budgets.env. A first
+# install with no HONCHO_CONTEXT_TOKENS sizes them for 65536 tokens, the model
+# targets' default context (set it empty for Honcho's own, 128k budgets).
+if [[ ! -d $opt/.git && ! -e $etc/budgets.env && -z ${HONCHO_CONTEXT_TOKENS+set} ]]; then
+  export HONCHO_CONTEXT_TOKENS=65536
+fi
 python3 "$deploy/budgets.py" "$etc/budgets.env" "$deploy/budgets.record" "$deploy/budgets.settings" ||
   die 'Invalid Honcho budget settings; nothing was changed.'
-# Before anything is changed: the router serves Honcho's model with tools and
-# structured output (the deriver asks for JSON-schema output, the dialectic and
-# dreams call tools), and the embedding endpoint returns vectors of the size set.
-python3 - "$router_url" "$model" "$embedding_url" "$embedding_model" "$embedding_dimensions" \
-  "$embedding_dimensions_mode" "$deploy/router-api-key" "$structured_output_mode" "$skip_probe" <<'PY'
-import json
-import sys
-from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-
-(base, model, embedding_base, embedding_model, dimensions, dimensions_mode,
- key_file, output_mode, skip_probe) = sys.argv[1:]
-key = Path(key_file).read_text(encoding="utf-8").strip()
-headers = {"Authorization": "Bearer " + key} if key != "no-key" else {}
-json_headers = dict(headers, **{"Content-Type": "application/json"})
-try:
-    with urlopen(Request(base + "/v1/models", headers=headers), timeout=15) as response:
-        models = json.load(response)
-    ids = {item.get("id") for item in models.get("data", [])}
-    if model not in ids:
-        sys.exit(f"The router does not advertise Honcho model {model!r} at {base}/v1/models.")
-    if skip_probe != "true":
-        body = {"model": model, "max_tokens": 64, "stream": False,
-                "messages": [{"role": "user",
-                              "content": 'Reply with the JSON object {"ready": true}.'}],
-                "tools": [{"type": "function", "function": {
-                    "name": "noop", "description": "Does nothing.",
-                    "parameters": {"type": "object", "properties": {}}}}]}
-        if output_mode == "json_object":
-            body["response_format"] = {"type": "json_object"}
-        else:
-            body["response_format"] = {"type": "json_schema", "json_schema": {
-                "name": "ready", "schema": {
-                    "type": "object", "properties": {"ready": {"type": "boolean"}},
-                    "required": ["ready"]}}}
-        request = Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
-                          headers=json_headers)
-        try:
-            with urlopen(request, timeout=180) as response:
-                warning = response.headers.get("X-Router-Warning", "")
-                json.load(response)
-        except HTTPError as exc:
-            detail = exc.read()[:300].decode("utf-8", "replace")
-            hint = ("set HONCHO_STRUCTURED_OUTPUT_MODE=json_object if its backend lacks "
-                    "JSON-schema output, or choose another HONCHO_MODEL"
-                    if output_mode != "json_object" else "choose another HONCHO_MODEL")
-            sys.exit(f"The router refused {model!r} with tools and structured output "
-                     f"(HTTP {exc.code}: {detail}). Honcho needs both: {hint}. "
-                     "HONCHO_SKIP_CHAT_PROBE=true skips this check.")
-        if "no-tool-model" in warning:
-            sys.exit(f"No model behind {model!r} supports tool calls (X-Router-Warning: "
-                     f"{warning}). Honcho's dialectic and dreams call tools: choose a "
-                     "tool-capable HONCHO_MODEL, or HONCHO_SKIP_CHAT_PROBE=true.")
-    body = {"model": embedding_model, "input": "Honcho setup check",
-            "encoding_format": "float"}
-    if dimensions_mode in ("auto", "always"):
-        body["dimensions"] = int(dimensions)
-    embedding_key = key if embedding_base == base + "/v1" else "no-key"
-    request = Request(embedding_base + "/embeddings", data=json.dumps(body).encode(),
-                      headers={"Authorization": "Bearer " + embedding_key,
-                               "Content-Type": "application/json"})
-    with urlopen(request, timeout=30) as response:
-        embedding = json.load(response)["data"][0]["embedding"]
-    if len(embedding) != int(dimensions):
-        sys.exit(f"HONCHO_EMBEDDING_DIMENSIONS={dimensions} but {embedding_model!r} returned {len(embedding)} values.")
-except (HTTPError, URLError, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
-    sys.exit(f"Honcho cannot use the router model or embedding endpoint: {exc}")
-PY
+# The proxy alone contacts the router inventory and model hosts. It resolves
+# one tool-capable model with enough context, probes tools and structured
+# output, then checks the embedding endpoint before Honcho's data is touched.
+context_tokens=$(sed -n 's/^HONCHO_CONTEXT_TOKENS=//p' "$deploy/budgets.record" | head -n1)
+context_tokens=${context_tokens:-131072}
+{
+  printf 'ROUTER_URL=%s\nHONCHO_MODEL=%s\nHONCHO_CONTEXT_TOKENS=%s\n' "$router_url" "$model" "$context_tokens"
+  printf 'EMBEDDING_BASE_URL=%s\nEMBEDDING_MODEL=%s\nEMBEDDING_DIMENSIONS=%s\n' \
+    "$embedding_url" "$embedding_model" "$embedding_dimensions"
+  printf 'EMBEDDING_DIMENSIONS_MODE=%s\nHONCHO_STRUCTURED_OUTPUT_MODE=%s\nHONCHO_SKIP_CHAT_PROBE=%s\n' \
+    "$embedding_dimensions_mode" "$structured_output_mode" "$skip_probe"
+} > "$deploy/proxy.settings"
+selected_model=$(python3 "$deploy/honcho-proxy.py" --probe "$deploy") ||
+  die 'Honcho proxy could not validate a direct chat and embedding target.'
+[[ $selected_model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Honcho proxy selected an invalid model name.'
+printf 'RESOLVED_MODEL=%s\n' "$selected_model" >> "$deploy/proxy.settings"
+note "Honcho proxy selected $selected_model from router inventory for $model."
 systemctl enable --now postgresql
 pg_major=$(runuser -u postgres -- psql -Atqc 'SHOW server_version_num' 2>/dev/null | cut -c1-2)
 [[ $pg_major =~ ^[0-9]{2}$ ]] || die 'PostgreSQL did not start.'
@@ -208,16 +169,21 @@ systemctl enable --now postgresql
 if ! id honcho >/dev/null 2>&1; then
   useradd --system --home-dir "$home" --create-home --shell /usr/sbin/nologin honcho
 fi
+if ! id honcho-proxy >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin honcho-proxy
+fi
 install -d -m 0750 -o honcho -g honcho "$opt"
-install -d -m 0750 -o root -g honcho "$etc"
 install -d -m 0700 "$state"
+install -d -m 0755 "$proxy_lib_dir"
 
 as_honcho() { runuser -u honcho -- env HOME="$home" "$@"; }
 honcho_run() { as_honcho "$uv" --directory "$opt" run --frozen --no-dev --env-file "$etc/honcho.env" "$@"; }
+proxy_expected=true
 healthy() {
   local _
   for (( _ = 0; _ < health_tries; _++ )); do
-    if curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null &&
+    if { [[ $proxy_expected != true ]] || curl -fsS --max-time 2 "$proxy_url/healthz" >/dev/null; } &&
+       curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null &&
        curl -fsS --max-time 2 http://127.0.0.1:3000/health >/dev/null; then
       return 0
     fi
@@ -227,22 +193,29 @@ healthy() {
 }
 
 # --- an installed CT: set aside what this run changes ---------------------------
-existing=false prev_commit='' dump_taken=false
+existing=false prev_commit='' dump_taken=false had_proxy=false
+previous_etc_mode='' previous_etc_owner=''
 backup=$state/rollback
 if [[ -f $unit_dir/honcho-api.service && -d $opt/.git ]]; then
   existing=true
+  [[ ! -f $unit_dir/honcho-proxy.service ]] || had_proxy=true
+  previous_etc_mode=$(stat -c %a "$etc")
+  previous_etc_owner=$(stat -c %u:%g "$etc")
   prev_commit=$(git -C "$opt" rev-parse HEAD)
   if [[ -e $backup ]]; then
     die "Previous rollback data remains in $backup: an earlier run's rollback did not complete.
 It holds what that run set aside: honcho.env, the budget and settings records, the keys, the units, Bun and, as honcho.dump, the
-database from before that run. Check Honcho (systemctl status honcho-api honcho-deriver honcho-mcp).
+database from before that run. Check Honcho (systemctl status honcho-proxy honcho-api honcho-deriver honcho-mcp).
 If it is healthy, or after restoring from those copies (see 'When a rollback does not complete' in
 targets/honcho/README.md), remove the directory with: rm -r -- $backup
 Then run the reconfigure again. Nothing was changed by this run."
   fi
   install -d -m 0700 "$backup"
-  for file in "$etc/honcho.env" "$etc/budgets.env" "$etc/settings.env" "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key" "$bun" \
-              "$unit_dir/honcho-api.service" "$unit_dir/honcho-deriver.service" "$unit_dir/honcho-mcp.service"; do
+  for file in "$etc/honcho.env" "$etc/budgets.env" "$etc/settings.env" "$etc/proxy.settings" \
+              "$etc/router-api-key" "$etc/backend-keys" "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key" \
+              "$proxy_lib_dir/honcho-proxy.py" "$proxy_lib_dir/direct_dispatch.py" "$bun" \
+              "$unit_dir/honcho-proxy.service" "$unit_dir/honcho-api.service" \
+              "$unit_dir/honcho-deriver.service" "$unit_dir/honcho-mcp.service"; do
     if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file")"; fi
   done
 fi
@@ -254,7 +227,7 @@ rollback() {
   trap - EXIT
   note 'Honcho setup failed; restoring the previous installation.'
   systemctl stop "${units[@]/%/.service}" >/dev/null 2>&1 || true
-  for name in honcho.env budgets.env settings.env jwt-secret api-key client-api-key; do
+  for name in honcho.env budgets.env settings.env proxy.settings router-api-key backend-keys jwt-secret api-key client-api-key; do
     if [[ -f $backup/$name ]]; then cp -a -- "$backup/$name" "$etc/$name"
     else rm -f -- "$etc/$name"; fi
   done
@@ -262,6 +235,12 @@ rollback() {
     if [[ -f $backup/$name.service ]]; then cp -a -- "$backup/$name.service" "$unit_dir/$name.service"
     else rm -f -- "$unit_dir/$name.service"; fi
   done
+  for name in honcho-proxy.py direct_dispatch.py; do
+    if [[ -f $backup/$name ]]; then cp -a -- "$backup/$name" "$proxy_lib_dir/$name"
+    else rm -f -- "$proxy_lib_dir/$name"; fi
+  done
+  install -d -m "$previous_etc_mode" -o "${previous_etc_owner%%:*}" \
+    -g "${previous_etc_owner#*:}" "$etc" || ok=false
   if [[ -f $backup/bun ]]; then cp -a -- "$backup/bun" "$bun"; fi
   if [[ $(git -C "$opt" rev-parse HEAD 2>/dev/null) != "$prev_commit" ]]; then
     { git -C "$opt" checkout --detach "$prev_commit" && chown -R honcho:honcho "$opt" &&
@@ -274,12 +253,17 @@ rollback() {
       runuser -u postgres -- pg_restore --exit-on-error -d honcho < "$backup/honcho.dump"; } || ok=false
   fi
   systemctl daemon-reload || ok=false
-  systemctl restart "${units[@]/%/.service}" || ok=false
+  if $had_proxy; then
+    systemctl restart "${units[@]/%/.service}" || ok=false
+  else
+    systemctl restart honcho-api.service honcho-deriver.service honcho-mcp.service || ok=false
+  fi
+  proxy_expected=$had_proxy
   if $ok && healthy; then
     rm -rf -- "$backup"
     note "The previous Honcho (${prev_commit:0:12}) is running again."
   else
-    note "Honcho did not come back cleanly; the set-aside copies are in $backup. Inspect journalctl -u honcho-api -u honcho-deriver -u honcho-mcp."
+    note "Honcho did not come back cleanly; the set-aside copies are in $backup. Inspect journalctl -u honcho-proxy -u honcho-api -u honcho-deriver -u honcho-mcp."
   fi
 }
 on_exit() {
@@ -303,6 +287,12 @@ if $existing; then
   runuser -u postgres -- pg_dump -Fc honcho > "$backup/honcho.dump"
   dump_taken=true
 fi
+install -d -m 0711 -o root -g root "$etc"
+install -m 0644 "$deploy/honcho-proxy.py" "$proxy_lib_dir/honcho-proxy.py"
+install -m 0644 "$deploy/direct_dispatch.py" "$proxy_lib_dir/direct_dispatch.py"
+install -m 0640 -o root -g honcho-proxy "$deploy/proxy.settings" "$etc/proxy.settings"
+install -m 0640 -o root -g honcho-proxy "$deploy/router-api-key" "$etc/router-api-key"
+install -m 0640 -o root -g honcho-proxy "$deploy/backend-keys" "$etc/backend-keys"
 git -C "$opt" checkout --detach "$new_commit"
 chown -R honcho:honcho "$opt"
 
@@ -332,30 +322,26 @@ if [[ $rotate_keys == true ]]; then
   rm -f -- "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key"
 fi
 if [[ ! -s $etc/jwt-secret ]]; then openssl rand -hex 48 > "$etc/jwt-secret"; fi
-router_key=$(<"$deploy/router-api-key")
-[[ -n $router_key ]] || router_key=no-key
 {
   printf 'DB_CONNECTION_URI=postgresql+psycopg://honcho:%s@127.0.0.1:5432/honcho\n' "$db_password"
   printf 'AUTH_USE_AUTH=true\nAUTH_JWT_SECRET=%s\n' "$(<"$etc/jwt-secret")"
-  printf 'LLM_OPENAI_API_KEY=%s\n' "$router_key"
+  printf 'LLM_OPENAI_API_KEY=honcho-local-proxy\n'
   for prefix in DERIVER SUMMARY DREAM_DEDUCTION DREAM_INDUCTION; do
     printf '%s_MODEL_CONFIG__MODEL=%s\n' "$prefix" "$model"
-    printf '%s_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$prefix" "$router_url"
+    printf '%s_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$prefix" "$proxy_url"
     [[ -z $structured_output_mode ]] ||
       printf '%s_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=%s\n' "$prefix" "$structured_output_mode"
   done
   for level in minimal low medium high max; do
     printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__MODEL=%s\n' "$level" "$model"
-    printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$level" "$router_url"
+    printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$level" "$proxy_url"
     [[ -z $structured_output_mode ]] ||
       printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=%s\n' "$level" "$structured_output_mode"
   done
   printf 'EMBEDDING_VECTOR_DIMENSIONS=%s\n' "$embedding_dimensions"
   printf 'EMBEDDING_MODEL_CONFIG__MODEL=%s\n' "$embedding_model"
-  printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=%s\n' "$embedding_url"
-  if [[ $embedding_url != "$router_url/v1" ]]; then
-    printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY=no-key\n'
-  fi
+  printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$proxy_url"
+  printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY=honcho-local-proxy\n'
   printf 'EMBEDDING_MODEL_CONFIG__DIMENSIONS_MODE=%s\n' "$embedding_dimensions_mode"
   cat "$deploy/budgets.settings"
 } > "$etc/honcho.env"
@@ -418,7 +404,7 @@ done
 systemctl daemon-reload
 systemctl enable "${units[@]/%/.service}"
 systemctl restart "${units[@]/%/.service}"
-healthy || die 'Honcho did not become healthy. Inspect journalctl -u honcho-api -u honcho-deriver -u honcho-mcp.'
+healthy || die 'Honcho did not become healthy. Inspect journalctl -u honcho-proxy -u honcho-api -u honcho-deriver -u honcho-mcp.'
 trap - EXIT
 rm -rf -- "$backup"
 printf 'Honcho API and MCP are healthy.\n'

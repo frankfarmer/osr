@@ -13,8 +13,8 @@ The router gives clients one OpenAI-compatible endpoint for 1–20 configured
 model hosts. It inventories models and selects a host for each request by
 size, capabilities and load-spreading score. The router CT also contains Open
 WebUI, LiteLLM fallback and health monitoring. Optional `targets/` LXCs
-provide model servers, Gitea, Mattermost, Open Terminal, Hermes, OpenClaw and
-ComfyUI.
+provide model servers, Gitea, Mattermost, Open Terminal, Hermes, OpenClaw,
+DeepSeek Harness and ComfyUI.
 
 The design keeps GPU workloads separate from the router, stores configuration
 in a Gitea repository when available, and applies changes with validation and
@@ -43,6 +43,8 @@ flowchart LR
     term["Open Terminal LXC<br/>:8000"]
     hermes["Hermes Agent LXC<br/>API server :8642"]
     openclaw["OpenClaw LXC<br/>Gateway :18789"]
+    harness["DeepSeek Harness LXC<br/>Web UI :3080"]
+    honcho["Honcho LXC<br/>API :8000, MCP :3000"]
     comfy["ComfyUI LXC<br/>:8188"]
     gitea["Gitea"]
     mm["Mattermost"]
@@ -58,6 +60,12 @@ flowchart LR
     hermes -->|direct inference| pool
     openclaw -.->|inventory and ranking :8000| router
     openclaw -->|direct inference| pool
+    browser -->|authenticated Web UI| harness
+    harness -->|OpenAI API| router
+    harness -.->|"MCP memory (optional)"| honcho
+    hermes -.->|"memory plugin (optional)"| honcho
+    openclaw -.->|"memory plugin (optional)"| honcho
+    webui -.->|"MCP tools (optional)"| honcho
     router -->|direct dispatch| pool
     router -.->|fallback| litellm
     litellm --> pool
@@ -74,6 +82,7 @@ flowchart LR
 | Open Terminal (`:8000`) | Optional | Terminal tool unavailable; chat unaffected |
 | Hermes API server (`:8642`) | Optional | `hermes-agent` unavailable in Open WebUI; other models unaffected |
 | OpenClaw Gateway (`:18789`) | Optional | `openclaw` unavailable in Open WebUI; other models unaffected |
+| DeepSeek Harness Web UI (`:3080`) | Optional | Its agent UI is unavailable; OSR and Open WebUI remain up |
 | ComfyUI (`:8188`) | Optional | Image generation in Open WebUI fails; chat unaffected |
 
 ---
@@ -234,8 +243,8 @@ to lack tools gets `X-Router-Warning: no-tool-model`, or a 400
 | **Residency** | `+loaded_bonus` for models reported loaded (LM Studio and Strata-style servers); `lmstudio_loaded_only` excludes cold LM Studio models |
 | **Unknown size** | `unknown_params` (0.3): usable, never preferred |
 | **Embeddings** | Structurally excluded; naming one on the chat endpoint is a 400 |
-| **Tools** | On a tool request, models known to lack tools are excluded (kept only if nothing else is left); `+tool_match` for a model reported tool-capable over an unknown one. Support is known from Ollama's `/api/show` capabilities (also the llama.cpp bridge's `MODEL_CAPABILITIES` and AirLLM) and LM Studio's `trained_for_tool_use`; Strata-style servers and untrained LM Studio models are unknown. Shown per entry as `tools` in `/routing/inventory` |
-| **Context length** | Recorded in `/routing/inventory`, not scored. Ollama uses the smaller of the model limit and configured `num_ctx`; the llama.cpp bridge reports active per-slot context, AirLLM its window, and other APIs their reported limit. Ollama's `/api/show` is cached for 60 s, retaining the last good answer after a failed poll. The value can still overstate served context; Hermes uses it (§17.1) |
+| **Tools** | On a tool request, models known to lack tools are excluded (kept only if nothing else is left); `+tool_match` for a model reported tool-capable over an unknown one. Support is known from Ollama's `/api/show` capabilities (also the llama.cpp bridge's `MODEL_CAPABILITIES` and AirLLM) LM Studio's `trained_for_tool_use`, and `tool_kinds` in `router.ini` for the `/v1/models` kinds (Strata, Basalt, Maya, Xolotl and Avalon by default; their text models are reported capable, an image generator is not). Untrained LM Studio models and a kind left out of `tool_kinds` are unknown. Shown per entry as `tools` in `/routing/inventory` |
+| **Context length** | Recorded in `/routing/inventory`, not scored. Ollama uses the smaller of the model limit and configured `num_ctx`; the llama.cpp bridge reports active per-slot context, AirLLM its window, the `/v1/models` kinds `context_length`, `max_model_len`, `context_window` or else the served `meta.n_ctx`, and other APIs their reported limit. Ollama's `/api/show` is cached for 60 s, retaining the last good answer after a failed poll. The value can still overstate served context; Hermes uses it (§17.1) |
 | **Tie rotation** | Candidates within `tie_epsilon` of the best rotate, spreading load. For a tool request only the same model on several hosts rotates, so an agent loop keeps one model (and its prompt cache) |
 
 Sizes come from `details.parameter_size` (Ollama), `params_string` (LM Studio)
@@ -348,8 +357,9 @@ four services. A failed router build removes its half-built CT.
 
 Selected model targets become the first configured server entries and are
 provisioned after the router starts. Strata-style keys are returned on stdin
-to `set-<kind>-token`, followed by one `apply`. Companions are provisioned
-after Open WebUI starts and the operator supplies its admin API key. Each
+to `set-<kind>-token`, followed by one `apply`. Companions that register with
+Open WebUI are provisioned after its admin API key is supplied. DeepSeek
+Harness needs no Open WebUI key and can be provisioned independently. Each
 target runs with its own CT settings; a target failure leaves the router
 running and produces a retry summary. `NONINTERACTIVE=true` refuses selected
 targets because their setup needs interactive steps.
@@ -694,16 +704,18 @@ pinned upstream release, and its Streamable HTTP MCP server (3000) on a
 checksum-pinned Bun. Honcho's chat model is a router tier (`HONCHO_MODEL=fast`);
 embeddings come from an OpenAI-compatible `/v1` endpoint or the router, with
 the vector size set at bootstrap. The admin JWT stays in the CT; Open WebUI
-(MCP tool server, admin-only until granted), Hermes and OpenClaw get a JWT
-scoped to the `osr` workspace and share the `user` peer. The installer
+(MCP tool server, admin-only until granted), Hermes, OpenClaw and DeepSeek
+Harness get a JWT scoped to the `osr` workspace and share the `user` peer. The installer
 provisions Honcho before the agents and passes its URL and CT only to them;
 an agent's later `--reconfigure` reads the URL back from its settings, so the
 egress rule and memory survive, and `HONCHO_URL=` turns them off. Inbound is
-limited to the router (API and MCP) and the selected agents (API); the
+limited to the router and the selected agents (API and MCP; an agent's MCP
+rule has its own tag so a reconfigure can tell it from the router's); the
 provisioner keeps one tagged rule in the router CT's firewall file so Honcho
 can reach the router API. The guest probes the chat model with a tool and a
 JSON schema before changing anything. `HONCHO_CONTEXT_TOKENS` (asked by the
-installer) sizes Honcho's token budgets for small context windows through
+installer with the model targets' context windows; 65536 on a first install
+that does not set it) sizes Honcho's token budgets for small context windows through
 `budgets.py`; `HONCHO_<SETTING>` overrides one, and the explicit values persist in
 the CT's `budgets.env` across reconfigures. The release, chat model, output
 modes and Bun pins persist the same way in `settings.env`, so a reconfigure
@@ -713,6 +725,26 @@ the commit is unchanged; any failure restores all of them. `--rotate-keys`
 replaces the JWT secret and both keys after checking Open WebUI admin access;
 if a later step fails after the rotation, the provisioner restores only the
 prior secret and keys (and that env line) and the saved Open WebUI connection.
+
+### 17.6 DeepSeek Harness (`targets/deepseek-harness/`)
+
+[DeepSeek Harness](targets/deepseek-harness/README.md) (`dsh`, npm
+`@deepseek-ai/dsh`, pinned to 0.2.1-rc.5) is a third agent, with its own Web UI
+(3080) instead of an Open WebUI registration, so it needs no admin token. A
+generated Cordis overlay (`--patch`) adds an `osr` provider (`llm-pi-ai`,
+`openai-completions`, `system` role, `max_tokens`) with one model and makes it
+the default; the router key is a service environment variable the overlay names.
+Inference goes through the router (no direct dispatcher). Each npm release is
+installed beside the running one under `/opt/deepseek-harness/releases/` with a
+`current` link; a run snapshots the overlay, env, keys, unit, `AGENTS.md` and
+profiles, validates the patch with the new release (`--dump-config`), and on a
+failed restart puts the previous release and files back and health-checks them.
+A settings record lets `--reconfigure` keep unspecified settings and lets an
+unchanged rerun do nothing. With Honcho the overlay adds a Streamable HTTP
+`dsh-mcp-client` entry for Honcho's MCP server (workspace header, key from the
+environment) and a managed block in the user-global `AGENTS.md` names the
+peers; unlike the Hermes and OpenClaw plugins, recording and recall are tool
+calls the model makes.
 
 ## 18. Verification and CI
 

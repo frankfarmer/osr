@@ -48,6 +48,14 @@ printf 'OLLAMA_HOST=0.0.0.0\n' > "$TARGET_ENV"
 [[ $(api_base) == http://127.0.0.1:11434 ]] || die 'api_base default port'
 ensure_env_key "$TARGET_ENV" OLLAMA_HOST x; ensure_env_key "$TARGET_ENV" OLLAMA_MODELS /m
 [[ $(env_value "$TARGET_ENV" OLLAMA_HOST) == 0.0.0.0 && $(env_value "$TARGET_ENV" OLLAMA_MODELS) == /m ]] || die 'ensure_env_key'
+printf '# c\nOLLAMA_CONTEXT_LENGTH=8192\nX=1\n OLLAMA_CONTEXT_LENGTH = 4096\n' > "$TARGET_ENV"; chmod 0640 "$TARGET_ENV"
+set_env_key "$TARGET_ENV" OLLAMA_CONTEXT_LENGTH 65536
+[[ $(cat "$TARGET_ENV") == $'# c\nOLLAMA_CONTEXT_LENGTH=65536\nX=1' && $(stat -c %a "$TARGET_ENV") == 640 ]] ||
+    die "set_env_key replace: $(cat "$TARGET_ENV")"
+set_env_key "$TARGET_ENV" OLLAMA_NUM_PARALLEL 2
+[[ $(tail -n1 "$TARGET_ENV") == OLLAMA_NUM_PARALLEL=2 ]] || die 'set_env_key append'
+valid_context_length 2048 && valid_context_length 1048576 && ! valid_context_length 2047 &&
+    ! valid_context_length 1048577 && ! valid_context_length 065536 && ! valid_context_length 64k || die 'valid_context_length'
 pass 'env file helpers'
 
 # --- whole-script runs --------------------------------------------------------
@@ -122,12 +130,19 @@ cmp -s "$script_dir/ollama.env.example" "$tmp_root/etc/ollama.env" || die 'env f
 [[ $(cat "$tmp_root/state/models/blobs/sha256-1") == weights && ! -e $tmp_root/rootmodels ]] || die 'models not moved'
 grep -q 'systemctl restart ollama.service' "$log" || die 'service not restarted'
 [[ $out == *'Pulling qwen3:8b'* ]] || die 'model not pulled'
+[[ $(env_value "$tmp_root/etc/ollama.env" OLLAMA_CONTEXT_LENGTH) == 65536 ]] || die 'default context is not 65536'
 pass 'adoption: drop-in, env file, models moved from /root, unit untouched, models pulled'
 
 mkdir -p "$tmp_root/rootmodels/blobs"; echo 'other' > "$tmp_root/rootmodels/blobs/sha256-2"
 echo 'OLLAMA_KEEP_ALIVE=2h' >> "$tmp_root/etc/ollama.env"
 out=$(target 2>&1) || die "re-running adoption failed: $out"
 [[ $(env_value "$tmp_root/etc/ollama.env" OLLAMA_KEEP_ALIVE) == 2h ]] || die 'settings rewritten on re-run'
+out=$(target OLLAMA_CONTEXT_LENGTH=32768 2>&1) || die "context re-run failed: $out"
+[[ $(env_value "$tmp_root/etc/ollama.env" OLLAMA_CONTEXT_LENGTH) == 32768 &&
+   $(env_value "$tmp_root/etc/ollama.env" OLLAMA_KEEP_ALIVE) == 2h && $out == *'Default context: 32768 tokens'* ]] ||
+    die "OLLAMA_CONTEXT_LENGTH not applied: $out"
+out=$(target OLLAMA_CONTEXT_LENGTH=64k 2>&1) && die 'an invalid context was accepted'
+[[ $out == *'OLLAMA_CONTEXT_LENGTH must be'* ]] || die "unclear context error: $out"
 [[ -e $tmp_root/rootmodels/blobs/sha256-2 && ! -e $tmp_root/state/models/blobs/sha256-2 ]] || die 're-run mixed model stores'
 pass 'adoption is safe to re-run: settings kept, stores never mixed'
 

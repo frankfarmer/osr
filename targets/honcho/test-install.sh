@@ -20,7 +20,7 @@ bin=$tmp/bin fake=$tmp/fake
 mkdir -p "$bin" "$fake"
 export FAKE_DIR=$fake FAKE_LOG=$tmp/calls.log
 
-# --- the router: /v1/models, the chat probe and /v1/embeddings ------------------
+# --- router inventory and a distinct /direct model-target path --------------
 # Behaviour is read from files in $fake per request, so cases change it freely.
 cat > "$tmp/router.py" <<'PY'
 import json, os, sys
@@ -51,21 +51,37 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(401, {"error": {"message": "bad key"}})
         if self.path == "/v1/models":
             return self.send(200, {"data": [{"id": m} for m in get("models", "auto,fast").split(",")]})
+        if self.path == "/routing/inventory":
+            server = "http://127.0.0.1:%s/direct" % self.server.server_port
+            return self.send(200, {"enabled": True, "servers": [server],
+                                   "server_status": {server: {"up": True}},
+                                   "models": [
+                                       {"server": server, "name": "fast-model", "tools": not bool(get("chat-warning")),
+                                        "context_length": 131072, "loaded": True, "is_embedding": False},
+                                       {"server": server, "name": "nomic-embed-text", "loaded": True,
+                                        "is_embedding": True}]})
         self.send(404, {})
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.path == "/v1/chat/completions":
+        if self.path == "/routing/explain":
             if not self.authorized():
                 return self.send(401, {"error": {"message": "bad key"}})
+            server = "http://127.0.0.1:%s/direct" % self.server.server_port
+            return self.send(200, {"candidates": [{"server": server, "model": "fast-model"}]})
+        if self.path == "/direct/v1/chat/completions":
+            if body.get("tools"):
+                with open(os.path.join(state, "tool-probe.json"), "w") as f:
+                    json.dump(body, f)
+                return self.send(200, {"choices": [{"message": {"role": "assistant", "content": "",
+                    "tool_calls": [{"id": "call-1", "type": "function",
+                                    "function": {"name": "noop", "arguments": "{}"}}]}}]})
             with open(os.path.join(state, "probe.json"), "w") as f:
                 json.dump(body, f)
             status = int(get("chat-status", "200"))
             if status != 200:
                 return self.send(status, {"error": {"message": "response_format json_schema is not supported"}})
-            warning = get("chat-warning")
-            return self.send(200, {"choices": [{"message": {"role": "assistant", "content": '{"ready": true}'}}]},
-                             [("X-Router-Warning", warning)] if warning else [])
-        if self.path == "/v1/embeddings":
+            return self.send(200, {"choices": [{"message": {"role": "assistant", "content": '{"ready": true}'}}]})
+        if self.path in ("/direct/v1/embeddings", "/v1/embeddings"):
             with open(os.path.join(state, "embedding-auth"), "w") as f:
                 f.write(self.headers.get("Authorization", ""))
             return self.send(200, {"data": [{"embedding": [0.0] * int(get("dims", "768"))}]})
@@ -83,12 +99,28 @@ router=http://127.0.0.1:$(<"$fake/port")
 
 # --- stubs ------------------------------------------------------------------------
 stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$bin/$1"; chmod +x "$bin/$1"; }
-stub id 'case $1 in -u) echo 0 ;; honcho) [[ -e $FAKE_DIR/user-honcho ]] ;; esac'
-stub useradd 'echo "useradd $*" >> "$FAKE_LOG"; touch "$FAKE_DIR/user-honcho"'
+stub id 'case $1 in -u) echo 0 ;; honcho|honcho-proxy) [[ -e $FAKE_DIR/user-$1 ]] ;; esac'
+stub useradd 'echo "useradd $*" >> "$FAKE_LOG"; touch "$FAKE_DIR/user-${@: -1}"'
 stub chown 'echo "chown $*" >> "$FAKE_LOG"'
 stub sleep ':'
-# install: as root it would set owners; here the owner and group are dropped.
-stub install 'args=(); while (( $# )); do case $1 in -o|-g) shift 2 ;; *) args+=("$1"); shift ;; esac; done; exec /usr/bin/install "${args[@]}"'
+# The Windows Git Bash runner cannot chmod directories under its temporary
+# mount. The fixture needs file copies and directory creation, not ownership.
+stub install 'directory=false; mode=""; args=()
+while (( $# )); do
+  case $1 in
+    -o|-g) shift 2 ;;
+    -m) mode=$2; shift 2 ;;
+    -d) directory=true; shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+if $directory; then mkdir -p -- "${args[@]}"; exit; fi
+dest=${args[${#args[@]}-1]}
+if (( ${#args[@]} > 2 )); then mkdir -p -- "$dest"; fi
+for (( i=0; i<${#args[@]}-1; i++ )); do
+  cp -- "${args[i]}" "$dest" || exit
+done
+[[ -z $mode ]] || chmod "$mode" -- "$dest" 2>/dev/null || true'
 stub apt-get 'echo "apt-get $*" >> "$FAKE_LOG"
 [[ -z ${FAKE_NO_PGVECTOR:-} || $* != *pgvector* ]] || exit 100'
 stub systemctl 'echo "systemctl $*" >> "$FAKE_LOG"
@@ -135,6 +167,8 @@ stub curl 'echo "curl $*" >> "$FAKE_LOG"
 out=""; url=""
 while (( $# )); do case $1 in -o) out=$2; shift 2 ;; http*) url=$1; shift ;; *) shift ;; esac; done
 case $url in
+  http://127.0.0.1:8765/healthz)
+    [[ -e $FAKE_DIR/active-honcho-proxy ]] || exit 7 ;;
   http://127.0.0.1:8000/health|http://127.0.0.1:3000/health)
     [[ -e $FAKE_DIR/active-honcho-api && -e $FAKE_DIR/active-honcho-mcp ]] || exit 7
     [[ $(cat "$FAKE_OPT/.git/FAKE_HEAD") != "${FAKE_UNHEALTHY_COMMIT:-none}" ]] || exit 22 ;;
@@ -179,11 +213,12 @@ make_bun() {
 
 # fresh: an empty CT. guest VAR=...: one run of the script; its output is $out.
 fresh() {
-  rm -rf -- "$tmp/ct" "$tmp/uv" "$tmp/bun" "$fake"/active-* "$fake"/pg-* "$fake/db-data" "$fake/user-honcho" "$fake/probe.json"
+  rm -rf -- "$tmp/ct" "$tmp/uv" "$tmp/bun" "$fake"/active-* "$fake"/pg-* "$fake/db-data" "$fake/user-honcho" "$fake/user-honcho-proxy" "$fake/probe.json" "$fake/tool-probe.json"
   rm -f "$fake/chat-status" "$fake/chat-warning" "$fake/dims"
   mkdir -p "$tmp/ct/deploy" "$tmp/ct/units"
-  cp "$here"/honcho-*.service "$here/budgets.py" "$tmp/ct/deploy/"
+  cp "$here"/honcho-*.service "$here/budgets.py" "$here/honcho-proxy.py" "$here/direct_dispatch.py" "$tmp/ct/deploy/"
   cp "$fake/router-key" "$tmp/ct/deploy/router-api-key"
+  : > "$tmp/ct/deploy/backend-keys"
   printf 'flags : fpu sse2 avx avx2\n' > "$tmp/ct/cpuinfo"
   make_uv; make_bun
   : > "$FAKE_LOG"
@@ -194,6 +229,7 @@ guest() {
     HONCHO_DEPLOY_DIR="$tmp/ct/deploy" HONCHO_OPT="$tmp/ct/opt" HONCHO_ETC="$tmp/ct/etc" \
     HONCHO_STATE_DIR="$tmp/ct/state" HONCHO_HOME="$tmp/ct/home" HONCHO_UV_DIR="$tmp/uv" \
     HONCHO_BUN_DIR="$tmp/bun" HONCHO_UNIT_DIR="$tmp/ct/units" HONCHO_CPUINFO="$tmp/ct/cpuinfo" \
+    HONCHO_PROXY_LIB_DIR="$tmp/ct/lib" \
     HONCHO_HEALTH_TRIES=2 ROUTER_URL="$router" \
     HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_DIMENSIONS=768 \
     HONCHO_EMBEDDING_BASE_URL= \
@@ -201,6 +237,12 @@ guest() {
 }
 calls() { cat "$FAKE_LOG"; }
 etc=$tmp/ct/etc
+file_mode() {
+  case $(uname -s) in
+    MINGW*|MSYS*) skip "$1" 'Git Bash temporary files do not preserve Unix modes' ;;
+    *) assert_file_mode "$1" "$2" "$3" ;;
+  esac
+}
 
 describe honcho_required_inputs
 out=$(env PATH="$bin:$PATH" ROUTER_URL="$router" \
@@ -215,22 +257,31 @@ out=$(guest) && rc=0 || rc=$?
 assert_eq "a fresh install succeeds" 0 "$rc"
 assert_contains "and reports both services healthy" "Honcho API and MCP are healthy." "$out"
 assert_contains "the release is checked out" "git -C $tmp/ct/opt checkout --detach $(printf 'a%.0s' {1..40})" "$(calls)"
-assert_contains "the probe offered a tool" '"name": "noop"' "$(cat "$fake/probe.json")"
+assert_contains "the probe offered a tool" '"name": "noop"' "$(cat "$fake/tool-probe.json")"
 assert_contains "and asked for JSON-schema output" '"type": "json_schema"' "$(cat "$fake/probe.json")"
 assert_contains "btree_gin is created with the other extensions" "CREATE EXTENSION IF NOT EXISTS btree_gin" "$(calls)"
 assert_contains "the first migration makes the default 1536 columns" "alembic dims=1536" "$(calls)"
 assert_contains "then the columns get the model's size" "configure_embeddings" "$(calls)"
 assert_contains "an admin key is made" "generate_jwt --admin" "$(calls)"
 assert_contains "and a key scoped to the osr workspace" "generate_jwt --workspace osr" "$(calls)"
-assert_eq "the admin key is root-only" 600 "$(stat -c %a "$etc/api-key")"
-assert_eq "so is the client key" 600 "$(stat -c %a "$etc/client-api-key")"
+file_mode "the admin key is root-only" 600 "$etc/api-key"
+file_mode "so is the client key" 600 "$etc/client-api-key"
+file_mode "the router key is limited to the proxy group" 640 "$etc/router-api-key"
+file_mode "the backend keys are limited to the proxy group" 640 "$etc/backend-keys"
 assert_contains "the env file has the vector size" "EMBEDDING_VECTOR_DIMENSIONS=768" "$(cat "$etc/honcho.env")"
-assert_contains "and the router as the model endpoint" "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=$router/v1" "$(cat "$etc/honcho.env")"
+assert_contains "and the local proxy as the model endpoint" "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://127.0.0.1:8765/v1" "$(cat "$etc/honcho.env")"
+assert_contains "and the local proxy as the embedding endpoint" "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://127.0.0.1:8765/v1" "$(cat "$etc/honcho.env")"
+assert_not_contains "Honcho does not hold the router address" "$router" "$(cat "$etc/honcho.env")"
+assert_not_contains "Honcho does not hold the router key" "sk-router-test-key" "$(cat "$etc/honcho.env")"
 assert_not_contains "upstream's structured output by default" "STRUCTURED_OUTPUT_MODE" "$(cat "$etc/honcho.env")"
-assert_eq "the router key reaches the embedding endpoint on the router" "Bearer sk-router-test-key" "$(cat "$fake/embedding-auth")"
+assert_eq "the model target receives no router key" "" "$(cat "$fake/embedding-auth")"
 assert_not_contains "nothing is dumped on a first install" "pg_dump" "$(calls)"
-assert_ok "the three units are installed" test -f "$tmp/ct/units/honcho-mcp.service"
+assert_ok "the proxy unit is installed" test -f "$tmp/ct/units/honcho-proxy.service"
+assert_contains "the proxy pins the resolved model" 'RESOLVED_MODEL=fast-model' "$(<"$etc/proxy.settings")"
 assert_fail "and nothing is left set aside" test -e "$tmp/ct/state/rollback"
+assert_eq "a first install sizes its budgets for 65536 tokens" "HONCHO_CONTEXT_TOKENS=65536" "$(<"$etc/budgets.env")"
+assert_contains "and says so" "Honcho budgets for a 65536-token context" "$out"
+assert_contains "the proxy asks for that much context" "HONCHO_CONTEXT_TOKENS=65536" "$(<"$etc/proxy.settings")"
 admin_key=$(<"$etc/api-key") client_key=$(<"$etc/client-api-key")
 
 describe honcho_rerun
@@ -241,18 +292,24 @@ assert_contains "taken from the env file" "alembic dims=from-env-file" "$(calls)
 assert_contains "even the same commit gets a rollback dump" "pg_dump -Fc honcho" "$(calls)"
 assert_eq "the admin key is kept" "$admin_key" "$(<"$etc/api-key")"
 assert_eq "and the client key" "$client_key" "$(<"$etc/client-api-key")"
+assert_eq "and the first install's context" "HONCHO_CONTEXT_TOKENS=65536" "$(<"$etc/budgets.env")"
 out=$(guest HONCHO_EMBEDDING_BASE_URL="http://localhost:$(<"$fake/port")/v1") && rc=0 || rc=$?
 assert_eq "a separate embedding endpoint works" 0 "$rc"
 assert_eq "and gets a placeholder key, not the router's" "Bearer no-key" "$(cat "$fake/embedding-auth")"
 
 describe honcho_same_commit_rollback
 before_env=$(<"$etc/honcho.env") before_db=$(<"$fake/db-data")
+before_proxy=$(<"$etc/proxy.settings")
+printf '# prior proxy revision\n' >> "$tmp/ct/lib/honcho-proxy.py"
+before_proxy_code=$(<"$tmp/ct/lib/honcho-proxy.py")
 printf '1024\n' > "$fake/dims"
 out=$(guest HONCHO_EMBEDDING_DIMENSIONS=1024 FAKE_MIGRATE_FAIL_COMMIT="$(printf 'a%.0s' {1..40})") && rc=0 || rc=$?
 assert_ne "a failed same-commit migration fails the run" 0 "$rc"
 assert_contains "its database is restored from the dump" "pg_restore --exit-on-error -d honcho" "$(calls)"
 assert_eq "including the prior data" "$before_db" "$(<"$fake/db-data")"
 assert_eq "and its embedding configuration" "$before_env" "$(<"$etc/honcho.env")"
+assert_eq "and its prior proxy settings" "$before_proxy" "$(<"$etc/proxy.settings")"
+assert_eq "and its prior proxy implementation" "$before_proxy_code" "$(<"$tmp/ct/lib/honcho-proxy.py")"
 rm -f "$fake/dims"
 
 describe honcho_upgrade
@@ -314,7 +371,7 @@ assert_contains "and says which budgets it set" "Honcho budgets for a 32768-toke
 assert_contains "the dialectic input fits the window" "DIALECTIC_MAX_INPUT_TOKENS=24576" "$(<"$etc/honcho.env")"
 assert_contains "dreams get a smaller output cap" "DREAM_DEDUCTION_MODEL_CONFIG__MAX_OUTPUT_TOKENS=4096" "$(<"$etc/honcho.env")"
 assert_eq "the choice is recorded for later runs" "HONCHO_CONTEXT_TOKENS=32768" "$(<"$etc/budgets.env")"
-assert_eq "root-only" 600 "$(stat -c %a "$etc/budgets.env")"
+file_mode "root-only" 600 "$etc/budgets.env"
 out=$(guest) && rc=0 || rc=$?
 assert_eq "a rerun without the variable succeeds" 0 "$rc"
 assert_contains "and keeps the budgets" "DIALECTIC_MAX_INPUT_TOKENS=24576" "$(<"$etc/honcho.env")"
@@ -338,13 +395,16 @@ assert_eq "empty values return to Honcho's defaults" 0 "$rc"
 assert_not_contains "no budget settings remain" "DIALECTIC_MAX_INPUT_TOKENS" "$(<"$etc/honcho.env")"
 assert_eq "and the record is empty" "" "$(<"$etc/budgets.env")"
 assert_contains "the run says so" "Honcho budgets: Honcho's defaults." "$out"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "a later run of an installed Honcho" 0 "$rc"
+assert_eq "keeps Honcho's defaults (the 65536 default is for a first install only)" "" "$(<"$etc/budgets.env")"
 
 describe honcho_kept_settings
 head_now() { cat "$tmp/ct/opt/.git/FAKE_HEAD"; }
 out=$(guest HONCHO_REF=v3.6.0 HONCHO_MODEL=auto HONCHO_STRUCTURED_OUTPUT_MODE=json_object) && rc=0 || rc=$?
 assert_eq "a run that sets the release, model and output mode succeeds" 0 "$rc"
 assert_eq "it records them" "$(printf 'HONCHO_REF=v3.6.0\nHONCHO_MODEL=auto\nHONCHO_STRUCTURED_OUTPUT_MODE=json_object')" "$(<"$etc/settings.env")"
-assert_eq "root-only" 600 "$(stat -c %a "$etc/settings.env")"
+file_mode "root-only" 600 "$etc/settings.env"
 out=$(guest) && rc=0 || rc=$?
 assert_eq "a plain rerun succeeds" 0 "$rc"
 assert_eq "and stays on the recorded release instead of the default" "$(printf 'b%.0s' {1..40})" "$(head_now)"
@@ -383,15 +443,19 @@ assert_eq "and is set for all nine model configs" 9 "$(grep -c 'STRUCTURED_OUTPU
 printf 'no-tool-model\n' > "$fake/chat-warning"
 out=$(guest) && rc=0 || rc=$?
 assert_ne "a router without a tool-capable model stops the run" 0 "$rc"
-assert_contains "and says why" "supports tool calls" "$out"
+assert_contains "and says why" "no reachable model that reports tool support" "$out"
 assert_ok "an existing install is left running" test -e "$fake/active-honcho-api"
 out=$(guest HONCHO_SKIP_CHAT_PROBE=true) && rc=0 || rc=$?
-assert_eq "the probe can be skipped" 0 "$rc"
+assert_ne "skipping the active probe still checks inventory capabilities" 0 "$rc"
 rm -f "$fake/chat-warning"
+printf '400\n' > "$fake/chat-status"
+out=$(guest HONCHO_SKIP_CHAT_PROBE=true) && rc=0 || rc=$?
+assert_eq "the active chat probe can be skipped" 0 "$rc"
+rm -f "$fake/chat-status"
 printf '1024\n' > "$fake/dims"
 out=$(guest) && rc=0 || rc=$?
 assert_ne "a wrong vector size stops the run" 0 "$rc"
-assert_contains "naming both sizes" "HONCHO_EMBEDDING_DIMENSIONS=768 but 'nomic-embed-text' returned 1024" "$out"
+assert_contains "naming both sizes" "embedding returned 1024 values; configured 768" "$out"
 rm -f "$fake/dims"
 out=$(guest HONCHO_MODEL=large) && rc=0 || rc=$?
 assert_ne "a model the router does not list is refused" 0 "$rc"

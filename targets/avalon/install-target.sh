@@ -69,8 +69,8 @@ AVALON_BACKEND=auto (rocm when /dev/kfd is here, else cuda),
 AVALON_ROCM_VERSION=7.2.4, AVALON_GPU_TARGET=auto (gfx1100, gfx1101 or
 gfx1102, from the card's PCI ID), AVALON_CUDA_VERSION=12.9,
 AVALON_CUDA_ARCH=auto (the GPU's compute capability, 75 or newer),
-AVALON_PORT=8080, AVALON_CONTEXT=auto (262144 tokens with 19 GB of VRAM or
-more, else 65536), AVALON_MTP=true (speculative decoding with the 1.4 GB MTP
+AVALON_PORT=8080, AVALON_CONTEXT=65536 (auto: 262144 tokens with 19 GB of
+VRAM or more, else 65536), AVALON_MTP=true (speculative decoding with the 1.4 GB MTP
 draft head), AVALON_MODEL_NAME=qwen3.8-flash-next-avalon (the API's model id),
 AVALON_READY_TIMEOUT=1800 (seconds).
 USAGE
@@ -983,7 +983,7 @@ AVALON_CUDA_VERSION=${AVALON_CUDA_VERSION:-12.9}
 AVALON_NVCC=${AVALON_NVCC:-/usr/local/cuda-$AVALON_CUDA_VERSION/bin/nvcc}
 AVALON_CUDA_ARCH=${AVALON_CUDA_ARCH:-auto}
 AVALON_PORT=${AVALON_PORT:-8080}
-AVALON_CONTEXT=${AVALON_CONTEXT:-auto}
+AVALON_CONTEXT=${AVALON_CONTEXT:-65536}
 AVALON_MTP=${AVALON_MTP:-true}
 AVALON_MODEL_NAME=${AVALON_MODEL_NAME:-qwen3.8-flash-next-avalon}
 AVALON_READY_TIMEOUT=${AVALON_READY_TIMEOUT:-1800}
