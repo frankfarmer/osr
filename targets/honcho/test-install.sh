@@ -146,8 +146,17 @@ stub dropdb 'echo "dropdb $*" >> "$FAKE_LOG"; rm -f "$FAKE_DIR/pg-db" "$FAKE_DIR
 stub pg_dump 'echo "pg_dump $*" >> "$FAKE_LOG"; cat "$FAKE_DIR/db-data"'
 stub pg_restore 'echo "pg_restore $*" >> "$FAKE_LOG"; cat > "$FAKE_DIR/db-data"'
 # git: the checkout is the commit named in .git/FAKE_HEAD; tags map to commits.
+# Like real git as root, a call into the honcho-owned checkout must name it
+# safe (-c safe.directory=DIR) or it fails with "dubious ownership".
 stub git 'echo "git $*" >> "$FAKE_LOG"
-[[ $1 == -C ]] && { dir=$2; shift 2; }
+dir="" safe=""
+while [[ $1 == -c || $1 == -C ]]; do
+  if [[ $1 == -C ]]; then dir=$2; elif [[ $2 == safe.directory=* ]]; then safe=${2#safe.directory=}; fi
+  shift 2
+done
+if [[ -n $dir && -e $dir/.git/FAKE_HEAD && $safe != "$dir" ]]; then
+  echo "fatal: detected dubious ownership in repository at $dir" >&2; exit 128
+fi
 case $1 in
   clone) mkdir -p "$3/.git" "$3/mcp" ;;
   fetch) : ;;
@@ -256,7 +265,8 @@ fresh
 out=$(guest) && rc=0 || rc=$?
 assert_eq "a fresh install succeeds" 0 "$rc"
 assert_contains "and reports both services healthy" "Honcho API and MCP are healthy." "$out"
-assert_contains "the release is checked out" "git -C $tmp/ct/opt checkout --detach $(printf 'a%.0s' {1..40})" "$(calls)"
+assert_contains "the release is checked out" "git -c safe.directory=$tmp/ct/opt -C $tmp/ct/opt checkout --detach $(printf 'a%.0s' {1..40})" "$(calls)"
+assert_not_contains "every git call into the checkout names it safe (it belongs to honcho)" "git -C $tmp/ct/opt" "$(calls)"
 assert_contains "the probe offered a tool" '"name": "noop"' "$(cat "$fake/tool-probe.json")"
 assert_contains "and asked for JSON-schema output" '"type": "json_schema"' "$(cat "$fake/probe.json")"
 assert_contains "btree_gin is created with the other extensions" "CREATE EXTENSION IF NOT EXISTS btree_gin" "$(calls)"

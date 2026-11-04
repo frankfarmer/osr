@@ -129,7 +129,10 @@ stub getent '[[ $1 == passwd && -e $FAKE_STATE/user ]] && printf "hermes:x:1000:
 stub runuser 'while [[ $1 != -- ]]; do shift; done; shift; exec "$@"'
 # install: drop -o/-g (the hermes account does not exist here).
 stub install 'a=(); while (( $# )); do case $1 in -o|-g) shift 2;; *) a+=("$1"); shift;; esac; done; exec /usr/bin/install "${a[@]}"'
-stub git '[[ $1 == -C && $3 == rev-parse ]] || exit 1; cat "$2/.commit" 2>/dev/null || exit 128'
+# git: the checkout belongs to the hermes account, so root must name it safe
+# (-c safe.directory=DIR), as real git requires; its commit is in DIR/.commit.
+stub git '[[ $1 == -c && $2 == safe.directory=* && $3 == -C && $2 == "safe.directory=$4" && $5 == rev-parse ]] || exit 128
+cat "$4/.commit" 2>/dev/null || exit 128'
 stub systemctl 'unit=${*: -1}; file=$FAKE_STATE/active
 [[ $unit != hermes-direct.service ]] || file=$FAKE_STATE/direct-active
 [[ $unit != hermes-dashboard.service ]] || file=$FAKE_STATE/dashboard-active

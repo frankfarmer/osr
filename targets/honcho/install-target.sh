@@ -177,6 +177,11 @@ install -d -m 0700 "$state"
 install -d -m 0755 "$proxy_lib_dir"
 
 as_honcho() { runuser -u honcho -- env HOME="$home" "$@"; }
+# opt_git: git in the checkout, as root. The checkout belongs to honcho after the
+# first run, and git (2.35.2+) refuses a repository owned by another user
+# ("detected dubious ownership") unless it is named safe; command-line scope
+# counts, so nothing is written to root's git config.
+opt_git() { git -c safe.directory="$opt" -C "$opt" "$@"; }
 honcho_run() { as_honcho "$uv" --directory "$opt" run --frozen --no-dev --env-file "$etc/honcho.env" "$@"; }
 proxy_expected=true
 healthy() {
@@ -201,7 +206,7 @@ if [[ -f $unit_dir/honcho-api.service && -d $opt/.git ]]; then
   [[ ! -f $unit_dir/honcho-proxy.service ]] || had_proxy=true
   previous_etc_mode=$(stat -c %a "$etc")
   previous_etc_owner=$(stat -c %u:%g "$etc")
-  prev_commit=$(git -C "$opt" rev-parse HEAD)
+  prev_commit=$(opt_git rev-parse HEAD)
   if [[ -e $backup ]]; then
     die "Previous rollback data remains in $backup: an earlier run's rollback did not complete.
 It holds what that run set aside: honcho.env, the budget and settings records, the keys, the units, Bun and, as honcho.dump, the
@@ -242,8 +247,8 @@ rollback() {
   install -d -m "$previous_etc_mode" -o "${previous_etc_owner%%:*}" \
     -g "${previous_etc_owner#*:}" "$etc" || ok=false
   if [[ -f $backup/bun ]]; then cp -a -- "$backup/bun" "$bun"; fi
-  if [[ $(git -C "$opt" rev-parse HEAD 2>/dev/null) != "$prev_commit" ]]; then
-    { git -C "$opt" checkout --detach "$prev_commit" && chown -R honcho:honcho "$opt" &&
+  if [[ $(opt_git rev-parse HEAD 2>/dev/null) != "$prev_commit" ]]; then
+    { opt_git checkout --detach "$prev_commit" && chown -R honcho:honcho "$opt" &&
       as_honcho "$uv" --directory "$opt" sync --frozen --no-dev --python 3.13 &&
       as_honcho "$bun" --cwd "$opt/mcp" install --frozen-lockfile; } || ok=false
   fi
@@ -276,10 +281,10 @@ trap on_exit EXIT
 if [[ ! -d $opt/.git ]]; then
   git clone https://github.com/plastic-labs/honcho.git "$opt"
 fi
-git -C "$opt" fetch --tags origin
+opt_git fetch --tags origin
 target=$ref
 if [[ $ref == main ]]; then target=origin/main; fi
-new_commit=$(git -C "$opt" rev-parse --verify "${target}^{commit}")
+new_commit=$(opt_git rev-parse --verify "${target}^{commit}")
 if $existing; then
   # Even the same commit can change vector dimensions during reconfigure.
   note "Reconfiguring Honcho from ${prev_commit:0:12} to ${new_commit:0:12}; the database is dumped first."
@@ -293,7 +298,7 @@ install -m 0644 "$deploy/direct_dispatch.py" "$proxy_lib_dir/direct_dispatch.py"
 install -m 0640 -o root -g honcho-proxy "$deploy/proxy.settings" "$etc/proxy.settings"
 install -m 0640 -o root -g honcho-proxy "$deploy/router-api-key" "$etc/router-api-key"
 install -m 0640 -o root -g honcho-proxy "$deploy/backend-keys" "$etc/backend-keys"
-git -C "$opt" checkout --detach "$new_commit"
+opt_git checkout --detach "$new_commit"
 chown -R honcho:honcho "$opt"
 
 if [[ ! -x $uv ]]; then

@@ -447,8 +447,11 @@ dashboard_config_has_auth() {
           -n $(dashboard_config_value dashboard.basic_auth.password_hash) ) ]]; then return 0; fi
   return 1
 }
+# installed_commit: the checkout's commit. It belongs to the hermes account, so
+# root's git must name it safe, or git refuses it ("dubious ownership") and the
+# commit reads as empty: a pinned HERMES_COMMIT then never matches.
 installed_commit() {
-  git -C "$HERMES_HOME/hermes-agent" rev-parse HEAD 2>/dev/null || true
+  git -c safe.directory="$HERMES_HOME/hermes-agent" -C "$HERMES_HOME/hermes-agent" rev-parse HEAD 2>/dev/null || true
 }
 
 if [[ -x $HERMES_BIN && -f $HERMES_ETC/settings ]] &&
