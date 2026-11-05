@@ -67,6 +67,9 @@ add_suite nvidia-lxc shell "${ROOT}/targets/test-nvidia-lxc.sh"
 # server tests stub airllm/torch and only need the bridge's fastapi stack.
 ROUTER_PYTHON="${ROUTER_PYTHON:-python3}"
 BRIDGE_PYTHON="${BRIDGE_PYTHON:-python3}"
+# The pinned LiteLLM (services/litellm-proxy/requirements.lock), for the Kindi
+# retry test. Without it that suite prints a SKIP line, which --strict fails.
+LITELLM_PYTHON="${LITELLM_PYTHON:-python3}"
 add_suite bridge  pytest "${ROOT}/targets/llamacpp/test_bridge.py" "$BRIDGE_PYTHON"
 add_suite airllm  pytest "${ROOT}/targets/airllm/test_server.py"   "$BRIDGE_PYTHON"
 add_suite router  pytest "${HERE}/test_router.py"                  "$ROUTER_PYTHON"
@@ -83,6 +86,7 @@ add_suite honcho-budgets            python "${ROOT}/targets/honcho/test-budgets.
 add_suite honcho-proxy              python "${ROOT}/targets/honcho/test-proxy.py"              python3
 add_suite honcho-model-choices      python "${ROOT}/targets/honcho/test-model-choices.py"      python3
 add_suite skip-report               python "${HERE}/test-skip-report.py"                       python3
+add_suite litellm-retries           python "${HERE}/test-litellm-retries.py"                   "$LITELLM_PYTHON"
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_bld=$'\033[1m'; c_off=$'\033[0m'
 [[ -t 1 ]] || { c_red=""; c_grn=""; c_yel=""; c_bld=""; c_off=""; }

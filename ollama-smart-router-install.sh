@@ -209,10 +209,12 @@ MATTERMOST_VERIFY_TLS="${MATTERMOST_VERIFY_TLS:-true}"
 # that has deployments, in size order: "<model_name> <signature>". Each tier
 # falls back to the nearest other tiers (smaller first on a tie), skipping a
 # tier with identical deployments -- the same model on the same host cannot
-# succeed where the original just failed. Same rule as manage-model-servers.
+# succeed where the original just failed. A tier with Kindi is a fallback
+# only for another Kindi tier on other Kindi servers (litellm_fallbacks in
+# manage-model-servers has the reasons). Same rule as manage-model-servers.
 litellm_router_settings() {
   python3 -c '
-import json, sys
+import json, re, sys
 tiers = []
 for line in sys.stdin.read().splitlines():
     if line.strip():
@@ -222,13 +224,29 @@ print("router_settings:")
 print("  routing_strategy: latency-based-routing")
 print("  num_retries: 2")
 print("  timeout: 600")
+def kindi(sig):
+    return set(re.findall(r"kindi[+][^,@\s]+", sig))
+def may_fall_back(sig, osig):
+    return not kindi(osig) or (kindi(sig) and not kindi(sig) & kindi(osig))
 rows = []
 for i, (name, sig) in enumerate(tiers):
-    others = [(abs(i - j), j, o) for j, (o, osig) in enumerate(tiers) if o != name and osig != sig]
+    others = [(abs(i - j), j, o) for j, (o, osig) in enumerate(tiers)
+              if o != name and osig != sig and may_fall_back(sig, osig)]
     if others:
         rows.append("    - %s: %s" % (name, json.dumps([o for _, _, o in sorted(others)])))
 if rows:
     print("  fallbacks:")
+    print("\n".join(rows))
+# Tiers with a Kindi deployment: no retry after a timeout, one after a 429.
+# LiteLLM 1.75 does not read InternalServerErrorRetries, so the router caps the
+# other errors for those tiers with x-litellm-num-retries: 1.
+rows = []
+for name, sig in tiers:
+    if "@kindi+" in sig or ",kindi+" in sig:
+        rows += ["    %s:" % name, "      # osr-kindi-policy", "      TimeoutErrorRetries: 0",
+                 "      RateLimitErrorRetries: 1"]
+if rows:
+    print("  model_group_retry_policy:")
     print("\n".join(rows))
 '
 }
@@ -809,6 +827,8 @@ valid_ollama_addr() {
   [[ "$raw" == xolotl://* ]] && raw="${raw#xolotl://}"
   raw="${raw#avalon+}"
   [[ "$raw" == avalon://* ]] && raw="${raw#avalon://}"
+  raw="${raw#kindi+}"
+  [[ "$raw" == kindi://* ]] && raw="${raw#kindi://}"
   if [[ "$raw" == http://* || "$raw" == https://* ]]; then
     valid_http_url "$raw"; return $?
   fi
@@ -822,7 +842,7 @@ valid_ollama_addr() {
 }
 # Normalise any accepted form to a base URL with an explicit port.
 # Stored form: http://host:port for Ollama or a kind-prefixed URL for
-# LM Studio, Strata, Basalt, Maya, Xolotl and Avalon, matching the manager, router and monitor.
+# LM Studio, Strata, Basalt, Maya, Xolotl, Avalon and Kindi, matching the manager, router and monitor.
 normalize_ollama_url() {
   local raw="${1%/}" prefix="" port="$OLLAMA_PORT"
   if [[ "$raw" == lmstudio+* ]]; then
@@ -849,6 +869,10 @@ normalize_ollama_url() {
     prefix="avalon+"; raw="${raw#avalon+}"; port="${AVALON_PORT:-8080}"
   elif [[ "$raw" == avalon://* ]]; then
     prefix="avalon+"; raw="${raw#avalon://}"; port="${AVALON_PORT:-8080}"
+  elif [[ "$raw" == kindi+* ]]; then
+    prefix="kindi+"; raw="${raw#kindi+}"; port="${KINDI_PORT:-8093}"
+  elif [[ "$raw" == kindi://* ]]; then
+    prefix="kindi+"; raw="${raw#kindi://}"; port="${KINDI_PORT:-8093}"
   fi
   if [[ "$raw" == http://* || "$raw" == https://* ]]; then
     printf '%s%s\n' "$prefix" "$raw"
@@ -954,6 +978,7 @@ target_table() {
     'mattermost|service|Mattermost: health alerts (team, channel and webhook made for you)|||' \
     'ollama|model|Ollama from the PVE community script (NVIDIA, AMD or Intel Arc GPU when present)|http://@IP@:11434||optional:nvidia,amd,intel' \
     'airllm|model|AirLLM: one model larger than RAM/VRAM, streamed from disk (slow)|http://@IP@:11434||:nvidia' \
+    'kindi|model|Kindi (Ternary-Bonsai-2 2B-27B) on a small or old NVIDIA GPU (Kepler to RTX 50), or the CPU|kindi+http://@IP@:@PORT@|kindi|optional:nvidia' \
     'llamacpp|model|llama.cpp llama-server behind an Ollama bridge (CUDA, or Vulkan on AMD/Intel Arc)|http://@IP@:11434||required:nvidia,amd,intel' \
     'strata|model|Strata (Qwen3.8-Flash-Next) on an NVIDIA GPU|strata+http://@IP@:@PORT@|strata|required:nvidia' \
     'basalt|model|Basalt on a Blackwell GPU (CUDA 13)|basalt+http://@IP@:@PORT@|basalt|required:nvidia:rtx50' \
@@ -992,8 +1017,9 @@ llamacpp_model_given() {
 # llama.cpp needs a GPU for its default build: BACKEND=cuda (NVIDIA) or vulkan
 # (AMD, Intel Arc), unset for whichever the host has; BACKEND=cpu does without.
 # AirLLM uses an NVIDIA GPU only when GPU_DEVICES is given. Avalon follows
-# AVALON_BACKEND (rocm: AMD, cuda: NVIDIA). Ollama and ComfyUI follow GPU
-# (nvidia, amd or intel picks one; no or none runs on the CPU).
+# AVALON_BACKEND (rocm: AMD, cuda: NVIDIA). Kindi uses an NVIDIA GPU when
+# present, needs one with KINDI_BACKEND=cuda and none with cpu. Ollama and
+# ComfyUI follow GPU (nvidia, amd or intel picks one; no or none runs on the CPU).
 target_gpu_spec() {
   local need vendors gens
   IFS=: read -r need vendors gens <<< "$(target_field "$1" gpu)" || true
@@ -1011,6 +1037,11 @@ target_gpu_spec() {
       case "${AVALON_BACKEND:-auto}" in
         rocm) vendors=amd ;;
         cuda) vendors=nvidia ;;
+      esac ;;
+    kindi)
+      case "${KINDI_BACKEND:-auto}" in
+        cuda) need=required ;;
+        cpu) need="" ;;
       esac ;;
     ollama|comfyui)
       case "${GPU:-auto}" in
@@ -1078,12 +1109,14 @@ gpu_card_label() {
 }
 
 # target_gpu_prompted NAME: does the target run on AMD Radeon or Intel Arc as
-# configured, so that each install asks which card it gets? NVIDIA-only
-# targets use the NVIDIA driver's GPU 0 (or their GPU_DEVICES).
+# configured, so that each install asks which card it gets? So does Kindi,
+# which is meant for a spare old NVIDIA card beside the others. The other
+# NVIDIA-only targets use the NVIDIA driver's GPU 0 (or their GPU_DEVICES).
 target_gpu_prompted() {
   local need vendors
   IFS='|' read -r need vendors _ <<< "$(target_gpu_spec "$1")" || return 1
-  [[ -n "$need" && ( ",$vendors," == *",amd,"* || ",$vendors," == *",intel,"* ) ]]
+  [[ -n "$need" ]] || return 1
+  [[ "$1" == kindi || ",$vendors," == *",amd,"* || ",$vendors," == *",intel,"* ]]
 }
 
 # target_gpu_choices NAME: the cards the target can use, one HOST_GPU_CARDS
@@ -1122,7 +1155,7 @@ valid_gpu_choice() {
 }
 
 # prompt_target_gpus: for each selected target that runs on AMD Radeon or Intel
-# Arc (Ollama, llama.cpp, ComfyUI), ask which of the host's GPUs it gets; the
+# Arc (Ollama, llama.cpp, ComfyUI), and for Kindi, ask which of the host's GPUs it gets; the
 # answer is <PREFIX>_GPU_CARD (a PCI address, or none: the CPU). Targets that
 # use a GPU only when present can also take none. A preset is checked and
 # offered as the default. With one card and a target that needs it, that card
@@ -1158,7 +1191,7 @@ prompt_target_gpus() {
     [[ "$need" != optional ]] || GPU_CHOICE_NONE=true
     if [[ -n "$preset" ]] && ! valid_gpu_choice "$preset"; then
       if [[ "${preset,,}" == none ]]; then
-        echo "${var}=none: ${name} needs a GPU (llama.cpp: set BACKEND=cpu to build without one)." >&2
+        echo "${var}=none: ${name} needs a GPU (llama.cpp: set BACKEND=cpu to build without one; Kindi: KINDI_BACKEND=cpu)." >&2
       else
         echo "${var}=${preset} is not a GPU ${name} can use on this host." >&2
       fi
@@ -1321,7 +1354,8 @@ prepare_host_gpu() {
 # or vulkan) and GPU_DEVICES: the card's render node for Vulkan, its
 # /dev/nvidia<minor> with the control and UVM devices for CUDA; for Avalon
 # AVALON_BACKEND (rocm or cuda) and GPU_DEVICES: /dev/kfd and the card's
-# render node for ROCm, the NVIDIA nodes for CUDA.
+# render node for ROCm, the NVIDIA nodes for CUDA; for Kindi KINDI_BACKEND
+# (cuda with a ready NVIDIA card, else cpu) and that card's NVIDIA nodes.
 target_gpu_env() {
   local state vendor render minor pci
   IFS='|' read -r state vendor render minor pci <<< "$(target_gpu_result "$1")"
@@ -1357,12 +1391,22 @@ target_gpu_env() {
       elif [[ "$avalon_backend" == cuda && -n "$minor" ]]; then
         echo "GPU_DEVICES=/dev/nvidia${minor} /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools"
       fi ;;
+    kindi)
+      local kindi_backend="${KINDI_BACKEND:-auto}"
+      if [[ $state != ready || $vendor != nvidia ]]; then
+        [[ "$kindi_backend" != auto ]] || echo "KINDI_BACKEND=cpu"
+        return 0
+      fi
+      [[ "$kindi_backend" != auto ]] || echo "KINDI_BACKEND=cuda"
+      if [[ -z "${GPU_DEVICES:-}" && -n "$minor" ]]; then
+        echo "GPU_DEVICES=/dev/nvidia${minor} /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools"
+      fi ;;
   esac
 }
 
-# Strata, Basalt, Maya, Xolotl and Avalon take a template; the others choose or prompt for theirs.
+# Strata, Basalt, Maya, Xolotl, Avalon and Kindi take a template; the others choose or prompt for theirs.
 target_needs_template() {
-  [[ "$1" == strata || "$1" == basalt || "$1" == maya || "$1" == xolotl || "$1" == avalon ]]
+  [[ "$1" == strata || "$1" == basalt || "$1" == maya || "$1" == xolotl || "$1" == avalon || "$1" == kindi ]]
 }
 
 # The newer NVIDIA repositories do not carry the targets' CUDA defaults.
@@ -1421,7 +1465,7 @@ normalize_target_selection() {
 target_menu_group() {
   case "$1" in
     gitea|mattermost) echo 'Services (CPU): configuration and alerts; created before OSR.' ;;
-    ollama|airllm) echo 'Model servers (CPU or optional GPU):' ;;
+    ollama|airllm|kindi) echo 'Model servers (CPU or optional GPU):' ;;
     honcho) echo 'Memory infrastructure (CPU): created before agents.' ;;
     *)
       case "$(target_field "$1" phase)" in
@@ -1524,6 +1568,8 @@ valid_avalon_template() {
   esac
   [[ "$1" == *:vztmpl/ubuntu-24.04-* || "$1" == *:vztmpl/ubuntu-22.04-* ]]
 }
+# Kindi: the CUDA 10.2 runfile runs on Debian 12/13 and Ubuntu 22.04/24.04.
+valid_kindi_template() { valid_strata_template "$1"; }
 show_strata_template_alternatives() {
   local selected="$1" storage ref shown=0
   while IFS= read -r storage; do
@@ -1565,9 +1611,10 @@ host_gpu_cuda_arch() {
 # (compute capability below 7.5, e.g. a V100) needs CUDA 12.x, which only the
 # Ubuntu 24.04/22.04 and Debian 12 repositories carry. Avalon's ROCm build
 # needs Ubuntu 24.04 or 22.04 (AMD's Radeon support; its CUDA build runs there too).
+# Kindi's CUDA 10.2 runfile runs on the releases Strata uses.
 gpu_target_template_order() {
   case "$1" in
-    strata) echo debian-13 ubuntu-24.04 ubuntu-22.04 debian-12 ;;
+    strata|kindi) echo debian-13 ubuntu-24.04 ubuntu-22.04 debian-12 ;;
     avalon) echo ubuntu-24.04 ubuntu-22.04 ;;
     maya)
       local arch
@@ -1616,7 +1663,7 @@ honcho_known_dimensions() {
 }
 
 # For each selected target: an explicit CT ID, static address and storage (and
-# a template for Strata, Basalt, Maya, Xolotl and Avalon). Presets:
+# a template for Strata, Basalt, Maya, Xolotl, Avalon and Kindi). Presets:
 # <NAME>_CT_ID, <NAME>_IP_CIDR, <NAME>_STORAGE, <NAME>_TEMPLATE.
 prompt_target_settings() {
   local name prefix id_var ip_var storage_var template_var default ip dims_default
@@ -1691,6 +1738,10 @@ prompt_target_settings() {
         [[ -n "$default" ]] || default="$(default_gpu_target_template "$name")" || default=""
         prompt_until_valid "    Template (Ubuntu 24.04/22.04; CUDA also supports Debian 12/13 and Ubuntu 26.04; downloaded if missing)" \
           "$template_var" "$default" valid_avalon_template || return 1
+      elif [[ $name == kindi ]]; then
+        [[ -n "$default" ]] || default="$(default_gpu_target_template "$name")" || default=""
+        prompt_until_valid "    Template (Debian 12/13 or Ubuntu 22.04/24.04; downloaded if missing)" \
+          "$template_var" "$default" valid_kindi_template || return 1
       else
         [[ -n "$default" ]] || default="$(default_gpu_target_template "$name")" || default=""
         prompt_until_valid "    Template (Ubuntu 22.04/24.04/26.04 or Debian 12/13; downloaded if missing; Ubuntu 26.04 needs CUDA 13.3+)" \
@@ -1715,7 +1766,7 @@ target_context_var() {
   case "$1" in
     ollama) echo OLLAMA_CONTEXT_LENGTH ;;
     llamacpp) echo LLAMACPP_CONTEXT ;;
-    strata|basalt|maya|xolotl|avalon) echo "$(target_var_prefix "$1")_CONTEXT" ;;
+    strata|basalt|maya|xolotl|avalon|kindi) echo "$(target_var_prefix "$1")_CONTEXT" ;;
     *) return 1 ;;
   esac
 }
@@ -1754,6 +1805,15 @@ valid_avalon_context() { [[ $1 == auto ]] || { valid_target_context "$1" && (( $
 # card's memory is not known).
 avalon_auto_context() {
   if [[ $1 =~ ^[0-9]+$ ]] && (( $1 >= 19000 )); then echo 262144; else echo 65536; fi
+}
+# Kindi takes 4096..262144 here, or auto: its own profile for the card, which
+# its engine then fits to the free card memory.
+valid_kindi_context() { valid_avalon_context "$1"; }
+# kindi_auto_context VRAM_MIB: the least KINDI_CONTEXT=auto gives on such a
+# card (24576 on the CPU, a small card or when the card is not known; 65536
+# from 7.5 GB, 131072 on an RTX 30 or newer with 9.5 GB).
+kindi_auto_context() {
+  if [[ $1 =~ ^[0-9]+$ ]] && (( $1 >= 7500 )); then echo 65536; else echo 24576; fi
 }
 
 # gpu_vram_mib [ADDRESS]: a GPU's memory in MiB, or nothing when it is not known
@@ -1807,6 +1867,7 @@ context_recommendation() {
   else
     case "$name" in
       avalon) ceiling="$(avalon_auto_context "$vram")" ;;
+      kindi) ceiling="$(kindi_auto_context "$vram")" ;;
       xolotl) if (( vram >= 24000 )); then ceiling=131072; else ceiling=65536; fi ;;
       strata|basalt|maya)
         if (( vram >= 24000 )); then ceiling=131072
@@ -1873,11 +1934,15 @@ prompt_target_contexts() {
     if [[ $name == avalon ]]; then
       echo "    auto: 262144 with 19 GB of VRAM or more, else 65536."
       prompt_until_valid "    Context window (tokens, or auto)" "$var" "${default:-65536}" valid_avalon_context || return 1
+    elif [[ $name == kindi ]]; then
+      echo "    auto: Kindi's own size for the card (24576 to 131072), fitted to its free memory."
+      prompt_until_valid "    Context window (tokens, or auto)" "$var" "${default:-auto}" valid_kindi_context || return 1
     else
       prompt_until_valid "    Context window (tokens)" "$var" "${default:-65536}" valid_target_context || return 1
     fi
     value="${!var}"
-    [[ $value != auto ]] || value="$(avalon_auto_context "$vram")"
+    if [[ $value == auto && $name == kindi ]]; then value="$(kindi_auto_context "$vram")"
+    elif [[ $value == auto ]]; then value="$(avalon_auto_context "$vram")"; fi
     if [[ $name == llamacpp && $(llamacpp_slots) -gt 1 ]]; then
       echo "    llama.cpp shares CONTEXT_SIZE among its ${PARALLEL_SLOTS} slots: CONTEXT_SIZE=$(( value * $(llamacpp_slots) ))."
     fi
@@ -1898,6 +1963,9 @@ prompt_target_contexts() {
   fi
 }
 
+# target_default_port NAME: the API port a model target serves by default
+# (Kindi keeps its own 8093; the other Strata-style targets use 8080).
+target_default_port() { if [[ $1 == kindi ]]; then echo 8093; else echo 8080; fi; }
 # target_server_entry NAME: the router's server entry for a model target.
 target_server_entry() {
   local name="$1" prefix ip_var entry port_var
@@ -1906,7 +1974,7 @@ target_server_entry() {
   entry="$(target_field "$name" entry)" || return 1
   [[ -n "$entry" ]] || return 1
   entry="${entry//@IP@/${!ip_var%/*}}"
-  printf '%s\n' "${entry//@PORT@/${!port_var:-8080}}"
+  printf '%s\n' "${entry//@PORT@/${!port_var:-$(target_default_port "$name")}}"
 }
 
 # The model targets go first in the server prompt, so they get tiers and are in
@@ -2403,7 +2471,7 @@ prompt_model_servers() {
   for (( i = 1; i <= MODEL_SERVER_COUNT; i++ )); do
     local var="MODEL_SERVER_${i}"
     default_addr="${!var:-}"
-    prompt_until_valid "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host, xolotl://host or avalon://host)" \
+    prompt_until_valid "  Server ${i} (IP, host:port, URL, lmstudio://host, strata://host, basalt://host, maya://host, xolotl://host, avalon://host or kindi://host)" \
       raw "$default_addr" valid_ollama_addr || return 1
     MODEL_SERVERS+=("$(normalize_ollama_url "$raw")")
   done
@@ -3289,6 +3357,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
@@ -3357,7 +3426,7 @@ _DEFAULTS = {
         # tool-capable. Their APIs say nothing per model, but each of these
         # servers parses "tools" and returns OpenAI tool_calls. A kind left
         # out is reported unknown. Blank: none.
-        "tool_kinds": "strata, basalt, maya, xolotl, avalon",
+        "tool_kinds": "strata, basalt, maya, xolotl, avalon, kindi",
     },
     "http": {
         # Seconds to establish a TCP connection to a backend. Short on purpose:
@@ -3365,6 +3434,10 @@ _DEFAULTS = {
         "connect_timeout_seconds": "3",
         # Seconds allowed between bytes of a response (generation can be slow).
         "read_timeout_seconds": "300",
+        # The same for Kindi, which serves one request at a time and reads a
+        # long prompt slowly on a small card (its agent guide: 30-60 minutes).
+        # Never below read_timeout_seconds.
+        "kindi_read_timeout_seconds": "3600",
     },
     "discovery": {
         "enabled": "true",
@@ -3603,6 +3676,8 @@ SERVER_KINDS = {
                "label": "Xolotl", "openai": True},
     "avalon": {"prefix": "avalon+", "key_env": "AVALON_API_KEY",
                "label": "Avalon", "openai": True},
+    "kindi": {"prefix": "kindi+", "key_env": "KINDI_API_KEY",
+              "label": "Kindi", "openai": True},
 }
 OPENAI_KINDS = frozenset(k for k, v in SERVER_KINDS.items() if v["openai"])
 # Bearer tokens the router adds per kind (secrets.env). LM Studio's is for
@@ -3648,6 +3723,7 @@ for _kind in sorted(set(_json_list(_cfg, "classification", "tool_kinds")) - TOOL
                 _kind, ", ".join(sorted(OPENAI_KINDS)))
 CONNECT_TIMEOUT = _cfg.getfloat("http", "connect_timeout_seconds")
 READ_TIMEOUT = _cfg.getfloat("http", "read_timeout_seconds")
+KINDI_READ_TIMEOUT = max(READ_TIMEOUT, _cfg.getfloat("http", "kindi_read_timeout_seconds"))
 
 # Request headers never forwarded upstream.
 HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive",
@@ -3715,6 +3791,18 @@ def _discovery_servers() -> list:
 
 
 SERVERS = _discovery_servers()
+
+
+def litellm_read_timeout(tier: str | None = None) -> float:
+    """Read gap for this LiteLLM request; passthrough keeps the normal limit."""
+    return KINDI_READ_TIMEOUT if tier and tier_has_kindi(tier) else READ_TIMEOUT
+
+
+def tier_has_kindi(tier: str) -> bool:
+    """Whether LiteLLM can select a Kindi deployment for this tier."""
+    return any(server_kind(entry.strip()) == "kindi"
+               for entry in _tier_env(tier).split(",") if entry.strip())
+
 
 # --- live inventory -----------------------------------------------------------
 # Replaced wholesale on each refresh, so readers never see a half-built dict.
@@ -3972,7 +4060,7 @@ async def fetch_lmstudio_models(client: httpx.AsyncClient, server: str) -> tuple
 
 
 async def fetch_openai_models(client: httpx.AsyncClient, server: str) -> tuple:
-    """Read Strata, Basalt, Maya, Xolotl or Avalon model IDs and capabilities at /v1/models."""
+    """Read Strata, Basalt, Maya, Xolotl, Avalon or Kindi model IDs and capabilities at /v1/models."""
     try:
         response = await client.get(f"{server_base(server)}/v1/models",
                                     headers=backend_headers(server),
@@ -4517,15 +4605,41 @@ async def close_upstream(response: httpx.Response) -> None:
 
 async def _stream_upstream(method: str, url: str, headers: dict,
                            json_body=None, content=None,
-                           extra_headers: dict = None) -> StreamingResponse:
+                           extra_headers: dict = None,
+                           read_timeout: float = READ_TIMEOUT,
+                           kindi_tier: bool = False) -> Response:
     client = http_client()
     try:
         upstream_request = client.build_request(
-            method, url, headers=headers, json=json_body, content=content
+            method, url, headers=headers, json=json_body, content=content,
+            timeout=httpx.Timeout(read_timeout, connect=CONNECT_TIMEOUT),
         )
         upstream_response = await client.send(upstream_request, stream=True)
+    except httpx.ReadTimeout as exc:
+        if kindi_tier:
+            return kindi_no_reply("LiteLLM did not answer for a tier with Kindi.")
+        raise HTTPException(status_code=502, detail=f"OSR core disconnect: {exc}") from exc
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"OSR core disconnect: {exc}") from exc
+    if kindi_tier and upstream_response.status_code == 408:
+        # LiteLLM answers its own timeout with 408, which an SDK retries.
+        await upstream_response.aclose()
+        return kindi_no_reply("LiteLLM gave up on a tier with Kindi.")
+    if (kindi_tier and isinstance(json_body, dict) and json_body.get("stream") is not True
+            and 200 <= upstream_response.status_code < 300):
+        # LiteLLM can send 200 headers before a Kindi-backed completion body.
+        # Finish the non-streaming response before committing our own 200.
+        try:
+            buffered = b"".join([chunk async for chunk in upstream_response.aiter_raw()])
+        except httpx.ReadTimeout:
+            await upstream_response.aclose()
+            return kindi_no_reply("LiteLLM did not finish a tier with Kindi.")
+        except httpx.RequestError as exc:
+            await upstream_response.aclose()
+            raise HTTPException(status_code=502, detail=f"OSR core disconnect: {exc}") from exc
+        await upstream_response.aclose()
+        return Response(content=buffered, status_code=upstream_response.status_code,
+                        headers=_response_headers(upstream_response, extra_headers))
     return StreamingResponse(
         upstream_response.aiter_raw(),
         status_code=upstream_response.status_code,
@@ -4537,6 +4651,63 @@ async def _stream_upstream(method: str, url: str, headers: dict,
 # Upstream statuses that mean "try the next candidate": the host is failing
 # (5xx) or no longer has the model (404, e.g. removed since the last poll).
 RETRYABLE_STATUS = {404} | set(range(500, 600))
+CLIENT_RETRYABLE_STATUS = {408, 409, 429} | set(range(500, 600))
+
+# A Kindi request that got no reply after it was sent may still be running:
+# Kindi serves one request at a time, and an OpenAI SDK retries a 5xx (a 408
+# too), so the retry would queue behind it. Such a failure is answered 424 with
+# x-should-retry: false; the message avoids the words clients match as a
+# timeout. The router hung up, so Kindi stops the request at its next prompt
+# batch or token; until its /health confirms it is idle, nothing more is sent
+# to it and callers get a retryable 503. A newer busy request does not prove
+# the unanswered one has finished: it could still be waiting in Kindi's queue.
+KINDI_HEALTH_CACHE_SECONDS = 5
+_KINDI_DRAINING: dict = {}  # server -> [last /health check, busy]
+
+
+def kindi_no_reply(prefix: str) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"message": prefix + " No complete reply arrived within the read budget; the request "
+                   "was not sent again, because Kindi may still be working on it.",
+                   "type": "upstream_no_reply", "code": "kindi_no_reply"}},
+        status_code=424, headers={"x-should-retry": "false"})
+
+
+def mark_kindi_draining(server: str) -> None:
+    _KINDI_DRAINING[server] = [float("-inf"), True]
+
+
+async def kindi_busy(server: str) -> bool:
+    """True while a Kindi server that left a request unanswered still reports
+    work in progress on /health (checked at most every 5 s)."""
+    state = _KINDI_DRAINING.get(server)
+    if state is None:
+        return False
+    now = time.monotonic()
+    if now - state[0] < KINDI_HEALTH_CACHE_SECONDS:
+        return state[1]
+    try:
+        response = await http_client().get(f"{server_base(server)}/health", timeout=DISCOVERY_TIMEOUT)
+        response.raise_for_status()
+        health = response.json()
+        if not isinstance(health, dict) or "busy" not in health:
+            raise ValueError("Kindi health response has no busy field")
+        busy = health["busy"] is not None and health["busy"] is not False
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("dispatch: cannot confirm Kindi %s is idle (%s)", server, exc)
+        busy = True
+    # A concurrent request may have recorded a newer unanswered POST while
+    # this probe was in flight. Its drain state takes precedence.
+    current = _KINDI_DRAINING.get(server)
+    if current is not state:
+        return current[1] if current is not None else False
+    if busy:
+        _KINDI_DRAINING[server] = [now, True]
+    else:
+        _KINDI_DRAINING.pop(server, None)
+    return busy
+
+
 # Only a capability rejection warrants trying another model and temporarily
 # excluding this one from tool requests. A malformed tools payload can also
 # mention "tools" in a 400, but every candidate would receive that same error.
@@ -4562,8 +4733,23 @@ async def _read_raw(response: httpx.Response, limit: int = ERROR_PEEK_BYTES) -> 
     return b"".join(chunks)
 
 
+async def _relay_kindi_stream(server: str, response: httpx.Response, first_chunk: bytes,
+                              remaining: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Relay SSE after its first chunk; keep Kindi gated if it later stalls."""
+    try:
+        if first_chunk:
+            yield first_chunk
+        async for chunk in remaining:
+            yield chunk
+    except httpx.ReadTimeout:
+        mark_kindi_draining(server)
+        raise
+    finally:
+        await response.aclose()
+
+
 async def _dispatch_direct(candidates: list, body: dict, headers: dict,
-                           need: dict, extra_headers: dict = None) -> StreamingResponse:
+                           need: dict, extra_headers: dict = None) -> Response:
     """Send to the best candidate, falling forward through the ranked list on
     connection errors, 404 or 5xx. Retrying is only safe before any body has
     been streamed, which is why the status is checked before returning. A host
@@ -4571,9 +4757,15 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
     next request skips it too."""
     client = http_client()
     last_error = None
+    no_reply = kindi_was_busy = False
     for position, entry in enumerate(candidates):
         if not INVENTORY.get("servers", {}).get(entry["server"], {}).get("up", True):
             last_error = f"{entry['server']}: marked down"
+            continue
+        if entry["kind"] == "kindi" and await kindi_busy(entry["server"]):
+            last_error = (f"{entry['server']} is still busy after an earlier request got no reply; "
+                          "nothing was sent to it")
+            kindi_was_busy = True
             continue
         attempt_body = dict(body)
         attempt_body["model"] = entry["name"]
@@ -4581,7 +4773,11 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
         try:
             upstream_request = client.build_request(
                 "POST", url, headers=dict(headers, **backend_headers(entry["server"])),
-                json=attempt_body
+                json=attempt_body,
+                timeout=httpx.Timeout(
+                    KINDI_READ_TIMEOUT if entry["kind"] == "kindi" else READ_TIMEOUT,
+                    connect=CONNECT_TIMEOUT,
+                ),
             )
             upstream_response = await client.send(upstream_request, stream=True)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
@@ -4590,6 +4786,12 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
             continue
         except httpx.RequestError as exc:
             last_error = f"{entry['server']}: {type(exc).__name__}: {exc}"
+            if entry["kind"] == "kindi" and isinstance(exc, httpx.ReadTimeout):
+                # Sent, but no reply: Kindi may still be working on it.
+                no_reply = True
+                mark_kindi_draining(entry["server"])
+                log.warning("dispatch: Kindi %s sent no reply; not sending it again", entry["server"])
+                continue
             log.warning("dispatch: %s", last_error)
             continue
         is_last = position == len(candidates) - 1
@@ -4598,6 +4800,12 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
             last_error = f"{entry['server']}: HTTP {upstream_response.status_code}"
             log.warning("dispatch: %s for %s; trying the next candidate",
                         last_error, entry["name"])
+            continue
+        if no_reply and upstream_response.status_code in CLIENT_RETRYABLE_STATUS:
+            # A later error must not turn an unanswered Kindi POST into a
+            # response that makes clients replay the whole call.
+            last_error = f"{entry['server']}: HTTP {upstream_response.status_code}"
+            await upstream_response.aclose()
             continue
         buffered = None
         if upstream_response.status_code == 400 and need.get("tools"):
@@ -4615,6 +4823,31 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
                     log.warning("dispatch: %s; trying the next candidate", last_error)
                     continue
                 log.warning("dispatch: %s; no candidates left", last_error)
+        kindi_stream = None
+        if entry["kind"] == "kindi" and upstream_response.status_code < 400:
+            try:
+                raw_stream = upstream_response.aiter_raw()
+                if body.get("stream") is True:
+                    first_chunk = await anext(raw_stream, b"")
+                    kindi_stream = _relay_kindi_stream(entry["server"], upstream_response,
+                                                        first_chunk, raw_stream)
+                else:
+                    # The client expects one complete JSON reply. Read every
+                    # raw byte before sending 200, so a late read timeout can
+                    # still become 424 and the original encoding is preserved.
+                    buffered = b"".join([chunk async for chunk in raw_stream])
+                    await upstream_response.aclose()
+            except httpx.ReadTimeout as exc:
+                last_error = f"{entry['server']}: {type(exc).__name__}: {exc}"
+                no_reply = True
+                mark_kindi_draining(entry["server"])
+                await upstream_response.aclose()
+                continue
+            except httpx.RequestError as exc:
+                last_error = f"{entry['server']}: {type(exc).__name__}: {exc}"
+                mark_server_down(entry["server"], last_error)
+                await upstream_response.aclose()
+                continue
         log.info("route class=%s code=%s vision=%s tools=%s tokens~%s -> %s @ %s (%d/%d)",
                  need["class"], need["code"], need["vision"], need.get("tools", False),
                  need.get("approx_tokens"), entry["name"], entry["server"],
@@ -4631,11 +4864,17 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
             return Response(content=buffered, status_code=upstream_response.status_code,
                             headers=_response_headers(upstream_response, router_headers))
         return StreamingResponse(
-            upstream_response.aiter_raw(),
+            kindi_stream if kindi_stream is not None else upstream_response.aiter_raw(),
             status_code=upstream_response.status_code,
             headers=_response_headers(upstream_response, router_headers),
             background=BackgroundTask(close_upstream, upstream_response),
         )
+    if no_reply:
+        return kindi_no_reply("No usable model target.")
+    if kindi_was_busy:
+        return JSONResponse({"error": {"message": f"No usable model target. Last error: {last_error}",
+                                       "type": "kindi_busy", "code": "kindi_busy"}},
+                            status_code=503, headers={"Retry-After": "15"})
     raise HTTPException(status_code=502,
                         detail=f"No usable model target. Last error: {last_error}")
 
@@ -4656,6 +4895,9 @@ async def routing_inventory():
         "server_status": INVENTORY.get("servers", {}),
         "errors": INVENTORY.get("errors", {}),
         "models": INVENTORY.get("models", []),
+        # The direct dispatchers of Hermes, OpenClaw and Honcho compare this
+        # with the budget their CT was configured for.
+        "kindi_read_timeout_seconds": KINDI_READ_TIMEOUT,
     })
 
 
@@ -4764,11 +5006,25 @@ async def route_chat_completion(request: Request):
 
     # Fallback: the original static path through LiteLLM, which keeps its own
     # latency routing and cross-tier fallbacks.
-    body["model"] = globals()[_CLASS_TO_TIER[need["class"]]]
+    tier = _CLASS_TO_TIER[need["class"]]
+    body["model"] = globals()[tier]
     log.info("route class=%s -> LiteLLM %s", need["class"], body["model"])
+    headers = _forward_headers(request, drop_auth=True)
+    if tier_has_kindi(need["class"]):
+        # Kindi asks for one retry at most. LiteLLM 1.75 does not read the
+        # policy's InternalServerErrorRetries, so this request header caps the
+        # retries of every error but a timeout (the policy's 0) at one. A
+        # client's own retry or timeout header is dropped; the timeout comes
+        # from each deployment (Kindi's follows router.ini), and a request-wide
+        # one would also lift LiteLLM's 600 s from the tier's other servers.
+        headers = {key: value for key, value in headers.items()
+                   if key.lower() not in ("x-litellm-num-retries", "x-litellm-timeout")}
+        headers["x-litellm-num-retries"] = "1"
     return await _stream_upstream(
-        "POST", LITELLM_URL, _forward_headers(request, drop_auth=True), json_body=body,
+        "POST", LITELLM_URL, headers, json_body=body,
         extra_headers={"X-Router-Mode": "litellm", "X-Router-Model": body["model"]},
+        read_timeout=litellm_read_timeout(need["class"]),
+        kindi_tier=tier_has_kindi(need["class"]),
     )
 
 
@@ -4997,6 +5253,8 @@ SERVER_KINDS = {
                "label": "Xolotl", "openai": True},
     "avalon": {"prefix": "avalon+", "key_env": "AVALON_API_KEY",
                "label": "Avalon", "openai": True},
+    "kindi": {"prefix": "kindi+", "key_env": "KINDI_API_KEY",
+              "label": "Kindi", "openai": True},
 }
 KIND_KEYS = {kind: (os.getenv(spec["key_env"]) or "").strip()
              for kind, spec in SERVER_KINDS.items()}
@@ -5369,6 +5627,11 @@ PYEOF
         printf '      model: openai/%s\n' "$tag"
         printf '      api_base: %s/v1\n' "${url#maya+}"
         printf '      api_key: none\n'
+      elif [[ "$url" == kindi+* ]]; then
+        printf '      model: openai/%s\n' "$tag"
+        printf '      api_base: %s/v1\n' "${url#kindi+}"
+        printf '      api_key: none\n'
+        printf '      timeout: 3600\n'
       else
         printf '      model: ollama/%s\n' "$tag"
         printf '      api_base: %s\n' "$url"
@@ -5515,7 +5778,7 @@ tools_strict = false
 # says nothing per model, but each of these servers takes "tools" and returns
 # OpenAI tool_calls. Remove a kind to report its models' tool support as
 # unknown again. Blank: none.
-tool_kinds = strata, basalt, maya, xolotl, avalon
+tool_kinds = strata, basalt, maya, xolotl, avalon, kindi
 
 [http]
 # Seconds to open a connection to a backend. This is how long a dead host can
@@ -5523,6 +5786,10 @@ tool_kinds = strata, basalt, maya, xolotl, avalon
 connect_timeout_seconds = 3
 # Seconds allowed between bytes of a response (slow generation is fine).
 read_timeout_seconds = 300
+# The same for Kindi servers, which take one request at a time and read a long
+# prompt slowly on small cards. Also used for LiteLLM while any configured
+# server is Kindi. Never below read_timeout_seconds.
+kindi_read_timeout_seconds = 3600
 
 [discovery]
 # Poll each Ollama target's /api/tags for the models it is actually serving,
@@ -5600,6 +5867,7 @@ glm-5.3-flash = 321B
 deepseek-v4.1-flash = 552B
 # Avalon's default alias (Qwen3.8-Flash-Next, its IQ3_KS hybrid).
 qwen3.8-flash-next-avalon = 125B
+# Kindi's ids name their size (bonsai2-27b, nanbeige-33b-iq3) and need no line.
 INIEOF
 
 cat > "${REPO_DIR}/services/ollama-monitor/monitor.ini" <<'INIEOF'
@@ -5610,7 +5878,7 @@ cat > "${REPO_DIR}/services/ollama-monitor/monitor.ini" <<'INIEOF'
 interval_seconds = 15
 timeout_seconds = 5
 # Path appended to each Ollama backend URL for the health probe. LM Studio,
-# Strata, Basalt, Maya, Xolotl and Avalon are probed on /v1/models with their own keys
+# Strata, Basalt, Maya, Xolotl, Avalon and Kindi are probed on /v1/models with their own keys
 # when set, and are skipped by the keep-alive pinner. They count as down while
 # that list is empty (their engine is not running).
 health_path = /api/tags
@@ -5746,9 +6014,9 @@ LITELLM_REQ="${REPO_DIR}/services/litellm-proxy/requirements.txt"
 LITELLM_LOCK="${REPO_DIR}/services/litellm-proxy/requirements.lock"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 # Default ports of the other server kinds are in kind_field (LM Studio 1234,
-# Strata/Basalt/Maya/Xolotl/Avalon 8080); LMSTUDIO_PORT, STRATA_PORT,
-# BASALT_PORT, MAYA_PORT, XOLOTL_PORT and AVALON_PORT in the environment
-# override them.
+# Strata/Basalt/Maya/Xolotl/Avalon 8080, Kindi 8093); LMSTUDIO_PORT,
+# STRATA_PORT, BASALT_PORT, MAYA_PORT, XOLOTL_PORT, AVALON_PORT and KINDI_PORT
+# in the environment override them.
 LMSTUDIO_PORT="${LMSTUDIO_PORT:-1234}"
 SERVER_TYPE="auto"   # --type ollama|<kind>|auto for add / set-tier (see server_kinds)
 MODEL_SERVER_MAX="${MODEL_SERVER_MAX:-20}"
@@ -5796,10 +6064,11 @@ Commands:
   status                     As list, plus a live reachability probe of each host
   discover                   Ask OSR to re-poll and print the live model inventory
   add <addr> [addr...]       Add server(s). Address may be IP, host:port or a URL.
-                             LM Studio, Strata, Basalt, Maya, Xolotl and Avalon are
-                             detected automatically, or use lmstudio://host /
-                             strata://host / basalt://host / maya://host /
-                             xolotl://host / avalon://host or --type.
+                             LM Studio, Strata, Basalt, Maya, Xolotl, Avalon and
+                             Kindi are detected automatically, or use
+                             lmstudio://host / strata://host / basalt://host /
+                             maya://host / xolotl://host / avalon://host /
+                             kindi://host or --type.
                              Detection sends no API key.
   remove <addr> [addr...]    Remove server(s) by address (or by list number)
   set-tier <tier> <addr...>  Replace a tier's servers (tier: fast|medium|large|xlarge)
@@ -5841,6 +6110,9 @@ Commands:
   set-avalon-token [token|--off]
                              Bearer token for Avalon servers with an API key
                              (stored in secrets.env)
+  set-kindi-token [token|--off]
+                             Bearer token for Kindi servers with an API key
+                             (stored in secrets.env)
   set-api-key [key|--generate|--off]
                              Require "Authorization: Bearer <key>" on OSR
                              API (Open WebUI is given the same key)
@@ -5854,7 +6126,7 @@ Commands:
 
 Options:
   --tier <t[,t...]>          With 'add': also assign the new server(s) to these tiers
-  --type <ollama|lmstudio|strata|basalt|maya|xolotl|avalon> With 'add' / 'set-tier': the server's API (default:
+  --type <ollama|lmstudio|strata|basalt|maya|xolotl|avalon|kindi> With 'add' / 'set-tier': the server's API (default:
                              auto-detect by probing; ollama when --no-probe)
   --apply                    Apply + restart services after the change
   --commit[=msg]             Commit and push the change after applying
@@ -5897,7 +6169,7 @@ valid_hostname_or_ip() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
 #   port   -- default port (overridable through the <KIND>_PORT variable)
 #   openai -- 1 for Strata-style servers (models at /v1/models, LiteLLM's
 #             openai provider), 0 for LM Studio (its own API and provider)
-server_kinds() { printf '%s\n' lmstudio strata basalt maya xolotl avalon; }
+server_kinds() { printf '%s\n' lmstudio strata basalt maya xolotl avalon kindi; }
 kind_field() {
   local spec key label port_var port_default openai value
   case "$1" in
@@ -5907,6 +6179,7 @@ kind_field() {
     maya)     spec='MAYA_API_KEY|Maya|MAYA_PORT|8080|1' ;;
     xolotl)   spec='XOLOTL_API_KEY|Xolotl|XOLOTL_PORT|8080|1' ;;
     avalon)   spec='AVALON_API_KEY|Avalon|AVALON_PORT|8080|1' ;;
+    kindi)    spec='KINDI_API_KEY|Kindi|KINDI_PORT|8093|1' ;;
     *) return 1 ;;
   esac
   IFS='|' read -r key label port_var port_default openai <<< "$spec"
@@ -5930,7 +6203,7 @@ is_server_kind() {
 }
 is_openai_kind() { is_server_kind "$1" && [[ "$(kind_field "$1" openai)" == 1 ]]; }
 openai_kinds() { local k; for k in $(server_kinds); do is_openai_kind "$k" && echo "$k"; done; return 0; }
-# "Ollama, LM Studio, Strata, Basalt, Maya, Xolotl or Avalon"
+# "Ollama, LM Studio, Strata, Basalt, Maya, Xolotl, Avalon or Kindi"
 kind_labels() {
   local out=Ollama k label last=""
   for k in $(server_kinds); do
@@ -6065,6 +6338,10 @@ detect_server_kind() {
     if [[ "$body" =~ \"model\"[[:space:]]*:[[:space:]]*\"glm-5\.3-flash\" ]] &&
        [[ "$body" == *'"version"'* ]]; then
       echo maya; return 0
+    fi
+    # Kindi names itself and its version ("kindi": "0.4.0") on /health.
+    if [[ "$body" =~ \"kindi\"[[:space:]]*:[[:space:]]*\"[0-9] ]]; then
+      echo kindi; return 0
     fi
   fi
   local code path status_code=''
@@ -6513,19 +6790,27 @@ else:
 # the sorted list of its deployments (tag@url). Each tier falls back to the
 # nearest other tiers, smaller first on a tie. A tier whose deployments are
 # IDENTICAL to this one's is skipped: falling back to the same model on the
-# same host cannot succeed where the original failed.
+# same host cannot succeed where the original failed. A tier with Kindi is a
+# fallback only for another Kindi tier on other Kindi servers: the router waits
+# read_timeout_seconds (not Kindi's budget) on a request for a tier without
+# Kindi, and a fallback to the same Kindi server would queue behind the request
+# it is still reading.
 litellm_fallbacks() {
   python3 -c '
-import json, sys
+import json, re, sys
 tiers = []
 for line in sys.stdin.read().splitlines():
     if line.strip():
         name, _, sig = line.partition(" ")
         tiers.append((name, sig))
+def kindi(sig):
+    return set(re.findall(r"kindi[+][^,@\s]+", sig))
+def may_fall_back(sig, osig):
+    return not kindi(osig) or (kindi(sig) and not kindi(sig) & kindi(osig))
 rows = []
 for i, (name, sig) in enumerate(tiers):
     others = [(abs(i - j), j, other) for j, (other, osig) in enumerate(tiers)
-              if other != name and osig != sig]
+              if other != name and osig != sig and may_fall_back(sig, osig)]
     if others:
         rows.append("    - %s: %s" % (name, json.dumps([o for _, _, o in sorted(others)])))
 if rows:
@@ -6534,8 +6819,139 @@ if rows:
 '
 }
 
+# router_settings.model_group_retry_policy for litellm_config.yaml, from the
+# same "<model_name> <signature>" lines. Kindi serves one request at a time and
+# upstream asks for one retry at most: no retry after a timeout (Kindi may
+# still be reading the prompt), one after a 429. LiteLLM 1.75 does not read
+# InternalServerErrorRetries, so the router caps every other error at one retry
+# with x-litellm-num-retries: 1 on requests for these tiers. Policies for other
+# current tiers are kept, block or flow style. The marker lets removal discard
+# only OSR's policy; the unmarked forms written before it are recognised too.
+litellm_retry_policy() {
+  python3 -c '
+import re, sys
+tiers = dict(line.strip().partition(" ")[::2] for line in sys.stdin.read().splitlines() if line.strip())
+with open(sys.argv[1], encoding="utf-8") as source:
+    old = source.read().splitlines()
+preserved = {}
+in_policy = False
+name = None
+for line in old:
+    if line == "  model_group_retry_policy:":
+        in_policy = True
+        continue
+    if in_policy and line and not line.startswith("    "):
+        in_policy = False
+    if not in_policy:
+        continue
+    match = re.match(r"^    ([^:#\s][^:#]*):\s*(.*)$", line)
+    if match:
+        name = match.group(1).strip().strip("\"\x27")
+        if name in tiers and "@kindi+" not in tiers[name]:
+            preserved[name] = [line]
+        if match.group(2) and not match.group(2).startswith("#"):
+            name = None  # a flow-style entry is complete on its line
+        continue
+    if name in preserved:
+        preserved[name].append(line)
+unmarked = ({"TimeoutErrorRetries: 0", "InternalServerErrorRetries: 1", "RateLimitErrorRetries: 1"},
+            {"TimeoutErrorRetries: 0", "RateLimitErrorRetries: 1"})
+for name, lines in list(preserved.items()):
+    fields = {line.strip() for line in lines[1:] if line.strip() and not line.lstrip().startswith("#")}
+    if any("# osr-kindi-policy" in line for line in lines) or fields in unmarked:
+        del preserved[name]
+rows = []
+for name, sig in tiers.items():
+    if "@kindi+" in sig:
+        rows += ["    %s:" % name, "      # osr-kindi-policy", "      TimeoutErrorRetries: 0",
+                 "      RateLimitErrorRetries: 1"]
+    elif name in preserved:
+        rows += preserved[name]
+if rows:
+    print("  model_group_retry_policy:")
+    print("\n".join(rows))
+' "$LITELLM_YAML"
+}
+
+# kindi_timeout_seconds: the router's Kindi read budget from router.ini, never
+# below read_timeout_seconds (as router.py computes it), in whole seconds.
+kindi_timeout_seconds() {
+  python3 -c 'import configparser, math, sys; c=configparser.ConfigParser(); c.read(sys.argv[1]); print(math.ceil(max(c.getfloat("http", "read_timeout_seconds", fallback=300), c.getfloat("http", "kindi_read_timeout_seconds", fallback=3600))))' "$ROUTER_INI"
+}
+
+# sync_kindi_timeouts: give every Kindi deployment in litellm_config.yaml the
+# router.ini budget, so `apply` after editing kindi_read_timeout_seconds keeps
+# LiteLLM in step without rebuilding the model list. Only the timeout line of
+# a deployment whose api_base is a configured Kindi server changes.
+sync_kindi_timeouts() {
+  local timeout url changed
+  local -a bases=()
+  [[ -f "$LITELLM_YAML" ]] || return 0
+  timeout="$(kindi_timeout_seconds)" || die 'Invalid router.ini timeout.'
+  while IFS= read -r url; do
+    [[ -n "$url" && "$(server_kind "$url")" == kindi ]] && bases+=("$(litellm_api_base "$url")")
+  done < <(get_servers)
+  ((${#bases[@]})) || return 0
+  changed="$(KINDI_BASES="${bases[*]}" python3 - "$LITELLM_YAML" "$timeout" <<'PY'
+import os, re, sys
+path, timeout = sys.argv[1], sys.argv[2]
+bases = set(os.environ["KINDI_BASES"].split())
+lines = open(path, encoding="utf-8").read().splitlines()
+out, block, changed = [], [], False
+def flush():
+    global changed
+    base = next((m.group(1) for m in (re.match(r"^      api_base:\s*(\S+)\s*$", l) for l in block) if m), None)
+    if base in bases:
+        want = "      timeout: %s" % timeout
+        if want not in block:
+            kept = [l for l in block if not re.match(r"^      timeout:", l)]
+            at = next(i for i, l in enumerate(kept) if l.startswith("      api_base:")) + 1
+            block[:] = kept[:at] + [want] + kept[at:]
+            changed = True
+    out.extend(block)
+    block.clear()
+in_list = False
+for line in lines:
+    if line.startswith("  - model_name:") and in_list:
+        flush()
+    if re.match(r"^\S", line):
+        flush()
+        in_list = line.startswith("model_list:")
+        out.append(line)
+        continue
+    (block if in_list else out).append(line)
+flush()
+if changed:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+print("yes" if changed else "")
+PY
+)" || die "Could not update the Kindi timeouts in ${LITELLM_YAML}."
+  [[ -z "$changed" ]] || echo "  Kindi deployments in $(basename "$LITELLM_YAML") now wait ${timeout}s (router.ini)."
+}
+
+# kindi_budget_note OLD NEW: after an apply that changed the router's Kindi
+# read budget, say what does not follow it. The dispatchers of Hermes, OpenClaw
+# and Honcho take a lower budget from the router at once, but keep their own
+# for a higher one (their callers' limits were sized for it) and log that.
+kindi_budget_note() {
+  local old="$1" new="$2" url kindi=false
+  [[ -n "$old" && -n "$new" && "$old" != "$new" ]] || return 0
+  while IFS= read -r url; do
+    [[ -n "$url" && "$(server_kind "$url")" == kindi ]] && kindi=true
+  done < <(get_servers)
+  $kindi || return 0
+  echo "The router's Kindi read budget is now ${new}s (was ${old}s)."
+  if (( new > old )); then
+    echo "  Hermes, OpenClaw and Honcho keep ${old}s until each is reconfigured:"
+  else
+    echo "  Their dispatchers already use ${new}s; their callers' longer limits stay until each is reconfigured:"
+  fi
+  echo "  run its targets/<hermes|openclaw|honcho>/provision-lxc.sh --reconfigure on the Proxmox host."
+}
+
 regenerate_litellm() {
-  local tmp tier name tag tier_tag url tail_block keep_alive fallbacks sig
+  local tmp tier name tag tier_tag url tail_block keep_alive fallbacks retry_policy sig kindi_timeout
   local -a sig_lines=()
   local kind key_env k
   local -A kind_has_token=()
@@ -6545,6 +6961,7 @@ regenerate_litellm() {
   done
   $DRY_RUN && { echo "  [dry-run] would regenerate ${LITELLM_YAML}"; return 0; }
   [[ -f "$LITELLM_YAML" ]] || die "missing ${LITELLM_YAML}"
+  kindi_timeout="$(kindi_timeout_seconds)" || die 'Invalid router.ini timeout.'
   tmp="$(mktemp)"
   {
     echo "model_list:"
@@ -6573,6 +6990,11 @@ regenerate_litellm() {
         printf '      model: %s/%s\n' "$(litellm_provider "$url")" "$tag"
         printf '      api_base: %s\n' "$(litellm_api_base "$url")"
         kind="$(server_kind "$url")"
+        if [[ "$kind" == kindi ]]; then
+          # A first prompt can take minutes on a small card, and Kindi serves
+          # one request at a time: allow the hour its agent guide asks for.
+          printf '      timeout: %s\n' "$kindi_timeout"
+        fi
         if [[ "$kind" == ollama ]]; then
           [[ -n "$keep_alive" ]] && printf '      keep_alive: %s\n' "$keep_alive"
         else
@@ -6593,16 +7015,22 @@ regenerate_litellm() {
       fi
     done
     # router_settings: every hand-edited key (strategy, retries, ...) is kept,
-    # but `fallbacks` is REGENERATED from the tiers that exist now. Carrying it
-    # verbatim left fallbacks pointing at renamed or removed tiers.
+    # `fallbacks` are regenerated. Retry policies for non-Kindi tiers survive;
+    # stale tiers and Kindi-specific policies are regenerated.
     fallbacks="$( ((${#sig_lines[@]})) && printf '%s\n' "${sig_lines[@]}" | litellm_fallbacks)"
+    retry_policy="$( ((${#sig_lines[@]})) && printf '%s\n' "${sig_lines[@]}" | litellm_retry_policy)"
     tail_block="$(awk '/^router_settings:/{f=1} f' "$LITELLM_YAML")"
     [[ -n "$tail_block" ]] || tail_block=$'router_settings:\n  routing_strategy: latency-based-routing\n  num_retries: 2\n  timeout: 600'
-    printf '%s\n' "$tail_block" | FALLBACKS="$fallbacks" awk '
-      /^router_settings:/ { print; if (ENVIRON["FALLBACKS"] != "") print ENVIRON["FALLBACKS"]; next }
+    printf '%s\n' "$tail_block" | FALLBACKS="$fallbacks" RETRY_POLICY="$retry_policy" awk '
+      /^router_settings:/ {
+        print
+        if (ENVIRON["FALLBACKS"] != "") print ENVIRON["FALLBACKS"]
+        if (ENVIRON["RETRY_POLICY"] != "") print ENVIRON["RETRY_POLICY"]
+        next
+      }
       skip && ($0 ~ /^   / || $0 ~ /^  -/) { next }
       { skip = 0 }
-      /^  fallbacks:/ { skip = 1; next }
+      /^  (fallbacks|model_group_retry_policy):/ { skip = 1; next }
       { print }'
   } > "$tmp"
   cat "$tmp" > "$LITELLM_YAML"
@@ -7326,6 +7754,20 @@ else:
             for name in [source] + list(targets or []):
                 if name not in names:
                     err(rel, "fallback names %r, which has no deployment" % name)
+        policy = settings.get("model_group_retry_policy") or {}
+        retry_fields = {"BadRequestErrorRetries", "AuthenticationErrorRetries", "TimeoutErrorRetries",
+                        "RateLimitErrorRetries", "ContentPolicyViolationErrorRetries",
+                        "InternalServerErrorRetries"}
+        if not isinstance(policy, dict):
+            err(rel, "model_group_retry_policy must map tiers to retry counts")
+            policy = {}
+        for name, counts in policy.items():
+            if name not in names:
+                err(rel, "model_group_retry_policy names %r, which has no deployment" % name)
+            if not isinstance(counts, dict) or any(
+                    key not in retry_fields or not isinstance(value, int) or isinstance(value, bool) or value < 0
+                    for key, value in counts.items()):
+                err(rel, "model_group_retry_policy %r needs <Error>Retries: <count> entries" % name)
 
 if not errors:
     seen = {}
@@ -7518,6 +7960,7 @@ cmd_apply() {
   # preserve the executable bit, and we invoke it via `bash` anyway.
   [[ -f "$APPLY_SCRIPT" ]] || die "apply script not found: ${APPLY_SCRIPT}"
   migrate_secrets
+  sync_kindi_timeouts
 
   echo "Validating configuration..."
   if ! validate_config; then
@@ -7526,6 +7969,10 @@ cmd_apply() {
   fi
 
   mapfile -t affected < <(affected_services)
+  local budget_before="" budget_after=""
+  [[ ! -f "${ROUTER_DIR}/router.ini" ]] ||
+    budget_before="$(ROUTER_INI="${ROUTER_DIR}/router.ini" kindi_timeout_seconds 2>/dev/null)" || budget_before=""
+  budget_after="$(kindi_timeout_seconds 2>/dev/null)" || budget_after=""
   snapshot="$(snapshot_runtime)"
   echo "Applying configuration (previous files saved in ${snapshot})..."
   bash "$APPLY_SCRIPT" "$REPO_DIR"
@@ -7577,12 +8024,14 @@ cmd_apply() {
   if (( ${#affected[@]} == 0 )); then
     echo "No service is affected by this change; nothing restarted."
     secrets_fingerprint > "${ROUTER_DIR}/.secrets.applied"
+    kindi_budget_note "$budget_before" "$budget_after"
     return 0
   fi
   echo "Restarting: ${affected[*]}"
   if failed="$(restart_and_check "${affected[@]}")"; then
     secrets_fingerprint > "${ROUTER_DIR}/.secrets.applied"
     echo "Applied; all restarted services are healthy."
+    kindi_budget_note "$budget_before" "$budget_after"
     return 0
   fi
 
@@ -7894,7 +8343,7 @@ cmd_set_api_key() {
 
 # Bearer token for one server kind (set-lmstudio-token, set-maya-token, ...):
 # LM Studio servers with "Require authentication" on, or Strata, Basalt, Maya,
-# Xolotl and Avalon servers started with an API key. One token per kind, stored in
+# Xolotl, Avalon and Kindi servers started with an API key. One token per kind, stored in
 # secrets.env (outside the repo) like the other secrets.
 cmd_set_kind_token() {
   local kind="$1" token="${2:-}" confirm_token="" key_env name noun cmd

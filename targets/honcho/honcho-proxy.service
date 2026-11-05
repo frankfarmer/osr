@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=honcho-proxy
 Group=honcho-proxy
+EnvironmentFile=-/etc/honcho-target/proxy.settings
 ExecStart=/usr/bin/python3 /usr/local/lib/honcho-proxy/honcho-proxy.py --serve /etc/honcho-target
 Restart=always
 RestartSec=3

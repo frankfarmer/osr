@@ -334,7 +334,7 @@ def test_maya_health_key_and_keep_alive(monkeypatch):
     assert pinned == [A]
 
 
-@pytest.mark.parametrize("kind", ["strata", "basalt", "maya", "xolotl", "avalon"])
+@pytest.mark.parametrize("kind", ["strata", "basalt", "maya", "xolotl", "avalon", "kindi"])
 def test_openai_host_with_an_empty_model_list_is_down(monkeypatch, kind):
     """Strata-style servers answer /v1/models with 200 and no models while
     their engine is down; the router cannot use them, so neither is the host up."""
@@ -383,6 +383,26 @@ def test_avalon_health_key_and_keep_alive(monkeypatch):
     loading = httpx.Client(transport=httpx.MockTransport(
         lambda r: httpx.Response(503, json={"error": {"code": 503, "message": "Loading model"}})))
     assert not module.probe(check.url, loading, check.headers, check.require_models)[0]
+    pinned = []
+    monkeypatch.setattr(module, "pin_model", lambda url, model: pinned.append(url) or True)
+    module.refresh_keep_alive(lambda url: True)
+    assert pinned == [A]
+
+
+def test_kindi_health_key_and_keep_alive(monkeypatch):
+    kindi = "kindi+http://10.0.0.14:8093"
+    module = load_monitor(monkeypatch, MODEL_SERVERS=f"{A},{kindi}",
+                          BACKEND_FAST=f"{A},{kindi}", MODEL_FAST="bonsai2-2b",
+                          AVALON_API_KEY="avalon-secret", KINDI_API_KEY="kindi-secret",
+                          OLLAMA_KEEP_ALIVE="2h")
+    check = [c for c in module.build_checks() if c.key == kindi][0]
+    assert check.url == "http://10.0.0.14:8093/v1/models"
+    assert check.headers == {"Authorization": "Bearer kindi-secret"}
+    assert "Kindi host" in check.label
+    # A rejected key counts as down.
+    rejected = httpx.Client(transport=httpx.MockTransport(
+        lambda r: httpx.Response(401, json={"error": {"message": "invalid API key"}})))
+    assert not module.probe(check.url, rejected, check.headers, check.require_models)[0]
     pinned = []
     monkeypatch.setattr(module, "pin_model", lambda url, model: pinned.append(url) or True)
     module.refresh_keep_alive(lambda url: True)

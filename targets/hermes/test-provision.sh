@@ -78,6 +78,9 @@ for bad in http://h:0 ftp://h:21 http://user@h:80 'http://h:80?x=1'; do
 done
 printf '{"enabled":false,"servers":[]}\n' > "$inv"
 if inventory_targets "$inv" >/dev/null 2>&1; then fail 'targets read from a router with discovery off'; fi
+printf '{"enabled":true,"servers":["kindi+http://10.0.0.14:8093"]}\n' > "$inv"
+[[ $(inventory_targets "$inv") == 'kindi-10-0-0-14-8093=kindi+http://10.0.0.14:8093' ]] ||
+  fail "a Kindi server is not its own kind of target: $(inventory_targets "$inv" 2>&1)"
 pass 'direct targets: stable names per endpoint, including URLs with =, with bad URLs refused'
 
 # Reconfigure rewrites only this target's rules (marked with a rule comment, or
@@ -314,6 +317,7 @@ case $cmd in
     if [[ $id == 280 ]]; then
       case $all in
         'test -f /app/router/router.py') exit 0 ;;
+        python3\ -c\ *router.ini) echo 5400 ;;
         awk*LMSTUDIO_API_TOKEN*secrets.env) printf 'STRATA_API_KEY=sk-backend-secret\n' ;;
         awk*secrets.env) [[ -n ${FAKE_NO_ROUTER_KEY:-} ]] || printf '%s\n' "$FAKE_ROUTER_KEY" ;;
         *ROUTER_PORT*) echo 8000 ;;
@@ -438,6 +442,7 @@ out=$(real) || fail "full run: $out"
 [[ -z $(secrets_in_argv) ]] || fail "a secret appeared in a command line: $(secrets_in_argv)"
 grep -q 'install-target.sh' "$log" && grep -q 'HERMES_API_SERVER=true' "$log" || fail 'guest installer not run with the API server'
 grep -q 'ROUTER_URL=http://192.0.2.80:8000' "$log" || fail 'ROUTER_URL not derived from the router address'
+grep -q 'KINDI_READ_TIMEOUT_SECONDS=5400' "$log" || fail 'Kindi timeout not read from router.ini'
 fwfile=$fake/pve/firewall/282.fw
 grep -qx 'IN ACCEPT -source 192.0.2.80/32 -p tcp -dport 8642 -log nolog # ollama-smart-router hermes-api' "$fwfile" || fail "firewall: $(cat "$fwfile")"
 grep -qx 'IN ACCEPT -p tcp -dport 9119 -log nolog # ollama-smart-router hermes-dashboard' "$fwfile" || fail 'dashboard firewall rule'

@@ -137,7 +137,7 @@ unset MATTERMOST_WEBHOOK_URL CONFIG_SOURCE BRIDGE NAMESERVER MATTERMOST_CHANNEL 
 # and restored by re-sourcing the extracted functions at the end.
 _tt="$(mktemp -d)"
 TARGETS_DIR="$_tt/targets"
-for _name in gitea mattermost ollama airllm llamacpp strata basalt maya xolotl avalon honcho hermes openclaw deepseek-harness open-terminal comfyui; do
+for _name in gitea mattermost ollama airllm kindi llamacpp strata basalt maya xolotl avalon honcho hermes openclaw deepseek-harness open-terminal comfyui; do
   mkdir -p "$TARGETS_DIR/$_name"
   # The fake provisioner records what it was given: settings, flags, and
   # whether the admin token reached it (by value, compared to $EXPECT_TOKEN).
@@ -163,6 +163,8 @@ printf 'prompt-env %s|%s|%s\n' "${PVE_ACCEPT_DEFAULTS:-}" "${PVE_CONFIRM:-}" "${
   printf 'gpu-env %s|%s|%s|%s\n' "${GPU:-}" "${BACKEND:-}" "${GPU_DEVICES:-}" "${GPU_CARD:-}" >> "$MOCK_LOG"
 _ctx="${OLLAMA_CONTEXT_LENGTH:-}|${CONTEXT_SIZE:-}|${STRATA_CONTEXT:-}|${AVALON_CONTEXT:-}|${HONCHO_CONTEXT_TOKENS-unset}|${DEEPSEEK_HARNESS_CONTEXT_WINDOW:-}"
 [[ $_ctx == '||||unset|' ]] || printf 'context-env %s\n' "$_ctx" >> "$MOCK_LOG"
+[[ -z ${KINDI_BACKEND:-}${KINDI_CONTEXT:-} ]] ||
+  printf 'kindi-env %s|%s|%s\n' "${KINDI_BACKEND:-}" "${GPU_DEVICES:-}" "${KINDI_CONTEXT:-}" >> "$MOCK_LOG"
 [[ -z ${CUDA_VERSION:-}${MAYA_CUDA_VERSION:-}${XOLOTL_CUDA_VERSION:-}${AVALON_CUDA_VERSION:-} ]] ||
   printf 'cuda-env %s|%s|%s|%s\n' "${CUDA_VERSION:-}" "${MAYA_CUDA_VERSION:-}" "${XOLOTL_CUDA_VERSION:-}" "${AVALON_CUDA_VERSION:-}" >> "$MOCK_LOG"
 if [[ -n ${HF_TOKEN:-} ]]; then
@@ -174,8 +176,8 @@ done
 unset _name
 
 describe target_table
-assert_eq "lists the sixteen targets in menu order" \
-  "gitea mattermost ollama airllm llamacpp strata basalt maya xolotl avalon honcho hermes openclaw deepseek-harness open-terminal comfyui" \
+assert_eq "lists the seventeen targets in menu order" \
+  "gitea mattermost ollama airllm kindi llamacpp strata basalt maya xolotl avalon honcho hermes openclaw deepseek-harness open-terminal comfyui" \
   "$(target_table | cut -d'|' -f1 | paste -sd' ')"
 
 describe target_field
@@ -197,6 +199,10 @@ assert_eq "Xolotl router entry template" "xolotl+http://@IP@:@PORT@" "$(target_f
 assert_eq "Avalon has its own key kind" avalon "$(target_field avalon key)"
 assert_eq "Avalon router entry template" "avalon+http://@IP@:@PORT@" "$(target_field avalon entry)"
 assert_eq "Avalon needs an RDNA 3 or an RTX card" required:amd,nvidia:rdna3,rtx20,rtx30,rtx40,rtx50 "$(target_field avalon gpu)"
+assert_eq "Kindi has its own key kind" kindi "$(target_field kindi key)"
+assert_eq "Kindi router entry template" "kindi+http://@IP@:@PORT@" "$(target_field kindi entry)"
+assert_eq "Kindi uses any NVIDIA card when present, of any generation" optional:nvidia "$(target_field kindi gpu)"
+assert_eq "Kindi is a model server" model "$(target_field kindi phase)"
 assert_eq "no key for Ollama" "" "$(target_field ollama key)"
 assert_fail "an unknown target" target_field nope phase
 assert_eq "Strata needs an NVIDIA GPU" required:nvidia "$(target_field strata gpu)"
@@ -223,6 +229,9 @@ assert_eq "Gitea: none" "||" "$(target_gpu_spec gitea)"
 assert_eq "Avalon: AMD (ROCm) first, or NVIDIA" "required|amd,nvidia|rdna3,rtx20,rtx30,rtx40,rtx50" "$(target_gpu_spec avalon)"
 assert_eq "Avalon AVALON_BACKEND=rocm: AMD" "required|amd|rdna3,rtx20,rtx30,rtx40,rtx50" "$(AVALON_BACKEND=rocm target_gpu_spec avalon)"
 assert_eq "Avalon AVALON_BACKEND=cuda: NVIDIA" "required|nvidia|rdna3,rtx20,rtx30,rtx40,rtx50" "$(AVALON_BACKEND=cuda target_gpu_spec avalon)"
+assert_eq "Kindi: an NVIDIA card when present" "optional|nvidia|" "$(target_gpu_spec kindi)"
+assert_eq "Kindi KINDI_BACKEND=cuda: one is required" "required|nvidia|" "$(KINDI_BACKEND=cuda target_gpu_spec kindi)"
+assert_eq "Kindi KINDI_BACKEND=cpu: none" "||" "$(KINDI_BACKEND=cpu target_gpu_spec kindi)"
 assert_fail "an unknown target" target_gpu_spec nope
 
 describe target_gpu_need
@@ -234,6 +243,7 @@ assert_eq "llama.cpp with BACKEND=cpu does not" "" "$(BACKEND=cpu target_gpu_nee
 assert_eq "AirLLM without GPU_DEVICES does not" "" "$(target_gpu_need airllm)"
 assert_eq "AirLLM with GPU_DEVICES does" required "$(GPU_DEVICES=/dev/nvidia0 target_gpu_need airllm)"
 assert_eq "Gitea never" "" "$(target_gpu_need gitea)"
+assert_eq "Kindi uses one when present" optional "$(target_gpu_need kindi)"
 assert_fail "an unknown target" target_gpu_need nope
 
 # The GPU step's fake tool: --list prints FAKE_GPU_LIST; a run for --card
@@ -259,7 +269,8 @@ _cards=$'0000:01:00.0|nvidia|rtx40|nouveau|NVIDIA AD102 [GeForce RTX 4090]
 _card_list="$(sed 's/^/GPU_CARD=/' <<< "$_cards")"
 _gpu_reset() {
   unset OLLAMA_GPU_CARD LLAMACPP_GPU_CARD COMFYUI_GPU_CARD GPU_RESULT_OLLAMA GPU_RESULT_LLAMACPP GPU_RESULT_COMFYUI \
-    GPU_RESULT_STRATA GPU_RESULT_BASALT GPU_RESULT_XOLOTL FAKE_GPU_OUT FAKE_GPU_RC FAKE_GPU_LIST BACKEND GPU GPU_DEVICES
+    GPU_RESULT_STRATA GPU_RESULT_BASALT GPU_RESULT_XOLOTL FAKE_GPU_OUT FAKE_GPU_RC FAKE_GPU_LIST BACKEND GPU GPU_DEVICES \
+    KINDI_GPU_CARD GPU_RESULT_KINDI KINDI_BACKEND
   HOST_GPU_CARDS="" HOST_GPU_CUDA_ARCH=""
   mock_reset_log
 }
@@ -306,6 +317,8 @@ assert_fail "not llama.cpp built for CUDA" env BACKEND=cuda bash -c "$(declare -
 assert_fail "not Ollama on NVIDIA only" env GPU=nvidia bash -c "$(declare -f target_gpu_prompted target_gpu_spec target_field target_table); target_gpu_prompted ollama"
 assert_fail "not without a GPU" env GPU=none bash -c "$(declare -f target_gpu_prompted target_gpu_spec target_field target_table); target_gpu_prompted comfyui"
 assert_fail "not the NVIDIA-only targets" target_gpu_prompted strata
+assert_ok "but Kindi, meant for a spare old NVIDIA card" target_gpu_prompted kindi
+assert_fail "not Kindi on the CPU" env KINDI_BACKEND=cpu bash -c "$(declare -f target_gpu_prompted target_gpu_spec target_field target_table); target_gpu_prompted kindi"
 assert_fail "not the targets without a GPU" target_gpu_prompted hermes
 
 describe target_gpu_choices
@@ -317,6 +330,8 @@ assert_eq "llama.cpp's Vulkan build: AMD and Intel" "0000:03:00.0 0000:04:00.0" 
 assert_eq "GPU=intel: Intel only" "0000:04:00.0" "$(GPU=intel target_gpu_choices comfyui | cut -d'|' -f1)"
 assert_eq "a generation limit applies (Basalt: rtx50)" "" "$(target_gpu_choices basalt)"
 assert_eq "no GPU, no choice" "" "$(GPU=none target_gpu_choices ollama)"
+assert_eq "Kindi: the NVIDIA cards, of any generation" "0000:01:00.0 0000:41:00.0" \
+  "$(HOST_GPU_CARDS="$_cards"$'\n0000:41:00.0|nvidia||nvidia|NVIDIA GK107GL [Quadro K420]' target_gpu_choices kindi | cut -d'|' -f1 | paste -sd' ')"
 
 describe valid_gpu_choice
 GPU_CHOICE_ADDRESSES="0000:03:00.0 0000:04:00.0" GPU_CHOICE_NONE=false
@@ -378,6 +393,13 @@ TARGETS="ollama"
 prompt_target_gpus > "$_out" 2>&1 </dev/null
 assert_contains "a host without cards says so" "No NVIDIA, AMD Radeon (RX 7000/9000) or Intel Arc GPU" "$(cat "$_out")"
 assert_eq "and leaves the target to the GPU step" "" "${OLLAMA_GPU_CARD:-}"
+_gpu_reset; export FAKE_GPU_LIST="$_card_list"$'\nGPU_CARD=0000:41:00.0|nvidia||nvidia|NVIDIA GK107GL [Quadro K420]'
+TARGETS="strata kindi"
+prompt_target_gpus > "$_out" 2>&1 <<< $'2\n'
+assert_eq "Kindi is asked for its card: the old one" 0000:41:00.0 "$KINDI_GPU_CARD"
+assert_contains "or the CPU" "3) none: run on the CPU" "$(cat "$_out")"
+assert_not_contains "only NVIDIA cards are offered to it" "Radeon RX 7900 XTX] (rdna3, driver amdgpu)"$'\n'"    3)" "$(sed -n '/kindi use/,$p' "$_out")"
+_gpu_reset
 rm -f "$_out"; TARGETS=""
 
 describe target_gpu_result
@@ -504,6 +526,17 @@ assert_eq "Avalon on an NVIDIA card: CUDA with its /dev/nvidia<minor>" \
   $'AVALON_BACKEND=cuda\nGPU_DEVICES=/dev/nvidia2 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools' "$(target_gpu_env avalon)"
 GPU_RESULT_AVALON="absent||||"
 assert_eq "Avalon without a GPU: nothing (its provisioner stops)" "" "$(target_gpu_env avalon)"
+GPU_RESULT_KINDI="ready|nvidia||3|0000:41:00.0"
+assert_eq "Kindi on its NVIDIA card: CUDA with that card's /dev/nvidia<minor>" \
+  $'KINDI_BACKEND=cuda\nGPU_DEVICES=/dev/nvidia3 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools' "$(target_gpu_env kindi)"
+assert_eq "a preset KINDI_BACKEND and GPU_DEVICES are kept" "" \
+  "$(KINDI_BACKEND=cuda GPU_DEVICES='/dev/nvidia1 /dev/nvidiactl /dev/nvidia-uvm' target_gpu_env kindi)"
+GPU_RESULT_KINDI="ready|nvidia|||"
+assert_eq "Kindi on GPU 0: its provisioner picks the nodes" KINDI_BACKEND=cuda "$(target_gpu_env kindi)"
+GPU_RESULT_KINDI="declined||||"
+assert_eq "Kindi given no card: its CPU engine" KINDI_BACKEND=cpu "$(target_gpu_env kindi)"
+GPU_RESULT_KINDI="absent||||"
+assert_eq "Kindi without a GPU: its CPU engine" KINDI_BACKEND=cpu "$(target_gpu_env kindi)"
 _gpu_reset
 
 describe target_var_prefix
@@ -530,6 +563,7 @@ assert_ok "Strata takes a template" target_needs_template strata
 assert_ok "Maya takes a template" target_needs_template maya
 assert_ok "Xolotl takes a template" target_needs_template xolotl
 assert_ok "Avalon takes a template" target_needs_template avalon
+assert_ok "Kindi takes a template" target_needs_template kindi
 assert_fail "llama.cpp prompts for its own" target_needs_template llamacpp
 assert_fail "Hermes uses the router's" target_needs_template hermes
 assert_fail "OpenClaw uses the router's" target_needs_template openclaw
@@ -537,16 +571,16 @@ assert_fail "DeepSeek Harness uses the router's" target_needs_template deepseek-
 assert_fail "ComfyUI's community script picks its own" target_needs_template comfyui
 
 describe valid_target_selection
-for _sel in "" none "1,10" "ollama hermes" " 2 , strata " "8" "13" "14" "comfyui" "xolotl" "avalon" "openclaw"; do
+for _sel in "" none "1,10" "ollama hermes" " 2 , strata " "8" "13" "14" "17" "comfyui" "xolotl" "avalon" "kindi" "openclaw"; do
   assert_ok "accepts '${_sel}'" valid_target_selection "$_sel"
 done
-for _sel in 0 17 bogus "ollama,bogus"; do
+for _sel in 0 18 bogus "ollama,bogus"; do
   assert_fail "rejects '${_sel}'" valid_target_selection "$_sel"
 done
 unset _sel
 
 describe normalize_target_selection
-assert_eq "names and numbers, in menu order" "gitea ollama strata hermes" "$(normalize_target_selection 'hermes,3, 6,1')"
+assert_eq "names and numbers, in menu order" "gitea ollama kindi strata hermes" "$(normalize_target_selection 'hermes,3, 7,1,5')"
 assert_eq "each target once" ollama "$(normalize_target_selection '3,ollama')"
 assert_eq "none is empty" "" "$(normalize_target_selection none)"
 assert_eq "blank is empty" "" "$(normalize_target_selection '')"
@@ -567,14 +601,15 @@ assert_fail "also when the menu would be shown" prompt_target_selection <<< $'\n
 NONINTERACTIVE=true
 NONINTERACTIVE=false; INSTALL_TARGETS=""
 _out="$(mktemp)"
-prompt_target_selection > "$_out" 2>&1 <<< $'17\n5,hermes\n'
+prompt_target_selection > "$_out" 2>&1 <<< $'18\n6,hermes\n'
 assert_eq "re-prompts until valid, then keeps the choice" "llamacpp hermes" "$TARGETS"
-assert_contains "the menu lists the model servers" "9) xolotl" "$(cat "$_out")"
-assert_contains "Avalon among them" "10) avalon" "$(cat "$_out")"
-assert_contains "the menu lists the companions" "12) hermes" "$(cat "$_out")"
-assert_contains "ComfyUI among them" "16) comfyui" "$(cat "$_out")"
-assert_contains "OpenClaw is grouped with agents" "13) openclaw" "$(cat "$_out")"
-assert_contains "DeepSeek Harness has its own menu choice" "14) deepseek-harness" "$(cat "$_out")"
+assert_contains "the menu lists the model servers" "10) xolotl" "$(cat "$_out")"
+assert_contains "Avalon among them" "11) avalon" "$(cat "$_out")"
+assert_contains "Kindi with the CPU or optional-GPU servers" "5) kindi" "$(sed -n '/CPU or optional GPU/,/GPU required/p' "$_out")"
+assert_contains "the menu lists the companions" "13) hermes" "$(cat "$_out")"
+assert_contains "ComfyUI among them" "17) comfyui" "$(cat "$_out")"
+assert_contains "OpenClaw is grouped with agents" "14) openclaw" "$(cat "$_out")"
+assert_contains "DeepSeek Harness has its own menu choice" "15) deepseek-harness" "$(cat "$_out")"
 assert_contains "memory comes before agents" "Memory infrastructure (CPU)" "$(cat "$_out")"
 assert_contains "the GPU model group is explicit" "Model servers (GPU required by default)" "$(cat "$_out")"
 assert_contains "the CPU model group is explicit" "Model servers (CPU or optional GPU)" "$(cat "$_out")"
@@ -685,6 +720,13 @@ assert_eq "an automatically selected NVIDIA card accepts Debian 13" 0 "$(GPU_RES
 assert_eq "NVIDIA GPU_DEVICES accepts Debian 13" 0 "$(GPU_DEVICES='/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm' valid_avalon_template local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst; echo $?)"
 assert_fail "nor another distro" valid_avalon_template local:vztmpl/alpine-3.20-default_20240908_amd64.tar.xz
 
+describe valid_kindi_template
+assert_ok "Kindi on Debian 13" valid_kindi_template local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst
+assert_ok "Kindi on Ubuntu 24.04" valid_kindi_template local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+assert_ok "Kindi on Debian 12" valid_kindi_template local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst
+assert_fail "not Ubuntu 26.04 (the CUDA 10.2 runfile is not checked there)" valid_kindi_template local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst
+assert_fail "nor another distro" valid_kindi_template local:vztmpl/alpine-3.20-default_20240908_amd64.tar.xz
+
 describe host_gpu_cuda_arch
 HOST_GPU_CUDA_ARCH=120
 assert_eq "the GPU step's result first" 120 "$(host_gpu_cuda_arch)"
@@ -700,6 +742,7 @@ assert_eq "Xolotl: Debian 13, then Ubuntu 26.04" "debian-13 ubuntu-26.04 ubuntu-
 assert_eq "Maya on an RTX card: Debian 13 first" "debian-13 ubuntu-26.04 ubuntu-24.04 ubuntu-22.04 debian-12" "$(HOST_GPU_CUDA_ARCH=89 gpu_target_template_order maya)"
 assert_eq "Maya on a V100: only CUDA 12 distributions" "ubuntu-24.04 ubuntu-22.04 debian-12" "$(HOST_GPU_CUDA_ARCH=70 gpu_target_template_order maya)"
 assert_eq "Avalon: the Ubuntu releases ROCm supports" "ubuntu-24.04 ubuntu-22.04" "$(gpu_target_template_order avalon)"
+assert_eq "Kindi: Strata's releases, Debian 13 first" "debian-13 ubuntu-24.04 ubuntu-22.04 debian-12" "$(gpu_target_template_order kindi)"
 
 describe target_cuda_env
 assert_eq "Basalt on Ubuntu 26.04 uses CUDA 13.3" CUDA_VERSION=13.3 "$(target_cuda_env basalt local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst)"
@@ -1059,6 +1102,14 @@ unset XOLOTL_IP_CIDR
 AVALON_IP_CIDR=192.0.2.94/24
 assert_eq "Avalon with its kind prefix" avalon+http://192.0.2.94:8080 "$(target_server_entry avalon)"
 unset AVALON_IP_CIDR
+KINDI_IP_CIDR=192.0.2.95/24
+assert_eq "Kindi on its own port" kindi+http://192.0.2.95:8093 "$(target_server_entry kindi)"
+assert_eq "or KINDI_PORT" kindi+http://192.0.2.95:8100 "$(KINDI_PORT=8100 target_server_entry kindi)"
+unset KINDI_IP_CIDR
+
+describe target_default_port
+assert_eq "Kindi keeps its own 8093" 8093 "$(target_default_port kindi)"
+assert_eq "the other Strata-style targets 8080" 8080 "$(target_default_port avalon)"
 
 describe preset_target_model_servers
 MODEL_SERVER_COUNT=3; MODEL_SERVER_MAX=20
@@ -1096,8 +1147,8 @@ HONCHO_EMBEDDING_DIMENSIONS=768; HONCHO_EMBEDDING_MODEL=nomic-embed-text; TARGET
 describe target_context_var
 assert_eq "Ollama's window is OLLAMA_CONTEXT_LENGTH" OLLAMA_CONTEXT_LENGTH "$(target_context_var ollama)"
 assert_eq "llama.cpp's is per request, not CONTEXT_SIZE" LLAMACPP_CONTEXT "$(target_context_var llamacpp)"
-assert_eq "the Strata-style targets use <NAME>_CONTEXT" "STRATA_CONTEXT BASALT_CONTEXT MAYA_CONTEXT XOLOTL_CONTEXT AVALON_CONTEXT" \
-  "$(for _n in strata basalt maya xolotl avalon; do target_context_var "$_n"; done | paste -sd' ')"
+assert_eq "the Strata-style targets use <NAME>_CONTEXT" "STRATA_CONTEXT BASALT_CONTEXT MAYA_CONTEXT XOLOTL_CONTEXT AVALON_CONTEXT KINDI_CONTEXT" \
+  "$(for _n in strata basalt maya xolotl avalon kindi; do target_context_var "$_n"; done | paste -sd' ')"
 assert_fail "AirLLM keeps its own small window" target_context_var airllm
 assert_fail "an agent has none" target_context_var hermes
 
@@ -1122,6 +1173,7 @@ assert_eq "Ollama's server default" OLLAMA_CONTEXT_LENGTH=32768 "$(OLLAMA_CONTEX
 assert_eq "llama.cpp gets the window times its slots" CONTEXT_SIZE=131072 \
   "$(LLAMACPP_CONTEXT=65536 PARALLEL_SLOTS=2 target_context_env llamacpp)"
 assert_eq "Avalon's auto is passed as it is" AVALON_CONTEXT=auto "$(AVALON_CONTEXT=auto target_context_env avalon)"
+assert_eq "so is Kindi's" KINDI_CONTEXT=auto "$(KINDI_CONTEXT=auto target_context_env kindi)"
 assert_eq "an agent gets none" "" "$(target_context_env hermes)"
 
 describe valid_target_context
@@ -1144,6 +1196,18 @@ describe avalon_auto_context
 assert_eq "256k from 19 GB" 262144 "$(avalon_auto_context 24564)"
 assert_eq "64k below" 65536 "$(avalon_auto_context 16376)"
 assert_eq "64k when the card is not known" 65536 "$(avalon_auto_context '')"
+
+describe valid_kindi_context
+assert_ok "auto" valid_kindi_context auto
+assert_ok "Kindi's 24k" valid_kindi_context 24576
+assert_ok "256k" valid_kindi_context 262144
+assert_fail "more than Kindi takes here" valid_kindi_context 524288
+assert_fail "too small" valid_kindi_context 2048
+
+describe kindi_auto_context
+assert_eq "24k on a small card (a 1 GB K420)" 24576 "$(kindi_auto_context 980)"
+assert_eq "64k from 7.5 GB" 65536 "$(kindi_auto_context 8192)"
+assert_eq "24k on the CPU or an unknown card" 24576 "$(kindi_auto_context cpu)"
 
 describe gpu_vram_mib
 _sys="$(mktemp -d)"; mkdir -p "$_sys/0000:03:00.0"
@@ -1183,6 +1247,8 @@ assert_eq "Honcho's full budgets raise it to 131072" \
   "131072|Honcho's full budgets; its 24564 MiB GPU fits about 131072" "$(context_recommendation strata 24564)"
 assert_eq "Avalon by its auto rule" \
   "131072|Honcho's full budgets; its 20480 MiB GPU fits about 262144" "$(context_recommendation avalon 20480)"
+assert_eq "Kindi by its own sizing" \
+  "24576|its 980 MiB GPU fits about 24576; Honcho's full budgets would use 131072" "$(context_recommendation kindi 980)"
 assert_eq "Xolotl's 128k needs its 24 GB card" \
   "65536|its 16384 MiB GPU fits about 65536; Honcho's full budgets would use 131072" "$(context_recommendation xolotl 16384)"
 assert_eq "Ollama and llama.cpp are sized for full attention" \
@@ -1241,6 +1307,12 @@ TARGETS="avalon"; AVALON_GPU_CARD=""; unset AVALON_CONTEXT
 prompt_target_contexts > "$_out" 2>&1 <<< $'100\nauto\n'
 assert_contains "a value out of range is asked again" "Not a valid value: '100'" "$(cat "$_out")"
 assert_eq "Avalon takes auto" auto "$AVALON_CONTEXT"
+TARGETS="kindi hermes"; KINDI_GPU_CARD=none; unset KINDI_CONTEXT
+prompt_target_contexts > "$_out" 2>&1 <<< $'\n'
+assert_eq "Kindi defaults to auto" auto "$KINDI_CONTEXT"
+assert_contains "and says what auto is" "auto: Kindi's own size for the card" "$(cat "$_out")"
+assert_contains "Hermes is warned off a CPU Kindi" "Hermes will not use this server" "$(cat "$_out")"
+unset KINDI_CONTEXT KINDI_GPU_CARD
 TARGETS="llamacpp deepseek-harness"; LLAMACPP_GPU_CARD=0000:01:00.0; PARALLEL_SLOTS=2; unset LLAMACPP_CONTEXT CONTEXT_SIZE
 prompt_target_contexts > "$_out" 2>&1 <<< $'\n\n'
 assert_eq "llama.cpp asks per request" 65536 "$LLAMACPP_CONTEXT"
@@ -1295,6 +1367,19 @@ mock_reset_log
 run_target_provisioner avalon
 assert_contains "Debian 13's CUDA version reaches Avalon" "cuda-env |||13.1" "$(mock_calls)"
 unset AVALON_CT_ID AVALON_IP_CIDR AVALON_STORAGE AVALON_TEMPLATE
+KINDI_CT_ID=923; KINDI_IP_CIDR=192.0.2.103/24; KINDI_STORAGE=gpu-store
+KINDI_TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst KINDI_CONTEXT=auto
+GPU_RESULT_KINDI="ready|nvidia||1|0000:41:00.0"
+mock_reset_log
+run_target_provisioner kindi
+assert_contains "Kindi gets its card, its backend and its context" \
+  "kindi-env cuda|/dev/nvidia1 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools|auto" "$(mock_calls)"
+assert_not_contains "and no CUDA version of the template's repository" "cuda-env" "$(mock_calls)"
+GPU_RESULT_KINDI="declined||||"
+mock_reset_log
+run_target_provisioner kindi
+assert_contains "Kindi given no card runs on the CPU" "kindi-env cpu||auto" "$(mock_calls)"
+unset KINDI_CT_ID KINDI_IP_CIDR KINDI_STORAGE KINDI_TEMPLATE KINDI_CONTEXT GPU_RESULT_KINDI
 mock_reset_log
 run_target_provisioner llamacpp
 assert_contains "llama.cpp without a model only gets its CT" "|no|" "$(mock_calls)"
@@ -1717,6 +1802,9 @@ assert_fail "rejects xolotl:// junk"     valid_ollama_addr "xolotl://a b"
 assert_ok   "accepts avalon://host"      valid_ollama_addr avalon://10.0.0.13
 assert_ok   "accepts avalon+http url"    valid_ollama_addr avalon+http://h:8080
 assert_fail "rejects avalon:// junk"     valid_ollama_addr "avalon://a b"
+assert_ok   "accepts kindi://host"       valid_ollama_addr kindi://10.0.0.14
+assert_ok   "accepts kindi+http url"     valid_ollama_addr kindi+http://h:8093
+assert_fail "rejects kindi:// junk"      valid_ollama_addr "kindi://a b"
 
 describe normalize_ollama_url
 assert_eq "bare ip gets scheme and port" "http://10.0.0.5:11434" "$(normalize_ollama_url 10.0.0.5)"
@@ -1742,6 +1830,9 @@ assert_eq "xolotl:// default port"          "xolotl+http://h:8080"   "$(normaliz
 assert_eq "xolotl+http passes through"      "xolotl+http://h:8150"   "$(normalize_ollama_url xolotl+http://h:8150/)"
 assert_eq "avalon:// default port"          "avalon+http://h:8080"   "$(normalize_ollama_url avalon://h)"
 assert_eq "avalon+http passes through"      "avalon+http://h:8181"   "$(normalize_ollama_url avalon+http://h:8181/)"
+assert_eq "kindi:// gets Kindi's own port"  "kindi+http://h:8093"    "$(normalize_ollama_url kindi://h)"
+assert_eq "kindi+http passes through"       "kindi+http://h:8094"    "$(normalize_ollama_url kindi+http://h:8094/)"
+assert_eq "KINDI_PORT sets kindi://'s port" "kindi+http://h:8100"    "$(KINDI_PORT=8100 normalize_ollama_url kindi://h)"
 AVALON_PORT=8181
 assert_eq "AVALON_PORT sets avalon://'s port" "avalon+http://h:8181"  "$(normalize_ollama_url avalon://h)"
 unset AVALON_PORT
@@ -2610,11 +2701,38 @@ assert_contains "missing sha is reported" "could not read" "$out"
 describe litellm_router_settings
 out="$(printf 'fast q@a\nmedium m@b\nlarge m@b\n' | litellm_router_settings)"
 assert_contains "sets retries"   "  num_retries: 2" "$out"
+assert_not_contains "no Kindi, no retry policy" "model_group_retry_policy" "$out"
 assert_contains "sets a timeout" "  timeout: 600" "$out"
 assert_contains "falls back to the nearest tier" '- fast: ["medium", "large"]' "$out"
 assert_contains "skips identical deployments"   '- medium: ["fast"]' "$out"
 assert_not_contains "never names a tier without deployments" "xlarge" "$out"
 assert_not_contains "a single tier has no fallbacks" "fallbacks" "$(printf 'fast q@a\n' | litellm_router_settings)"
+out="$(printf 'fast q@http://a:11434\nmedium b@http://a:11434,kindi+http://k:8093\nlarge b@kindi+http://k:8093\n' | litellm_router_settings)"
+assert_contains "Kindi keeps the router's retries for other errors" "  num_retries: 2" "$out"
+assert_contains "a tier with Kindi gets a retry policy" "    medium:" "$out"
+assert_contains "a tier of Kindi alone too"             "    large:" "$out"
+assert_not_contains "a tier without Kindi has none"     "    fast:" "$out"
+assert_contains "no retry after a Kindi timeout"        "      TimeoutErrorRetries: 0" "$out"
+assert_contains "one retry after a Kindi 429"           "      RateLimitErrorRetries: 1" "$out"
+assert_not_contains "no field LiteLLM 1.75 ignores"      "InternalServerErrorRetries" "$out"
+assert_not_contains "a tier without Kindi never falls back into Kindi" '- fast: ["medium"' "$out"
+assert_not_contains "nor a Kindi tier into its own Kindi server" '- medium: ["large"' "$out"
+
+describe initial_litellm_deployments
+# The first install emits deployments before manage-model-servers has run.
+# shellcheck source=/dev/null
+source <(sed -n '/^  emit_tier_deployments() {/,/^  }/p' "$SCRIPT")
+_saved_servers=("${MODEL_SERVERS[@]}")
+MODEL_SERVERS=("kindi+http://h:8093" "http://h:11434")
+OLLAMA_KEEP_ALIVE=""
+out="$(emit_tier_deployments fast bonsai2-2b '0')"
+assert_contains "Kindi uses OpenAI on the first install" "model: openai/bonsai2-2b" "$out"
+assert_contains "Kindi's initial base has /v1" "api_base: http://h:8093/v1" "$out"
+assert_contains "Kindi's initial timeout" "timeout: 3600" "$out"
+assert_not_contains "Kindi deployment does not use ignored retry field" "num_retries:" "$out"
+out="$(emit_tier_deployments fast qwen:7b '1')"
+assert_not_contains "Ollama keeps LiteLLM's timeout" "timeout: 3600" "$out"
+MODEL_SERVERS=("${_saved_servers[@]}")
 
 describe is_installer_owned
 assert_ok   "router.py is owned"         is_installer_owned services/ollama-router/router.py

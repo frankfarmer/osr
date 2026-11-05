@@ -283,6 +283,8 @@ file_mode "the router key is limited to the proxy group" 640 "$etc/router-api-ke
 file_mode "the backend keys are limited to the proxy group" 640 "$etc/backend-keys"
 assert_contains "the env file has the vector size" "EMBEDDING_VECTOR_DIMENSIONS=768" "$(cat "$etc/honcho.env")"
 assert_contains "and the local proxy as the model endpoint" "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://127.0.0.1:8765/v1" "$(cat "$etc/honcho.env")"
+assert_contains "and allows headroom beyond Kindi's silent read" "DERIVER_MODEL_CONFIG__OVERRIDES__PROVIDER_PARAMS__TIMEOUT=7200" "$(cat "$etc/honcho.env")"
+assert_contains "for every dialectic level" "DIALECTIC_LEVELS__max__MODEL_CONFIG__OVERRIDES__PROVIDER_PARAMS__TIMEOUT=7200" "$(cat "$etc/honcho.env")"
 assert_contains "and the local proxy as the embedding endpoint" "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://127.0.0.1:8765/v1" "$(cat "$etc/honcho.env")"
 assert_not_contains "Honcho does not hold the router address" "$router" "$(cat "$etc/honcho.env")"
 assert_not_contains "Honcho does not hold the router key" "sk-router-test-key" "$(cat "$etc/honcho.env")"

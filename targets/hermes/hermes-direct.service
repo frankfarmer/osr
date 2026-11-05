@@ -9,6 +9,7 @@ User=hermes
 Group=hermes
 Environment=HOME=/home/hermes
 Environment=HERMES_HOME=/home/hermes/.hermes
+EnvironmentFile=-/etc/hermes-target/settings
 ExecStart=/usr/bin/python3 /usr/local/lib/hermes-direct.py
 Restart=always
 RestartSec=3

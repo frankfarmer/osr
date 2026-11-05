@@ -112,6 +112,7 @@ settings_record() {
   printf 'OPENCLAW_MODEL=%s\n' "$OPENCLAW_MODEL"
   printf 'OPENCLAW_CONTEXT_LENGTH=%s\n' "$OPENCLAW_CONTEXT_LENGTH"
   printf 'OPENCLAW_MAX_TOKENS=%s\n' "$OPENCLAW_MAX_TOKENS"
+  printf 'KINDI_READ_TIMEOUT_SECONDS=%s\n' "${KINDI_READ_TIMEOUT_SECONDS:-3600}"
   printf 'OPENCLAW_VERSION=%s\n' "$OPENCLAW_VERSION"
   printf 'OPENCLAW_NODE_VERSION=%s\n' "$OPENCLAW_NODE_VERSION"
   printf 'NVM_VERSION=%s\n' "$NVM_VERSION"
@@ -239,11 +240,21 @@ print(json.dumps([f"http://{ip}:{port}" for ip in sys.argv[2:]], separators=(","
 # NAME is one model server under DIRECT_URL/t/NAME. MODELS_FILE is that
 # endpoint's /v1/models answer, or "-" when it could not be listed: then the
 # entry in PREVIOUS (the last providers written, or "-") is kept, so a model
-# server that is down for a moment keeps its provider.
+# server that is down for a moment keeps its provider. KINDI_TARGETS names the
+# Kindi targets (space-separated): those, and osr while there are any, get
+# KINDI_CLIENT_TIMEOUT_SECONDS as timeoutSeconds. Kindi reads a long prompt
+# slowly and sends nothing until it has read it, which OpenClaw's own
+# first-event limit (5 minutes for a local endpoint) would otherwise cut off.
+# OpenClaw uses timeoutSeconds both as its silence limit and as a deadline for
+# the whole request, so the value covers a silent read of the full Kindi budget
+# twice over plus a full reply at one token a second. The dispatcher still
+# bounds every server's silence at its own read timeout.
 providers_json() {
   python3 - "$@" <<'PY'
-import json, sys
+import json, os, sys
 context, max_tokens, direct = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3].rstrip("/")
+kindi_targets = set(os.environ.get("KINDI_TARGETS", "").split())
+kindi_client_timeout = int(os.environ.get("KINDI_CLIENT_TIMEOUT_SECONDS", "7200"))
 previous = {}
 if sys.argv[4] != "-":
     try:
@@ -274,6 +285,8 @@ for item in sys.argv[5:]:
                              "maxTokens": max_tokens,
                              "compat": {"supportsTools": True, "maxTokensField": "max_tokens"}}
                             for i in ids]}
+    if name in kindi_targets or (name == "osr" and kindi_targets):
+        out[name]["timeoutSeconds"] = kindi_client_timeout
 print(json.dumps(out, sort_keys=True, separators=(",", ":")))
 PY
 }
@@ -291,6 +304,8 @@ provider_entry() {
   python3 -c 'import json,sys
 print(json.dumps(json.load(sys.stdin)[sys.argv[1]], separators=(",", ":")))' "$1"
 }
+# kindi_target_names TARGETS_FILE: the names of its Kindi servers (NAME=SERVER).
+kindi_target_names() { [[ -f $1 ]] && awk -F= '$2 ~ /^kindi[+]/ {print $1}' "$1" || true; }
 # End install helpers. ----------------------------------------------------------
 
 dry_run=0
@@ -342,6 +357,8 @@ target_names() { [[ -f $1 ]] && cut -d= -f1 "$1" || true; }
 # This run's targets: the pushed file, else the installed one.
 targets_source=$TARGETS_FILE
 [[ -f $targets_source ]] || targets_source=$OC_ETC/targets
+KINDI_READ_TIMEOUT_SECONDS=${KINDI_READ_TIMEOUT_SECONDS:-3600}
+[[ $KINDI_READ_TIMEOUT_SECONDS =~ ^[1-9][0-9]{0,5}$ ]] || die 'Invalid KINDI_READ_TIMEOUT_SECONDS.'
 # The Gateway listens on every address when Open WebUI or a browser needs it.
 bind=loopback
 [[ $OPENCLAW_API != true && $OPENCLAW_DASHBOARD != true ]] || bind=lan
@@ -362,6 +379,8 @@ HONCHO_URL=${HONCHO_URL%/}
   die "OPENCLAW_CONTEXT_LENGTH must be at least $MIN_CONTEXT: OpenClaw's prompt, tools and history need it. The model's host must serve that much too."
 [[ $OPENCLAW_MAX_TOKENS =~ ^[1-9][0-9]{2,6}$ ]] && (( OPENCLAW_MAX_TOKENS >= 256 && OPENCLAW_MAX_TOKENS * 2 <= OPENCLAW_CONTEXT_LENGTH )) ||
   die 'OPENCLAW_MAX_TOKENS must be at least 256 and at most half of OPENCLAW_CONTEXT_LENGTH.'
+# OpenClaw's whole-request deadline for Kindi: see providers_json.
+KINDI_CLIENT_TIMEOUT_SECONDS=$((KINDI_READ_TIMEOUT_SECONDS * 2 + OPENCLAW_MAX_TOKENS))
 [[ $OPENCLAW_VERSION =~ ^([a-z][a-z0-9-]{0,31}|[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)$ ]] ||
   die 'OPENCLAW_VERSION must be an npm dist-tag (latest, beta) or an exact version such as 2026.10.9.'
 [[ $OPENCLAW_NODE_VERSION =~ ^(24|26)(\.[0-9]+\.[0-9]+)?$ ]] ||
@@ -575,7 +594,9 @@ build_providers() {
       lists+=("$name=-")
     fi
   done < <(target_names "$targets_source")
-  providers_json "$OPENCLAW_CONTEXT_LENGTH" "$OPENCLAW_MAX_TOKENS" "$DIRECT_URL" "$previous" "${lists[@]}" > "$out"
+  KINDI_TARGETS="$(kindi_target_names "$targets_source" | paste -sd' ' -)" \
+    KINDI_CLIENT_TIMEOUT_SECONDS="$KINDI_CLIENT_TIMEOUT_SECONDS" \
+    providers_json "$OPENCLAW_CONTEXT_LENGTH" "$OPENCLAW_MAX_TOKENS" "$DIRECT_URL" "$previous" "${lists[@]}" > "$out"
 }
 
 # --- unchanged and healthy: nothing to do ---------------------------------------

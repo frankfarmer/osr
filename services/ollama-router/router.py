@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
@@ -75,7 +76,7 @@ _DEFAULTS = {
         # tool-capable. Their APIs say nothing per model, but each of these
         # servers parses "tools" and returns OpenAI tool_calls. A kind left
         # out is reported unknown. Blank: none.
-        "tool_kinds": "strata, basalt, maya, xolotl, avalon",
+        "tool_kinds": "strata, basalt, maya, xolotl, avalon, kindi",
     },
     "http": {
         # Seconds to establish a TCP connection to a backend. Short on purpose:
@@ -83,6 +84,10 @@ _DEFAULTS = {
         "connect_timeout_seconds": "3",
         # Seconds allowed between bytes of a response (generation can be slow).
         "read_timeout_seconds": "300",
+        # The same for Kindi, which serves one request at a time and reads a
+        # long prompt slowly on a small card (its agent guide: 30-60 minutes).
+        # Never below read_timeout_seconds.
+        "kindi_read_timeout_seconds": "3600",
     },
     "discovery": {
         "enabled": "true",
@@ -321,6 +326,8 @@ SERVER_KINDS = {
                "label": "Xolotl", "openai": True},
     "avalon": {"prefix": "avalon+", "key_env": "AVALON_API_KEY",
                "label": "Avalon", "openai": True},
+    "kindi": {"prefix": "kindi+", "key_env": "KINDI_API_KEY",
+              "label": "Kindi", "openai": True},
 }
 OPENAI_KINDS = frozenset(k for k, v in SERVER_KINDS.items() if v["openai"])
 # Bearer tokens the router adds per kind (secrets.env). LM Studio's is for
@@ -366,6 +373,7 @@ for _kind in sorted(set(_json_list(_cfg, "classification", "tool_kinds")) - TOOL
                 _kind, ", ".join(sorted(OPENAI_KINDS)))
 CONNECT_TIMEOUT = _cfg.getfloat("http", "connect_timeout_seconds")
 READ_TIMEOUT = _cfg.getfloat("http", "read_timeout_seconds")
+KINDI_READ_TIMEOUT = max(READ_TIMEOUT, _cfg.getfloat("http", "kindi_read_timeout_seconds"))
 
 # Request headers never forwarded upstream.
 HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive",
@@ -433,6 +441,18 @@ def _discovery_servers() -> list:
 
 
 SERVERS = _discovery_servers()
+
+
+def litellm_read_timeout(tier: str | None = None) -> float:
+    """Read gap for this LiteLLM request; passthrough keeps the normal limit."""
+    return KINDI_READ_TIMEOUT if tier and tier_has_kindi(tier) else READ_TIMEOUT
+
+
+def tier_has_kindi(tier: str) -> bool:
+    """Whether LiteLLM can select a Kindi deployment for this tier."""
+    return any(server_kind(entry.strip()) == "kindi"
+               for entry in _tier_env(tier).split(",") if entry.strip())
+
 
 # --- live inventory -----------------------------------------------------------
 # Replaced wholesale on each refresh, so readers never see a half-built dict.
@@ -690,7 +710,7 @@ async def fetch_lmstudio_models(client: httpx.AsyncClient, server: str) -> tuple
 
 
 async def fetch_openai_models(client: httpx.AsyncClient, server: str) -> tuple:
-    """Read Strata, Basalt, Maya, Xolotl or Avalon model IDs and capabilities at /v1/models."""
+    """Read Strata, Basalt, Maya, Xolotl, Avalon or Kindi model IDs and capabilities at /v1/models."""
     try:
         response = await client.get(f"{server_base(server)}/v1/models",
                                     headers=backend_headers(server),
@@ -1235,15 +1255,41 @@ async def close_upstream(response: httpx.Response) -> None:
 
 async def _stream_upstream(method: str, url: str, headers: dict,
                            json_body=None, content=None,
-                           extra_headers: dict = None) -> StreamingResponse:
+                           extra_headers: dict = None,
+                           read_timeout: float = READ_TIMEOUT,
+                           kindi_tier: bool = False) -> Response:
     client = http_client()
     try:
         upstream_request = client.build_request(
-            method, url, headers=headers, json=json_body, content=content
+            method, url, headers=headers, json=json_body, content=content,
+            timeout=httpx.Timeout(read_timeout, connect=CONNECT_TIMEOUT),
         )
         upstream_response = await client.send(upstream_request, stream=True)
+    except httpx.ReadTimeout as exc:
+        if kindi_tier:
+            return kindi_no_reply("LiteLLM did not answer for a tier with Kindi.")
+        raise HTTPException(status_code=502, detail=f"OSR core disconnect: {exc}") from exc
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"OSR core disconnect: {exc}") from exc
+    if kindi_tier and upstream_response.status_code == 408:
+        # LiteLLM answers its own timeout with 408, which an SDK retries.
+        await upstream_response.aclose()
+        return kindi_no_reply("LiteLLM gave up on a tier with Kindi.")
+    if (kindi_tier and isinstance(json_body, dict) and json_body.get("stream") is not True
+            and 200 <= upstream_response.status_code < 300):
+        # LiteLLM can send 200 headers before a Kindi-backed completion body.
+        # Finish the non-streaming response before committing our own 200.
+        try:
+            buffered = b"".join([chunk async for chunk in upstream_response.aiter_raw()])
+        except httpx.ReadTimeout:
+            await upstream_response.aclose()
+            return kindi_no_reply("LiteLLM did not finish a tier with Kindi.")
+        except httpx.RequestError as exc:
+            await upstream_response.aclose()
+            raise HTTPException(status_code=502, detail=f"OSR core disconnect: {exc}") from exc
+        await upstream_response.aclose()
+        return Response(content=buffered, status_code=upstream_response.status_code,
+                        headers=_response_headers(upstream_response, extra_headers))
     return StreamingResponse(
         upstream_response.aiter_raw(),
         status_code=upstream_response.status_code,
@@ -1255,6 +1301,63 @@ async def _stream_upstream(method: str, url: str, headers: dict,
 # Upstream statuses that mean "try the next candidate": the host is failing
 # (5xx) or no longer has the model (404, e.g. removed since the last poll).
 RETRYABLE_STATUS = {404} | set(range(500, 600))
+CLIENT_RETRYABLE_STATUS = {408, 409, 429} | set(range(500, 600))
+
+# A Kindi request that got no reply after it was sent may still be running:
+# Kindi serves one request at a time, and an OpenAI SDK retries a 5xx (a 408
+# too), so the retry would queue behind it. Such a failure is answered 424 with
+# x-should-retry: false; the message avoids the words clients match as a
+# timeout. The router hung up, so Kindi stops the request at its next prompt
+# batch or token; until its /health confirms it is idle, nothing more is sent
+# to it and callers get a retryable 503. A newer busy request does not prove
+# the unanswered one has finished: it could still be waiting in Kindi's queue.
+KINDI_HEALTH_CACHE_SECONDS = 5
+_KINDI_DRAINING: dict = {}  # server -> [last /health check, busy]
+
+
+def kindi_no_reply(prefix: str) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"message": prefix + " No complete reply arrived within the read budget; the request "
+                   "was not sent again, because Kindi may still be working on it.",
+                   "type": "upstream_no_reply", "code": "kindi_no_reply"}},
+        status_code=424, headers={"x-should-retry": "false"})
+
+
+def mark_kindi_draining(server: str) -> None:
+    _KINDI_DRAINING[server] = [float("-inf"), True]
+
+
+async def kindi_busy(server: str) -> bool:
+    """True while a Kindi server that left a request unanswered still reports
+    work in progress on /health (checked at most every 5 s)."""
+    state = _KINDI_DRAINING.get(server)
+    if state is None:
+        return False
+    now = time.monotonic()
+    if now - state[0] < KINDI_HEALTH_CACHE_SECONDS:
+        return state[1]
+    try:
+        response = await http_client().get(f"{server_base(server)}/health", timeout=DISCOVERY_TIMEOUT)
+        response.raise_for_status()
+        health = response.json()
+        if not isinstance(health, dict) or "busy" not in health:
+            raise ValueError("Kindi health response has no busy field")
+        busy = health["busy"] is not None and health["busy"] is not False
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("dispatch: cannot confirm Kindi %s is idle (%s)", server, exc)
+        busy = True
+    # A concurrent request may have recorded a newer unanswered POST while
+    # this probe was in flight. Its drain state takes precedence.
+    current = _KINDI_DRAINING.get(server)
+    if current is not state:
+        return current[1] if current is not None else False
+    if busy:
+        _KINDI_DRAINING[server] = [now, True]
+    else:
+        _KINDI_DRAINING.pop(server, None)
+    return busy
+
+
 # Only a capability rejection warrants trying another model and temporarily
 # excluding this one from tool requests. A malformed tools payload can also
 # mention "tools" in a 400, but every candidate would receive that same error.
@@ -1280,8 +1383,23 @@ async def _read_raw(response: httpx.Response, limit: int = ERROR_PEEK_BYTES) -> 
     return b"".join(chunks)
 
 
+async def _relay_kindi_stream(server: str, response: httpx.Response, first_chunk: bytes,
+                              remaining: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Relay SSE after its first chunk; keep Kindi gated if it later stalls."""
+    try:
+        if first_chunk:
+            yield first_chunk
+        async for chunk in remaining:
+            yield chunk
+    except httpx.ReadTimeout:
+        mark_kindi_draining(server)
+        raise
+    finally:
+        await response.aclose()
+
+
 async def _dispatch_direct(candidates: list, body: dict, headers: dict,
-                           need: dict, extra_headers: dict = None) -> StreamingResponse:
+                           need: dict, extra_headers: dict = None) -> Response:
     """Send to the best candidate, falling forward through the ranked list on
     connection errors, 404 or 5xx. Retrying is only safe before any body has
     been streamed, which is why the status is checked before returning. A host
@@ -1289,9 +1407,15 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
     next request skips it too."""
     client = http_client()
     last_error = None
+    no_reply = kindi_was_busy = False
     for position, entry in enumerate(candidates):
         if not INVENTORY.get("servers", {}).get(entry["server"], {}).get("up", True):
             last_error = f"{entry['server']}: marked down"
+            continue
+        if entry["kind"] == "kindi" and await kindi_busy(entry["server"]):
+            last_error = (f"{entry['server']} is still busy after an earlier request got no reply; "
+                          "nothing was sent to it")
+            kindi_was_busy = True
             continue
         attempt_body = dict(body)
         attempt_body["model"] = entry["name"]
@@ -1299,7 +1423,11 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
         try:
             upstream_request = client.build_request(
                 "POST", url, headers=dict(headers, **backend_headers(entry["server"])),
-                json=attempt_body
+                json=attempt_body,
+                timeout=httpx.Timeout(
+                    KINDI_READ_TIMEOUT if entry["kind"] == "kindi" else READ_TIMEOUT,
+                    connect=CONNECT_TIMEOUT,
+                ),
             )
             upstream_response = await client.send(upstream_request, stream=True)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
@@ -1308,6 +1436,12 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
             continue
         except httpx.RequestError as exc:
             last_error = f"{entry['server']}: {type(exc).__name__}: {exc}"
+            if entry["kind"] == "kindi" and isinstance(exc, httpx.ReadTimeout):
+                # Sent, but no reply: Kindi may still be working on it.
+                no_reply = True
+                mark_kindi_draining(entry["server"])
+                log.warning("dispatch: Kindi %s sent no reply; not sending it again", entry["server"])
+                continue
             log.warning("dispatch: %s", last_error)
             continue
         is_last = position == len(candidates) - 1
@@ -1316,6 +1450,12 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
             last_error = f"{entry['server']}: HTTP {upstream_response.status_code}"
             log.warning("dispatch: %s for %s; trying the next candidate",
                         last_error, entry["name"])
+            continue
+        if no_reply and upstream_response.status_code in CLIENT_RETRYABLE_STATUS:
+            # A later error must not turn an unanswered Kindi POST into a
+            # response that makes clients replay the whole call.
+            last_error = f"{entry['server']}: HTTP {upstream_response.status_code}"
+            await upstream_response.aclose()
             continue
         buffered = None
         if upstream_response.status_code == 400 and need.get("tools"):
@@ -1333,6 +1473,31 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
                     log.warning("dispatch: %s; trying the next candidate", last_error)
                     continue
                 log.warning("dispatch: %s; no candidates left", last_error)
+        kindi_stream = None
+        if entry["kind"] == "kindi" and upstream_response.status_code < 400:
+            try:
+                raw_stream = upstream_response.aiter_raw()
+                if body.get("stream") is True:
+                    first_chunk = await anext(raw_stream, b"")
+                    kindi_stream = _relay_kindi_stream(entry["server"], upstream_response,
+                                                        first_chunk, raw_stream)
+                else:
+                    # The client expects one complete JSON reply. Read every
+                    # raw byte before sending 200, so a late read timeout can
+                    # still become 424 and the original encoding is preserved.
+                    buffered = b"".join([chunk async for chunk in raw_stream])
+                    await upstream_response.aclose()
+            except httpx.ReadTimeout as exc:
+                last_error = f"{entry['server']}: {type(exc).__name__}: {exc}"
+                no_reply = True
+                mark_kindi_draining(entry["server"])
+                await upstream_response.aclose()
+                continue
+            except httpx.RequestError as exc:
+                last_error = f"{entry['server']}: {type(exc).__name__}: {exc}"
+                mark_server_down(entry["server"], last_error)
+                await upstream_response.aclose()
+                continue
         log.info("route class=%s code=%s vision=%s tools=%s tokens~%s -> %s @ %s (%d/%d)",
                  need["class"], need["code"], need["vision"], need.get("tools", False),
                  need.get("approx_tokens"), entry["name"], entry["server"],
@@ -1349,11 +1514,17 @@ async def _dispatch_direct(candidates: list, body: dict, headers: dict,
             return Response(content=buffered, status_code=upstream_response.status_code,
                             headers=_response_headers(upstream_response, router_headers))
         return StreamingResponse(
-            upstream_response.aiter_raw(),
+            kindi_stream if kindi_stream is not None else upstream_response.aiter_raw(),
             status_code=upstream_response.status_code,
             headers=_response_headers(upstream_response, router_headers),
             background=BackgroundTask(close_upstream, upstream_response),
         )
+    if no_reply:
+        return kindi_no_reply("No usable model target.")
+    if kindi_was_busy:
+        return JSONResponse({"error": {"message": f"No usable model target. Last error: {last_error}",
+                                       "type": "kindi_busy", "code": "kindi_busy"}},
+                            status_code=503, headers={"Retry-After": "15"})
     raise HTTPException(status_code=502,
                         detail=f"No usable model target. Last error: {last_error}")
 
@@ -1374,6 +1545,9 @@ async def routing_inventory():
         "server_status": INVENTORY.get("servers", {}),
         "errors": INVENTORY.get("errors", {}),
         "models": INVENTORY.get("models", []),
+        # The direct dispatchers of Hermes, OpenClaw and Honcho compare this
+        # with the budget their CT was configured for.
+        "kindi_read_timeout_seconds": KINDI_READ_TIMEOUT,
     })
 
 
@@ -1482,11 +1656,25 @@ async def route_chat_completion(request: Request):
 
     # Fallback: the original static path through LiteLLM, which keeps its own
     # latency routing and cross-tier fallbacks.
-    body["model"] = globals()[_CLASS_TO_TIER[need["class"]]]
+    tier = _CLASS_TO_TIER[need["class"]]
+    body["model"] = globals()[tier]
     log.info("route class=%s -> LiteLLM %s", need["class"], body["model"])
+    headers = _forward_headers(request, drop_auth=True)
+    if tier_has_kindi(need["class"]):
+        # Kindi asks for one retry at most. LiteLLM 1.75 does not read the
+        # policy's InternalServerErrorRetries, so this request header caps the
+        # retries of every error but a timeout (the policy's 0) at one. A
+        # client's own retry or timeout header is dropped; the timeout comes
+        # from each deployment (Kindi's follows router.ini), and a request-wide
+        # one would also lift LiteLLM's 600 s from the tier's other servers.
+        headers = {key: value for key, value in headers.items()
+                   if key.lower() not in ("x-litellm-num-retries", "x-litellm-timeout")}
+        headers["x-litellm-num-retries"] = "1"
     return await _stream_upstream(
-        "POST", LITELLM_URL, _forward_headers(request, drop_auth=True), json_body=body,
+        "POST", LITELLM_URL, headers, json_body=body,
         extra_headers={"X-Router-Mode": "litellm", "X-Router-Model": body["model"]},
+        read_timeout=litellm_read_timeout(need["class"]),
+        kindi_tier=tier_has_kindi(need["class"]),
     )
 
 

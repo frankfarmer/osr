@@ -124,6 +124,8 @@ assert_ok   "xolotl://host"          valid_addr xolotl://10.0.0.12
 assert_ok   "xolotl+http url"        valid_addr xolotl+http://h:8080
 assert_ok   "avalon://host"          valid_addr avalon://10.0.0.13
 assert_ok   "avalon+http url"        valid_addr avalon+http://h:8080
+assert_ok   "kindi://host"           valid_addr kindi://10.0.0.14
+assert_ok   "kindi+http url"         valid_addr kindi+http://h:8093
 
 describe server_kind
 assert_eq "ollama"   "ollama"   "$(server_kind http://h:11434)"
@@ -133,6 +135,7 @@ assert_eq "basalt"   "basalt"   "$(server_kind basalt+http://h:8080)"
 assert_eq "maya"     "maya"     "$(server_kind maya+http://h:8080)"
 assert_eq "xolotl"   "xolotl"   "$(server_kind xolotl+http://h:8080)"
 assert_eq "avalon"   "avalon"   "$(server_kind avalon+http://h:8080)"
+assert_eq "kindi"    "kindi"    "$(server_kind kindi+http://h:8093)"
 
 describe server_base
 assert_eq "strips the prefix" "http://h:1234" "$(server_base lmstudio+http://h:1234)"
@@ -150,6 +153,7 @@ assert_eq "basalt uses OpenAI" "openai" "$(litellm_provider basalt+http://h:8080
 assert_eq "maya uses OpenAI"   "openai" "$(litellm_provider maya+http://h:8080)"
 assert_eq "xolotl uses OpenAI" "openai" "$(litellm_provider xolotl+http://h:8080)"
 assert_eq "avalon uses OpenAI" "openai" "$(litellm_provider avalon+http://h:8080)"
+assert_eq "kindi uses OpenAI"  "openai" "$(litellm_provider kindi+http://h:8093)"
 
 describe litellm_api_base
 assert_eq "ollama base as-is"      "http://h:11434"   "$(litellm_api_base http://h:11434)"
@@ -158,6 +162,7 @@ assert_eq "strata OpenAI base"     "http://h:8080/v1" "$(litellm_api_base strata
 assert_eq "basalt OpenAI base"     "http://h:8080/v1" "$(litellm_api_base basalt+http://h:8080)"
 assert_eq "maya OpenAI base"       "http://h:8080/v1" "$(litellm_api_base maya+http://h:8080)"
 assert_eq "xolotl OpenAI base"     "http://h:8080/v1" "$(litellm_api_base xolotl+http://h:8080)"
+assert_eq "kindi OpenAI base"      "http://h:8093/v1" "$(litellm_api_base kindi+http://h:8093)"
 
 describe normalize_addr
 assert_eq "adds scheme+port"   "http://10.0.0.5:11434" "$(normalize_addr 10.0.0.5)"
@@ -188,6 +193,11 @@ assert_eq "avalon:// default port"            "avalon+http://h:8080" "$(normaliz
 AVALON_PORT=8181
 assert_eq "AVALON_PORT sets avalon://'s port"  "avalon+http://h:8181" "$(normalize_addr avalon://h)"
 unset AVALON_PORT
+assert_eq "kindi:// gets Kindi's own port"    "kindi+http://h:8093" "$(normalize_addr kindi://h)"
+assert_eq "kindi+http passes through"         "kindi+http://h:8094" "$(normalize_addr kindi+http://h:8094/)"
+KINDI_PORT=8100
+assert_eq "KINDI_PORT sets kindi://'s port"    "kindi+http://h:8100" "$(normalize_addr kindi://h)"
+unset KINDI_PORT
 STRATA_PORT=11434
 assert_eq "Strata default port can be 11434" "strata+http://h:11434" "$(normalize_addr strata://h)"
 unset STRATA_PORT
@@ -560,6 +570,27 @@ case "$*" in
 esac
 EOF
 assert_status "another llama-server is not taken for Avalon" 1 detect_server_kind http://h:8080
+# Kindi names itself and its version on its public /health.
+mock_script curl <<'EOF'
+case "$*" in
+  *"/api/tags"*) exit 22;;
+  *"/health"*) printf '{"ok": true, "kindi": "0.4.0", "commit": "917ae68", "model": "bonsai2-2b", "ctx": 24576}';;
+  *) exit 22;;
+esac
+EOF
+mock_reset_log
+assert_eq "Kindi is identified by its /health" "kindi" "$(detect_server_kind http://h:8093)"
+assert_not_contains "Kindi detection sends no key" "-H @" "$(mock_calls)"
+mock_script curl <<'EOF'
+case "$*" in
+  *"/api/tags"*) exit 22;;
+  *"/health"*) printf '{"ok": true, "kindi_mode": "x"}';;
+  *"/v1/status"*) printf 'not found\n404';;
+  *"/api/v1/models"*|*"/api/v0/models"*) printf 404;;
+  *) exit 22;;
+esac
+EOF
+assert_status "a /health without Kindi's version is not taken for Kindi" 1 detect_server_kind http://h:8093
 # A keyed older Strata without a distinguishing public /health response still
 # cannot be identified safely, so such a host has to be named.
 reset_repo
@@ -578,6 +609,7 @@ assert_not_contains "detection never sends a key" "-H @" "$(mock_calls)"
 out="$(detect_server_kind http://h:11434 2>&1 >/dev/null || true)"
 assert_contains "says how to add it" "strata://h:11434" "$out"
 assert_contains "Avalon among the forms" "avalon://h:11434" "$out"
+assert_contains "Kindi among the forms" "kindi://h:11434" "$out"
 assert_status "a bare keyed address is not resolved" 1 resolve_server h:11434
 assert_eq "an explicit strata:// address needs no probe" "strata+http://h:11434" "$(resolve_server strata://h:11434)"
 assert_eq "a keyed host on LM Studio's port is LM Studio" "lmstudio" "$(detect_server_kind http://h:1234)"
@@ -646,6 +678,7 @@ assert_eq "explicit Basalt on port 11434 needs no probe" "basalt+http://10.0.0.9
 assert_eq "explicit Maya on port 11434 needs no probe" "maya+http://10.0.0.9:11434" "$(resolve_server maya://10.0.0.9:11434)"
 assert_eq "explicit Xolotl on port 8150 needs no probe" "xolotl+http://10.0.0.12:8150" "$(resolve_server xolotl://10.0.0.12:8150)"
 assert_eq "explicit Avalon needs no probe" "avalon+http://10.0.0.13:8080" "$(resolve_server avalon://10.0.0.13)"
+assert_eq "explicit Kindi needs no probe" "kindi+http://10.0.0.14:8093" "$(resolve_server kindi://10.0.0.14)"
 SERVER_TYPE=lmstudio
 assert_eq "--type lmstudio needs no probe"        "lmstudio+http://10.0.0.9:1234" "$(resolve_server 10.0.0.9)"
 SERVER_TYPE=strata
@@ -816,6 +849,58 @@ assert_file_contains "Avalon key reference" "api_key: os.environ/AVALON_API_KEY"
 assert_fail "Avalon key never enters YAML" grep -q 'avalon-key' "$LITELLM_YAML"
 reset_repo
 
+env_set MODEL_SERVERS "kindi+http://10.0.0.14:8093"
+env_set BACKEND_FAST "kindi+http://10.0.0.14:8093"
+TIER_MODEL_OVERRIDE[fast]="bonsai2-2b"
+env_set KINDI_API_KEY "kindi-key"
+printf '  num_retries: 1\n' >> "$LITELLM_YAML"
+cat >> "$LITELLM_YAML" <<'YAML'
+  model_group_retry_policy:
+    medium:
+      RateLimitErrorRetries: 4
+    large: {TimeoutErrorRetries: 3}
+YAML
+regenerate_litellm >/dev/null 2>&1
+TIER_MODEL_OVERRIDE=()
+assert_file_contains "Kindi OpenAI provider" "model: openai/bonsai2-2b" "$LITELLM_YAML"
+assert_file_contains "Kindi /v1 base" "api_base: http://10.0.0.14:8093/v1" "$LITELLM_YAML"
+assert_file_contains "Kindi key reference" "api_key: os.environ/KINDI_API_KEY" "$LITELLM_YAML"
+assert_file_contains "Kindi gets a long timeout" "timeout: 3600" "$LITELLM_YAML"
+assert_file_contains "Kindi's tier gets a retry policy" "  model_group_retry_policy:" "$LITELLM_YAML"
+assert_file_contains "no retry after a Kindi timeout" "      TimeoutErrorRetries: 0" "$LITELLM_YAML"
+assert_fail "no InternalServerErrorRetries, which LiteLLM 1.75 does not read" grep -q 'InternalServerErrorRetries' "$LITELLM_YAML"
+assert_file_contains "operator policy for another tier survives" "      RateLimitErrorRetries: 4" "$LITELLM_YAML"
+assert_file_contains "a flow-style operator policy survives" "    large: {TimeoutErrorRetries: 3}" "$LITELLM_YAML"
+assert_file_contains "other errors keep the hand-set router retries" "  num_retries: 1" "$LITELLM_YAML"
+assert_fail "Kindi key never enters YAML" grep -q 'kindi-key' "$LITELLM_YAML"
+assert_ok "a retry policy is valid for LiteLLM" validate_config
+printf '\n[http]\nread_timeout_seconds = 300\nkindi_read_timeout_seconds = 5400\n' >> "$ROUTER_INI"
+regenerate_litellm >/dev/null 2>&1
+assert_file_contains "Kindi deployment follows router.ini" "      timeout: 5400" "$LITELLM_YAML"
+describe sync_kindi_timeouts
+sed -i 's/^kindi_read_timeout_seconds = 5400$/kindi_read_timeout_seconds = 7000/' "$ROUTER_INI"
+out="$(sync_kindi_timeouts)"
+assert_contains "apply's sync reports a new Kindi timeout" "now wait 7000s" "$out"
+assert_file_contains "the Kindi deployment takes the router.ini edit" "      timeout: 7000" "$LITELLM_YAML"
+assert_eq "one timeout per Kindi deployment" "1" "$(grep -c '^      timeout: ' "$LITELLM_YAML")"
+assert_eq "a second sync changes nothing" "" "$(sync_kindi_timeouts)"
+describe regenerate_litellm
+regenerate_litellm >/dev/null 2>&1
+assert_eq "regenerating keeps one retry policy" "1" "$(grep -c '^  model_group_retry_policy:' "$LITELLM_YAML")"
+if python3 -c 'import yaml' >/dev/null 2>&1; then
+  sed -i '/^  model_group_retry_policy:$/a\    no-such-tier:\n      TimeoutErrorRetries: 0' "$LITELLM_YAML"
+  assert_fail "a retry policy for a tier without deployments is refused" validate_config
+fi
+env_set MODEL_SERVERS "http://10.0.0.51:11434"
+env_set BACKEND_FAST "http://10.0.0.51:11434"
+regenerate_litellm >/dev/null 2>&1
+assert_file_contains "removing Kindi keeps the other tier policy" "      RateLimitErrorRetries: 4" "$LITELLM_YAML"
+assert_file_contains "and the flow-style one" "    large: {TimeoutErrorRetries: 3}" "$LITELLM_YAML"
+assert_eq "sync_kindi_timeouts without Kindi changes nothing" "" "$(sync_kindi_timeouts)"
+assert_fail "and leaves no Kindi retry policy" grep -qE 'osr-kindi-policy|TimeoutErrorRetries: 0' "$LITELLM_YAML"
+assert_file_contains "the hand-set router retries are untouched" "  num_retries: 1" "$LITELLM_YAML"
+reset_repo
+
 describe litellm_fallbacks
 out="$(printf 'fast a@1\nmedium b@2\nlarge b@2\nxlarge c@3\n' | litellm_fallbacks)"
 assert_contains "nearest tier first"             '- fast: ["medium", "large", "xlarge"]' "$out"
@@ -823,6 +908,49 @@ assert_contains "identical deployments skipped"  '- medium: ["fast", "xlarge"]' 
 assert_not_contains "never falls back to itself" '"medium", "medium"' "$out"
 assert_eq "no tiers -> no block" "" "$(printf '' | litellm_fallbacks)"
 assert_eq "one tier -> no block" "" "$(printf 'fast a@1\n' | litellm_fallbacks)"
+out="$(printf 'fast a@http://o:11434\nmedium b@kindi+http://k:8093\nlarge c@http://o:11434\n' | litellm_fallbacks)"
+assert_not_contains "a non-Kindi tier never falls back into Kindi" '- fast: ["medium"' "$out"
+assert_contains "Kindi can fall back to another tier" '- medium: ["fast", "large"]' "$out"
+out="$(printf 'fast a@kindi+http://k:8093
+medium b@http://o:11434,c@kindi+http://k:8093
+large d@kindi+http://j:8093
+' | litellm_fallbacks)"
+assert_contains "a Kindi tier falls back only to tiers without its Kindi server" '- fast: ["large"]' "$out"
+assert_contains "including a tier on another Kindi server" '- medium: ["large"]' "$out"
+assert_contains "which falls back to both" '- large: ["medium", "fast"]' "$out"
+
+describe kindi_budget_note
+reset_repo
+env_set MODEL_SERVERS "kindi+http://10.0.0.14:8093,http://10.0.0.51:11434"
+assert_eq "no note for an unchanged budget" "" "$(kindi_budget_note 3600 3600)"
+assert_eq "no note without a before value" "" "$(kindi_budget_note "" 3600)"
+out="$(kindi_budget_note 3600 5400)"
+assert_contains "a raise names the tool targets" "Hermes, OpenClaw and Honcho keep 3600s" "$out"
+out="$(kindi_budget_note 3600 1800)"
+assert_contains "a cut already reaches the dispatchers" "dispatchers already use 1800s" "$out"
+env_set MODEL_SERVERS "http://10.0.0.51:11434"
+assert_eq "no note without a Kindi server" "" "$(kindi_budget_note 3600 5400)"
+reset_repo
+
+describe kindi_timeout_seconds
+assert_eq "default budget" "3600" "$(ROUTER_INI=/nonexistent kindi_timeout_seconds)"
+printf '[http]\nread_timeout_seconds = 7200\nkindi_read_timeout_seconds = 1800\n' > "$WORK/kindi.ini"
+assert_eq "never below read_timeout_seconds" "7200" "$(ROUTER_INI="$WORK/kindi.ini" kindi_timeout_seconds)"
+printf '[http]\nkindi_read_timeout_seconds = 90.5\n' > "$WORK/kindi.ini"
+assert_eq "a lower Kindi value keeps the 300 s default" "300" "$(ROUTER_INI="$WORK/kindi.ini" kindi_timeout_seconds)"
+printf '[http]\nkindi_read_timeout_seconds = 4000.5\n' > "$WORK/kindi.ini"
+assert_eq "rounded up" "4001" "$(ROUTER_INI="$WORK/kindi.ini" kindi_timeout_seconds)"
+printf '[http]\nkindi_read_timeout_seconds = soon\n' > "$WORK/kindi.ini"
+kindi_timeout_at() { ROUTER_INI=$1 kindi_timeout_seconds; }
+assert_fail "a bad value fails" kindi_timeout_at "$WORK/kindi.ini"
+
+describe litellm_retry_policy
+out="$(printf 'fast a@http://h:11434\nmedium b@kindi+http://k:8093,c@http://h:11434\nlarge d@kindi+http://k:8093\n' | litellm_retry_policy)"
+assert_contains "a tier with Kindi gets a policy"   "    medium:" "$out"
+assert_contains "a tier of Kindi alone too"          "    large:" "$out"
+assert_not_contains "a tier without Kindi keeps num_retries" "    fast:" "$out"
+assert_contains "no retry after a timeout"           "      TimeoutErrorRetries: 0" "$out"
+assert_eq "no Kindi -> no block" "" "$(printf 'fast a@http://h:11434\n' | litellm_retry_policy)"
 
 describe confirm
 ASSUME_YES=true
@@ -1353,6 +1481,17 @@ out="$(cmd_apply 2>&1)"
 assert_contains "restarts only the router" "Restarting: ollama-router" "$out"
 assert_eq "exactly one restart issued" "1" "$(mock_call_count 'restart ')"
 assert_contains "reports health" "healthy" "$out"
+assert_not_contains "no Kindi budget note without a change" "Kindi read budget" "$out"
+# Raising the Kindi budget: apply says the tool targets keep the old one.
+env_set MODEL_SERVERS "kindi+http://10.0.0.14:8093"
+printf '\n[http]\nkindi_read_timeout_seconds = 5400\n' >> "$ROUTER_INI"
+mock_reset_log
+out="$(cmd_apply 2>&1)"
+assert_contains "a raised Kindi budget is reported" "Kindi read budget is now 5400s (was 3600s)" "$out"
+assert_contains "with the tool targets to reconfigure" "provision-lxc.sh --reconfigure" "$out"
+out="$(cmd_apply 2>&1)"
+assert_not_contains "and only once" "Kindi read budget" "$out"
+reset_repo; make_fake_litellm_venv 1.75.5.post1; install_runtime
 
 # Invalid config: stop before touching anything.
 printf 'model_list: [\n' > "$LITELLM_YAML"
@@ -1445,7 +1584,7 @@ assert_eq "--off clears it" "" "$(env_get ROUTER_API_KEY)"
 reset_repo
 
 describe server_kinds
-assert_eq "kinds, in detection order" "lmstudio strata basalt maya xolotl avalon" "$(server_kinds | paste -sd' ' -)"
+assert_eq "kinds, in detection order" "lmstudio strata basalt maya xolotl avalon kindi" "$(server_kinds | paste -sd' ' -)"
 
 describe kind_field
 assert_eq "maya key" MAYA_API_KEY "$(kind_field maya key)"
@@ -1469,10 +1608,10 @@ assert_fail "LM Studio is not" is_openai_kind lmstudio
 assert_fail "nor is Ollama" is_openai_kind ollama
 
 describe openai_kinds
-assert_eq "OpenAI-style kinds" "strata basalt maya xolotl avalon" "$(openai_kinds | paste -sd' ' -)"
+assert_eq "OpenAI-style kinds" "strata basalt maya xolotl avalon kindi" "$(openai_kinds | paste -sd' ' -)"
 
 describe kind_labels
-assert_eq "labels for messages" "Ollama, LM Studio, Strata, Basalt, Maya, Xolotl or Avalon" "$(kind_labels)"
+assert_eq "labels for messages" "Ollama, LM Studio, Strata, Basalt, Maya, Xolotl, Avalon or Kindi" "$(kind_labels)"
 
 describe kind_secret_name
 assert_eq "LM Studio has a token" "LM Studio token" "$(kind_secret_name lmstudio)"
@@ -1486,6 +1625,9 @@ assert_eq "xolotl default port" 8080 "$(kind_field xolotl port)"
 assert_eq "set-avalon-token names avalon" avalon "$(token_command_kind set-avalon-token)"
 assert_eq "avalon key" AVALON_API_KEY "$(kind_field avalon key)"
 assert_eq "avalon default port" 8080 "$(kind_field avalon port)"
+assert_eq "set-kindi-token names kindi" kindi "$(token_command_kind set-kindi-token)"
+assert_eq "kindi key" KINDI_API_KEY "$(kind_field kindi key)"
+assert_eq "kindi default port (its own)" 8093 "$(kind_field kindi port)"
 assert_eq "set-lmstudio-token names lmstudio" lmstudio "$(token_command_kind set-lmstudio-token)"
 assert_eq "set-token is not a kind command" "" "$(token_command_kind set-token)"
 assert_eq "set-ollama-token is not a kind command" "" "$(token_command_kind set-ollama-token)"
@@ -1494,8 +1636,8 @@ assert_fail "unknown token commands do not" command_writes set-bogus-token
 
 describe secret_keys
 assert_eq "secrets include every kind's key" \
-  "LMSTUDIO_API_TOKEN STRATA_API_KEY BASALT_API_KEY MAYA_API_KEY XOLOTL_API_KEY AVALON_API_KEY" \
-  "$(secret_keys | tail -n 6 | paste -sd' ' -)"
+  "LMSTUDIO_API_TOKEN STRATA_API_KEY BASALT_API_KEY MAYA_API_KEY XOLOTL_API_KEY AVALON_API_KEY KINDI_API_KEY" \
+  "$(secret_keys | tail -n 7 | paste -sd' ' -)"
 
 describe litellm_provider
 assert_eq "litellm provider for maya" openai "$(litellm_provider maya+http://h:8080)"

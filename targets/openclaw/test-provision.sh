@@ -64,6 +64,9 @@ lmstudio-10-0-0-5-8080=lmstudio+http://10.0.0.5:8080'
 # shellcheck disable=SC1090
 hermes_targets=$(source <(awk '/^inventory_targets\(\)/,/^}/' "$here/../hermes/provision-lxc.sh"); inventory_targets "$inv")
 [[ $hermes_targets == "$expected" ]] || fail 'direct target names differ from the Hermes target'
+printf '{"enabled":true,"servers":["kindi+http://10.0.0.14:8093"]}\n' > "$inv"
+[[ $(inventory_targets "$inv") == 'kindi-10-0-0-14-8093=kindi+http://10.0.0.14:8093' ]] ||
+  fail "a Kindi server is not its own kind of target: $(inventory_targets "$inv" 2>&1)"
 printf '{"enabled":false,"servers":[]}\n' > "$inv"
 if inventory_targets "$inv" >/dev/null 2>&1; then fail 'targets read from a router with discovery off'; fi
 pass "inventory: endpoints default to 80/443, bad URLs are refused, target names are Hermes's"
@@ -242,6 +245,7 @@ case $cmd in
     if [[ $id == 280 ]]; then
       case $all in
         'test -f /app/router/router.py') exit 0 ;;
+        python3\ -c\ *router.ini) echo 5400 ;;
         awk*LMSTUDIO_API_TOKEN*secrets.env) printf 'STRATA_API_KEY=sk-backend-secret\n' ;;
         awk*secrets.env) [[ -n ${FAKE_NO_ROUTER_KEY:-} ]] || printf '%s\n' "$FAKE_ROUTER_KEY" ;;
         *ROUTER_PORT*) echo 8000 ;;
@@ -361,7 +365,7 @@ cmp -s "$fake/pushed-283-direct-dispatch.py" "$here/../hermes/direct-dispatch.py
 [[ -f $fake/pushed-283-openclaw-gateway.service && -f $fake/pushed-283-openclaw-direct.service ]] || fail 'units not pushed'
 [[ -z $(secrets_in_argv) ]] || fail "a secret appeared in a command line: $(secrets_in_argv)"
 guest_env=$(< "$fake/guest-env")
-for want in ROUTER_URL=http://192.0.2.80:8000 OPENCLAW_API=true OPENCLAW_DASHBOARD=true OPENCLAW_PORT=18789 \
+for want in ROUTER_URL=http://192.0.2.80:8000 OPENCLAW_API=true OPENCLAW_DASHBOARD=true OPENCLAW_PORT=18789 KINDI_READ_TIMEOUT_SECONDS=5400 \
             OPENCLAW_MODEL=auto OPENCLAW_CONTEXT_LENGTH=65536 OPENCLAW_NODE_VERSION=24 NVM_VERSION=v0.40.4; do
   [[ " $guest_env " == *" $want "* ]] || fail "guest installer not given $want: $guest_env"
 done

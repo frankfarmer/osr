@@ -59,7 +59,7 @@ that you have all of the following.
   inventory entry says it supports tools and gives its context window.
   Ollama, the llama.cpp bridge (with `tools` in `MODEL_CAPABILITIES`) and LM
   Studio models trained for tool use report both, as do Strata, Basalt, Maya,
-  Xolotl and Avalon (the router's `tool_kinds` setting marks their text
+  Xolotl, Avalon and Kindi (the router's `tool_kinds` setting marks their text
   models tool-capable, and their `/v1/models` gives the served context).
   AirLLM supports neither tools nor a long context. The model targets serve
   65536 tokens by default, below the 131072 the proxy asks for when
@@ -224,6 +224,14 @@ pinned SHA-256 (the baseline build on CPUs without AVX2). For another Bun set
 run `uv run --frozen`, so they use exactly the locked dependencies.
 
 ## Upgrades, rollback and keys
+
+Change the `HONCHO_REF` default only after
+`targets/honcho/test-pinned-upstream.py` passes against the new release (the
+`honcho-upstream` CI job). It runs Honcho's own settings loader and request
+builder on the `honcho.env` this target writes and checks that every model
+config sends the OpenAI client the model-client timeout (twice the router's
+Kindi read budget), and that the pinned OpenAI SDK stops a silent request at
+that timeout.
 
 A reconfigure keeps the PostgreSQL database, JWT secret and both keys. Before
 it changes an installed CT, it sets aside the env file, keys, units and Bun

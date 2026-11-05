@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -243,9 +243,171 @@ class TestDirect(unittest.TestCase):
     def test_portless_urls_use_the_scheme_default(self):
         self.assertEqual(direct.server_parts("http://models.lan"), ("ollama", "http://models.lan"))
         self.assertEqual(direct.server_parts("strata+https://models.lan/"), ("strata", "https://models.lan"))
+        self.assertEqual(direct.server_parts("kindi+http://10.0.0.14:8093"), ("kindi", "http://10.0.0.14:8093"))
+        # Each kind gets only its own key: Kindi's is never sent to Strata.
+        dispatcher = direct.Dispatcher("http://127.0.0.1:1", "router-secret",
+                                       {"STRATA_API_KEY": "strata-secret", "KINDI_API_KEY": "kindi-secret"})
+        self.assertEqual(dispatcher.backend_key("kindi+http://10.0.0.14:8093"), "kindi-secret")
+        self.assertEqual(dispatcher.backend_key("strata+http://10.0.0.9:8080"), "strata-secret")
+        self.assertEqual(dispatcher.backend_key("avalon+http://10.0.0.13:8080"), "")
+        with mock.patch.object(direct.BACKEND, "open") as open_backend:
+            dispatcher.open_backend({"server": "kindi+http://10.0.0.14:8093", "name": "bonsai2-2b"},
+                                    {"messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(open_backend.call_args.kwargs["timeout"], direct.KINDI_READ_TIMEOUT)
         for bad in ("http://models.lan:0", "http://models.lan:70000", "ftp://models.lan"):
             with self.assertRaises(ValueError):
                 direct.server_parts(bad)
+
+    def test_kindi_timeout_follows_a_lower_router_budget_only(self):
+        """The router's current Kindi budget applies when it is lower; a higher
+        one is logged with the fix, since this CT's callers were sized for the
+        budget it was configured with."""
+        dispatcher = direct.Dispatcher("http://127.0.0.1:1", "router-secret")
+        kindi = {"server": "kindi+http://10.0.0.14:8093", "name": "bonsai2-2b"}
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+
+        def timeout_with(budget):
+            inventory = {"enabled": True, "models": []}
+            if budget is not None:
+                inventory["kindi_read_timeout_seconds"] = budget
+            dispatcher._inventory, dispatcher._inventory_time = inventory, time.monotonic()
+            with mock.patch.object(direct.BACKEND, "open") as open_backend:
+                dispatcher.open_backend(kindi, body)
+            return open_backend.call_args.kwargs["timeout"]
+
+        configured = direct.KINDI_READ_TIMEOUT
+        self.assertEqual(timeout_with(None), configured)
+        self.assertEqual(timeout_with(configured - 600), configured - 600)
+        self.assertEqual(timeout_with(1), direct.READ_TIMEOUT)
+        with self.assertLogs("hermes-direct", "WARNING") as logged:
+            self.assertEqual(timeout_with(configured + 1800), configured)
+        self.assertIn("--reconfigure", logged.output[0])
+        with mock.patch.object(direct.LOG, "warning") as warning:
+            timeout_with(configured + 1800)
+        warning.assert_not_called()
+        self.assertEqual(timeout_with(True), configured)
+        with mock.patch.object(direct.BACKEND, "open") as open_backend:
+            dispatcher.open_backend({"server": "http://10.0.0.51:11434", "name": "qwen3:8b"}, body)
+        self.assertEqual(open_backend.call_args.kwargs["timeout"], direct.READ_TIMEOUT)
+
+    def test_kindi_timeout_refresh_does_not_block_the_request(self):
+        """A hung router cannot delay a direct Kindi request."""
+        dispatcher = direct.Dispatcher("http://127.0.0.1:1", "router-secret")
+        started, release = threading.Event(), threading.Event()
+
+        def hung_router(timeout):
+            self.assertEqual(timeout, 2)
+            started.set()
+            release.wait(3)
+            raise OSError("down")
+
+        with mock.patch.object(dispatcher, "inventory", side_effect=hung_router) as inventory:
+            try:
+                began = time.monotonic()
+                for _ in range(3):
+                    self.assertEqual(dispatcher.kindi_timeout(), direct.KINDI_READ_TIMEOUT)
+                self.assertLess(time.monotonic() - began, 1)
+                self.assertTrue(started.wait(1))
+            finally:
+                release.set()
+        self.assertEqual(inventory.call_count, 1)
+
+    def test_background_refresh_uses_a_lower_live_budget(self):
+        dispatcher = direct.Dispatcher("http://127.0.0.1:1", "router-secret")
+        ready = threading.Event()
+        lower = direct.KINDI_READ_TIMEOUT - 600
+
+        def inventory(url, key, body=None, timeout=10):
+            self.assertEqual(timeout, 2)
+            ready.set()
+            return {"enabled": True, "servers": [], "server_status": {}, "models": [],
+                    "kindi_read_timeout_seconds": lower}
+
+        with mock.patch.object(direct, "request_json", side_effect=inventory):
+            self.assertEqual(dispatcher.kindi_timeout(), direct.KINDI_READ_TIMEOUT)
+            self.assertTrue(ready.wait(1))
+            deadline = time.monotonic() + 1
+            while dispatcher.kindi_timeout() != lower and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(dispatcher.kindi_timeout(), lower)
+
+    def test_routed_silent_kindi_returns_nonretryable_error(self):
+        requests = []
+
+        class SilentKindi(Quiet):
+            def do_GET(self):
+                self.send_json({"busy": {"phase": "prompt"}})
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append(self.path)
+                time.sleep(0.8)
+
+        backend = serve(SilentKindi)
+        self.addCleanup(backend.server_close)
+        self.addCleanup(backend.shutdown)
+        kindi = f"kindi+http://127.0.0.1:{backend.server_port}"
+        Router.inventory = {
+            "enabled": True, "servers": [kindi], "server_status": {kindi: {"up": True}},
+            "models": [{"server": kindi, "name": "bonsai2-2b", "loaded": True,
+                        "tools": True, "is_embedding": False}],
+        }
+        Router.rankings = [{"server": kindi, "model": "bonsai2-2b"}]
+        with mock.patch.object(direct, "KINDI_READ_TIMEOUT", 0.2), \
+                mock.patch.object(direct, "READ_TIMEOUT", 0.1):
+            with self.assertRaises(HTTPError) as failed:
+                self.post({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(failed.exception.code, 424)
+        self.assertEqual(failed.exception.headers["x-should-retry"], "false")
+        failed.exception.close()
+        self.assertEqual(requests, ["/v1/chat/completions"])
+
+        # Hermes and OpenClaw can fall back from their routed provider to a
+        # named provider. Both URLs share this dispatcher, so even if the
+        # client elects to fall back it cannot queue a second Kindi POST.
+        direct.Handler.dispatcher.targets["kindi-a"] = kindi
+        request = Request(self.base + "/t/kindi-a/v1/chat/completions",
+                          data=json.dumps({"model": "bonsai2-2b", "messages": []}).encode(),
+                          headers={"Content-Type": "application/json"})
+        with self.assertRaises(HTTPError) as fallback:
+            urlopen(request, timeout=5)
+        self.assertEqual(fallback.exception.code, 503)
+        fallback.exception.close()
+        self.assertEqual(requests, ["/v1/chat/completions"])
+
+    def test_last_fallback_503_does_not_hide_kindi_no_reply(self):
+        requests = []
+
+        class SilentKindi(Quiet):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append(self.path)
+                time.sleep(0.8)
+
+        backend = serve(SilentKindi)
+        self.addCleanup(backend.server_close)
+        self.addCleanup(backend.shutdown)
+        kindi = f"kindi+http://127.0.0.1:{backend.server_port}"
+        hot = Router.inventory["servers"][0]
+        Router.inventory["servers"] = [kindi, hot]
+        Router.inventory["server_status"] = {kindi: {"up": True}, hot: {"up": True}}
+        Router.inventory["models"] = [
+            {"server": kindi, "name": "bonsai2-2b", "loaded": True,
+             "tools": True, "is_embedding": False},
+            {"server": hot, "name": "tool-model", "loaded": True,
+             "tools": True, "is_embedding": False},
+        ]
+        Router.rankings = [{"server": kindi, "model": "bonsai2-2b"},
+                           {"server": hot, "model": "tool-model"}]
+        Backend.errors = {self.hot.server_port: (503, b'{"error":"unavailable"}')}
+        with mock.patch.object(direct, "KINDI_READ_TIMEOUT", 0.2):
+            with self.assertRaises(HTTPError) as failed:
+                self.post({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(failed.exception.code, 424)
+        self.assertEqual(failed.exception.headers["x-should-retry"], "false")
+        failed.exception.close()
+        self.assertEqual(requests, ["/v1/chat/completions"])
+        self.assertEqual(len(Backend.requests), 1)
 
     def test_unreachable_server_is_skipped(self):
         # A port with nothing listening: the connection is refused.
@@ -738,6 +900,255 @@ class TestDirectTargets(unittest.TestCase):
         self.assertEqual(len(self.get("/t/strata-a/v1/models")["data"]), 2)
         _, data = self.chat("strata-a", {"model": "tool-model", "messages": []})
         self.assertEqual(data["model"], "tool-model")
+
+    def test_kindi_chat_does_not_wait_for_a_hung_router(self):
+        release, entered = threading.Event(), threading.Event()
+
+        class HungRouter(Quiet):
+            def do_GET(self):
+                entered.set()
+                release.wait(3)
+
+        router = serve(HungRouter)
+        self.addCleanup(router.server_close)
+        self.addCleanup(router.shutdown)
+        kindi = f"kindi+http://127.0.0.1:{self.backend.server_port}"
+        direct.Handler.dispatcher = direct.Dispatcher(
+            f"http://127.0.0.1:{router.server_port}", "router-secret",
+            targets={"kindi-a": kindi})
+        try:
+            began = time.monotonic()
+            _, data = self.chat("kindi-a", {"model": "tool-model", "messages": []})
+            self.assertEqual(data["model"], "tool-model")
+            self.assertLess(time.monotonic() - began, 1.5)
+            self.assertTrue(entered.wait(1))
+        finally:
+            release.set()
+
+    def test_silent_kindi_returns_nonretryable_error(self):
+        requests = []
+
+        class SilentKindi(Quiet):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append(self.path)
+                time.sleep(0.8)
+
+        backend = serve(SilentKindi)
+        self.addCleanup(backend.server_close)
+        self.addCleanup(backend.shutdown)
+        kindi = f"kindi+http://127.0.0.1:{backend.server_port}"
+        direct.Handler.dispatcher = direct.Dispatcher(
+            f"http://127.0.0.1:{self.router.server_port}", "router-secret",
+            targets={"kindi-a": kindi})
+        with mock.patch.object(direct, "KINDI_READ_TIMEOUT", 0.2), \
+                mock.patch.object(direct, "READ_TIMEOUT", 0.1):
+            with self.assertRaises(HTTPError) as failed:
+                self.chat("kindi-a", {"model": "tool-model", "messages": []})
+        self.assertEqual(failed.exception.code, 424)
+        self.assertEqual(failed.exception.headers["x-should-retry"], "false")
+        error = json.load(failed.exception)["error"]
+        self.assertEqual(error["type"], "upstream_no_reply")
+        # OpenClaw classifies a message naming a timeout as one, and may retry it.
+        self.assertNotRegex(error["message"], r"(?i)timed out|timeout")
+        failed.exception.close()
+        self.assertEqual(requests, ["/v1/chat/completions"])
+
+    def test_kindi_headers_without_body_remain_nonretryable(self):
+        requests = []
+
+        class HeadersOnlyKindi(Quiet):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "10")
+                self.end_headers()
+                self.wfile.flush()
+                time.sleep(0.8)
+
+        backend = serve(HeadersOnlyKindi)
+        self.addCleanup(backend.server_close)
+        self.addCleanup(backend.shutdown)
+        kindi = f"kindi+http://127.0.0.1:{backend.server_port}"
+        direct.Handler.dispatcher = direct.Dispatcher(
+            f"http://127.0.0.1:{self.router.server_port}", "router-secret",
+            targets={"kindi-a": kindi})
+        with mock.patch.object(direct, "KINDI_READ_TIMEOUT", 0.2), \
+                mock.patch.object(direct, "READ_TIMEOUT", 0.1):
+            with self.assertRaises(HTTPError) as failed:
+                self.chat("kindi-a", {"model": "tool-model", "messages": []})
+        self.assertEqual(failed.exception.code, 424)
+        self.assertEqual(failed.exception.headers["x-should-retry"], "false")
+        failed.exception.close()
+        self.assertEqual(requests, ["/v1/chat/completions"])
+
+    def test_kindi_partial_nonstreaming_body_timeout_remains_nonretryable(self):
+        requests = []
+
+        class PartialKindi(Quiet):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.write(b'{"choices":')
+                self.wfile.flush()
+                time.sleep(0.8)
+
+        backend = serve(PartialKindi)
+        self.addCleanup(backend.server_close)
+        self.addCleanup(backend.shutdown)
+        kindi = f"kindi+http://127.0.0.1:{backend.server_port}"
+        direct.Handler.dispatcher = direct.Dispatcher(
+            f"http://127.0.0.1:{self.router.server_port}", "router-secret",
+            targets={"kindi-a": kindi})
+        with mock.patch.object(direct, "KINDI_READ_TIMEOUT", 0.2):
+            with self.assertRaises(HTTPError) as failed:
+                self.chat("kindi-a", {"model": "tool-model", "messages": []})
+        self.assertEqual(failed.exception.code, 424)
+        self.assertEqual(failed.exception.headers["x-should-retry"], "false")
+        failed.exception.close()
+        self.assertEqual(requests, ["/v1/chat/completions"])
+
+    def test_kindi_dropped_after_headers_is_a_plain_failure(self):
+        """A Kindi that sends chunked headers and then drops the connection is
+        answered with a 502, not a handler crash that closes the socket."""
+        requests = []
+
+        class DroppingKindi(Quiet):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_RDWR)
+
+        backend = serve(DroppingKindi)
+        self.addCleanup(backend.server_close)
+        self.addCleanup(backend.shutdown)
+        kindi = f"kindi+http://127.0.0.1:{backend.server_port}"
+        direct.Handler.dispatcher = direct.Dispatcher(
+            f"http://127.0.0.1:{self.router.server_port}", "router-secret",
+            targets={"kindi-a": kindi})
+        with self.assertRaises(HTTPError) as failed:
+            self.chat("kindi-a", {"model": "tool-model", "messages": [], "stream": True})
+        self.assertEqual(failed.exception.code, 502)
+        self.assertIn("IncompleteRead", json.load(failed.exception)["error"]["message"])
+        failed.exception.close()
+        self.assertEqual(requests, ["/v1/chat/completions"])
+
+    def test_kindi_busy_after_no_reply_gets_nothing_until_idle(self):
+        """After a request got no reply, nothing more is sent to that Kindi
+        while its /health shows work in progress: those requests get a
+        retryable 503. Once it is idle, requests go through again."""
+        requests, state = [], {"silent": True, "busy": {"phase": "prompt"}}
+
+        class Kindi(Quiet):
+            def do_GET(self):
+                self.reply(200, {"ok": True, "kindi": "0.4.0", "busy": state["busy"]})
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append(self.path)
+                if state["silent"]:
+                    time.sleep(0.8)
+                    return
+                self.reply(200, {"model": "tool-model", "choices": []})
+
+            def reply(self, status, payload):
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        backend = serve(Kindi)
+        self.addCleanup(backend.server_close)
+        self.addCleanup(backend.shutdown)
+        kindi = f"kindi+http://127.0.0.1:{backend.server_port}"
+        direct.Handler.dispatcher = direct.Dispatcher(
+            f"http://127.0.0.1:{self.router.server_port}", "router-secret",
+            targets={"kindi-a": kindi})
+        with mock.patch.object(direct, "KINDI_READ_TIMEOUT", 0.2), \
+                mock.patch.object(direct, "READ_TIMEOUT", 0.1):
+            with self.assertRaises(HTTPError) as failed:
+                self.chat("kindi-a", {"model": "tool-model", "messages": []})
+            self.assertEqual(failed.exception.code, 424)
+            failed.exception.close()
+            state["silent"] = False
+            with self.assertRaises(HTTPError) as failed:
+                self.chat("kindi-a", {"model": "tool-model", "messages": []})
+            self.assertEqual(failed.exception.code, 503)
+            self.assertEqual(failed.exception.headers["Retry-After"], "15")
+            self.assertEqual(json.load(failed.exception)["error"]["type"], "kindi_busy")
+            failed.exception.close()
+            self.assertEqual(requests, ["/v1/chat/completions"])
+            state["busy"] = None
+            direct.Handler.dispatcher._kindi_draining[kindi] = (float("-inf"), True)
+            _, data = self.chat("kindi-a", {"model": "tool-model", "messages": []})
+        self.assertEqual(data["model"], "tool-model")
+        self.assertEqual(requests, ["/v1/chat/completions"] * 2)
+        self.assertNotIn(kindi, direct.Handler.dispatcher._kindi_draining)
+
+    def test_kindi_draining_needs_a_confirmed_idle_health(self):
+        dispatcher = direct.Dispatcher("http://127.0.0.1:1", "router-secret")
+        kindi = "kindi+http://127.0.0.1:1"
+        dispatcher._kindi_draining[kindi] = (time.monotonic() - 3600, True)
+        with mock.patch.object(direct, "request_json", side_effect=[
+                {"busy": {"phase": "prompt"}}, OSError("probe failed"),
+                http.client.BadStatusLine("broken health reply"), {}, {"busy": None}]):
+            for _ in range(4):
+                self.assertTrue(dispatcher.kindi_busy(kindi))
+                dispatcher._kindi_draining[kindi] = (float("-inf"), True)
+            self.assertFalse(dispatcher.kindi_busy(kindi))
+        self.assertNotIn(kindi, dispatcher._kindi_draining)
+
+    def test_kindi_newer_busy_request_keeps_gate_closed(self):
+        """A newer request may run while the unanswered one is still queued."""
+        dispatcher = direct.Dispatcher("http://127.0.0.1:1", "router-secret")
+        kindi = "kindi+http://127.0.0.1:1"
+        clock = [1000.0]
+        responses = iter([{"busy": {"phase": "prompt", "elapsed_s": 3}},
+                          {"busy": {"phase": "prompt", "elapsed_s": 1}},
+                          {"busy": None}])
+        with mock.patch.object(direct.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(direct, "request_json", side_effect=lambda *a, **kw: next(responses)):
+            dispatcher.mark_kindi_draining(kindi)
+            clock[0] += 600  # ten minutes after the hang-up
+            self.assertTrue(dispatcher.kindi_busy(kindi))
+            clock[0] += direct.KINDI_HEALTH_CACHE_SECONDS
+            self.assertTrue(dispatcher.kindi_busy(kindi))
+            clock[0] += direct.KINDI_HEALTH_CACHE_SECONDS
+            self.assertFalse(dispatcher.kindi_busy(kindi))
+        self.assertNotIn(kindi, dispatcher._kindi_draining)
+
+    def test_kindi_connect_failure_keeps_retryable_status(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            dead = f"kindi+http://127.0.0.1:{probe.getsockname()[1]}"
+        direct.Handler.dispatcher = direct.Dispatcher(
+            f"http://127.0.0.1:{self.router.server_port}", "router-secret",
+            targets={"kindi-a": dead})
+        with self.assertRaises(HTTPError) as failed:
+            self.chat("kindi-a", {"model": "tool-model", "messages": []})
+        self.assertEqual(failed.exception.code, 502)
+        self.assertIsNone(failed.exception.headers.get("x-should-retry"))
+        failed.exception.close()
+
+    def test_connect_timeout_is_distinct_from_post_timeout(self):
+        self.assertFalse(direct.uncertain_kindi_timeout(
+            URLError(direct.BackendConnectTimeout("connect timed out"))))
+        self.assertTrue(direct.uncertain_kindi_timeout(URLError(TimeoutError("read timed out"))))
 
     def test_a_backend_error_is_passed_on(self):
         Backend.errors = {self.backend.server_port: (404, b'{"error":"no such model"}')}

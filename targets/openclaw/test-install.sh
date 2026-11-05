@@ -75,7 +75,7 @@ pass 'invalid endpoint, model, context, output budget, versions, Node lines, por
 # shellcheck disable=SC1090
 source <(awk '/^# Install helpers/{c=1;next} /^# End install helpers\./{c=0} c' "$script")
 for helper in settings_record env_file_update env_file_get models_has chat_probe_body error_message \
-              version_of node_supported node_spec_matches exact_version origins_json providers_json \
+              version_of node_supported node_spec_matches exact_version origins_json providers_json kindi_target_names \
               provider_ids provider_entry; do
   declare -F "$helper" >/dev/null || fail "helper extraction failed: $helper"
 done
@@ -121,7 +121,20 @@ PY
 [[ $(provider_entry strata-a <<< "$providers") == *'"baseUrl":"http://127.0.0.1:8765/t/strata-a/v1"'* ]] || fail provider_entry
 printf '{"data":[]}' > "$tmp_root/empty.json"
 [[ $(providers_json 65536 8192 http://127.0.0.1:8765 - "osr=$tmp_root/empty.json") == '{}' ]] || fail 'a provider without models'
-pass 'providers: osr first lists auto, each target its own server, a server that is down keeps its last models'
+python3 -c 'import json,sys; p=json.loads(sys.argv[1]); assert not any("timeoutSeconds" in v for v in p.values())' "$providers" ||
+  fail 'a pool without Kindi changed the providers'"'"' timeouts'
+printf 'strata-a=strata+http://10.0.0.9:8080\nkindi-k=kindi+http://10.0.0.14:8093\n' > "$tmp_root/targets"
+[[ $(kindi_target_names "$tmp_root/targets") == kindi-k ]] || fail kindi_target_names
+printf '{"data":[{"id":"bonsai2-2b","owned_by":"kindi-k"}]}' > "$tmp_root/kindi.json"
+providers=$(KINDI_TARGETS=kindi-k KINDI_CLIENT_TIMEOUT_SECONDS=9000 providers_json 65536 8192 http://127.0.0.1:8765 - \
+  "osr=$tmp_root/osr.json" "strata-a=$tmp_root/strata.json" "kindi-k=$tmp_root/kindi.json")
+python3 - "$providers" <<'PY' || fail "Kindi providers_json: $providers"
+import json, sys
+p = json.loads(sys.argv[1])
+assert p["kindi-k"]["timeoutSeconds"] == 9000 and p["osr"]["timeoutSeconds"] == 9000
+assert "timeoutSeconds" not in p["strata-a"]
+PY
+pass 'providers: osr first lists auto, each target its own server, a server that is down keeps its last models; Kindi and osr (with Kindi) wait an hour'
 
 # settings_record reads these globals.
 # shellcheck disable=SC2034
@@ -635,6 +648,21 @@ printf 'osr=http://x:1\n' > "$deploy/targets"
 out=$(guest) && fail 'a target named osr was accepted'
 rm -f "$deploy/targets"
 pass 'direct targets: a provider per model server, kept through an outage, removed with the server'
+
+# 16b. A Kindi target: it and osr get a deadline for a silent read and a full reply.
+reset_tree; push_key
+printf 'kindi-192-168-11-14-8093=kindi+http://192.168.11.14:8093\n' > "$deploy/targets"
+out=$(guest KINDI_READ_TIMEOUT_SECONDS=5400 OPENCLAW_MAX_TOKENS=4096) || fail "install with a Kindi target: $out"
+want=$((5400 * 2 + 4096))
+for name in osr kindi-192-168-11-14-8093; do
+  [[ $(kv "models.providers.$name" "$config") == *"\"timeoutSeconds\":$want"* ]] ||
+    fail "Kindi deadline on $name: $(kv "models.providers.$name" "$config")"
+done
+grep -qx 'KINDI_READ_TIMEOUT_SECONDS=5400' "$etc/settings" || fail 'the dispatcher budget is not in the settings record'
+out=$(guest KINDI_READ_TIMEOUT_SECONDS=0) && fail "an invalid Kindi budget was accepted: $out"
+[[ $out == *'Invalid KINDI_READ_TIMEOUT_SECONDS'* ]] || fail "invalid budget message: $out"
+rm -f "$deploy/targets"
+pass 'a Kindi target: it and osr allow a silent read of twice the budget plus a reply at one token a second'
 
 # 17. An agents.defaults.model set as a string becomes the object form.
 reset_tree; push_key

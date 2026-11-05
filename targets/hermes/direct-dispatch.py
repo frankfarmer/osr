@@ -28,6 +28,7 @@ KEY_NAMES = {
     "maya": "MAYA_API_KEY",
     "xolotl": "XOLOTL_API_KEY",
     "avalon": "AVALON_API_KEY",
+    "kindi": "KINDI_API_KEY",
 }
 PREFIXES = {kind: kind + "+" for kind in KEY_NAMES}
 MAX_BODY = 64 * 1024 * 1024
@@ -38,7 +39,16 @@ TOOL_REJECTION = re.compile(rb"(does not support tools|tool calling.{0,30}not su
 # otherwise hold every request for the kernel's SYN retries (about 2 minutes).
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 300
+KINDI_READ_TIMEOUT = max(READ_TIMEOUT, int(os.getenv("KINDI_READ_TIMEOUT_SECONDS", "3600")))
 SKIP_SECONDS = 60
+# After a Kindi request got no reply, this dispatcher hung up and Kindi stops
+# it at its next prompt batch or token. Until Kindi's /health confirms it is
+# idle, no new request is sent to it, so nothing queues behind the abandoned
+# one; callers get a retryable 503. A newer busy request does not prove the
+# unanswered one has finished: it could still be waiting in Kindi's queue.
+KINDI_HEALTH_CACHE_SECONDS = 5
+
+
 # A direct target: one model server, picked in Hermes as provider custom:<name>
 # and served under /t/<name>/v1. Names come from the router's inventory.
 TARGET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
@@ -93,9 +103,17 @@ class _ConnectTimeout:
         read_timeout, self.timeout = self.timeout, CONNECT_TIMEOUT
         try:
             super().connect()
+        except TimeoutError as exc:
+            # A failed connect cannot have queued a prompt. Keep it
+            # distinct from a timeout after the request was sent.
+            raise BackendConnectTimeout(str(exc)) from exc
         finally:
             self.timeout = read_timeout
         self.sock.settimeout(read_timeout)
+
+
+class BackendConnectTimeout(TimeoutError):
+    """The backend did not accept a connection before CONNECT_TIMEOUT."""
 
 
 class _HTTPConnection(_ConnectTimeout, http.client.HTTPConnection):
@@ -128,6 +146,12 @@ def request_json(url, key, body=None, timeout=10):
     data = None if body is None else json.dumps(body).encode()
     with urlopen(Request(url, data=data, headers=headers), timeout=timeout) as response:
         return json.load(response)
+
+
+def uncertain_kindi_timeout(exc):
+    """A timeout after connecting may mean Kindi is still running the POST."""
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    return isinstance(reason, TimeoutError) and not isinstance(reason, BackendConnectTimeout)
 
 
 class Candidates(list):
@@ -184,15 +208,18 @@ class Dispatcher:
         self.backend_keys = backend_keys or {}
         self._inventory = None
         self._inventory_time = 0
+        self._kindi_drift_logged = None
+        self._kindi_budget_tried = -60.0
         self._sessions = {}
         self._failed = {}
+        self._kindi_draining = {}
         self._lock = threading.Lock()
 
-    def inventory(self):
+    def inventory(self, timeout=10):
         with self._lock:
             if self._inventory is not None and time.monotonic() - self._inventory_time < 5:
                 return self._inventory
-        data = request_json(self.router_url + "/routing/inventory", self.router_key)
+        data = request_json(self.router_url + "/routing/inventory", self.router_key, timeout=timeout)
         if not data.get("enabled") or not isinstance(data.get("models"), list):
             raise ValueError("router model discovery is disabled")
         registered = set(data.get("servers") or [])
@@ -224,6 +251,43 @@ class Dispatcher:
     def mark_ok(self, server):
         with self._lock:
             self._failed.pop(server, None)
+
+    def mark_kindi_draining(self, server):
+        """A request to this Kindi server got no reply: it may still be busy."""
+        self.mark_failed(server)
+        with self._lock:
+            self._kindi_draining[server] = (float("-inf"), True)
+
+    def kindi_busy(self, server):
+        """True while a Kindi server that left a request unanswered still
+        reports work in progress on /health (checked at most every 5 s)."""
+        now = time.monotonic()
+        with self._lock:
+            state = self._kindi_draining.get(server)
+            if state is None:
+                return False
+            checked, busy = state
+            if now - checked < KINDI_HEALTH_CACHE_SECONDS:
+                return busy
+        try:
+            health = request_json(server_parts(server)[1] + "/health", "", timeout=2)
+            if not isinstance(health, dict) or "busy" not in health:
+                raise ValueError("Kindi health response has no busy field")
+            busy = health["busy"] is not None and health["busy"] is not False
+        except (http.client.HTTPException, OSError, ValueError, TypeError, AttributeError) as exc:
+            LOG.warning("cannot confirm Kindi %s is idle (%s)", server, exc)
+            busy = True
+        with self._lock:
+            # A newer unanswered POST may have been recorded while the probe
+            # was in flight; do not clear its drain state.
+            current = self._kindi_draining.get(server)
+            if current is not state:
+                return current[1] if current is not None else False
+            if busy:
+                self._kindi_draining[server] = (now, True)
+            else:
+                self._kindi_draining.pop(server, None)
+        return busy
 
     def _live(self, entries):
         """The entries whose server has not failed in the last SKIP_SECONDS."""
@@ -361,7 +425,41 @@ class Dispatcher:
         payload = dict(body, model=entry["name"])
         return BACKEND.open(Request(base + "/v1/chat/completions",
                                     data=json.dumps(payload).encode(), headers=headers),
-                            timeout=READ_TIMEOUT)
+                            timeout=self.kindi_timeout() if kind == "kindi" else READ_TIMEOUT)
+
+    def kindi_timeout(self):
+        """The read timeout for Kindi: KINDI_READ_TIMEOUT, the router's budget
+        when this CT was last reconfigured, or the router's current budget when
+        that is lower. A higher one is not used, because this CT's callers
+        (Hermes, OpenClaw, Honcho) were given limits that outlast
+        KINDI_READ_TIMEOUT, and the dispatcher must give up first; it is
+        logged once, with the fix. A direct target never waits for the router:
+        it uses the last inventory while a background refresh runs at most
+        once a minute."""
+        with self._lock:
+            now = time.monotonic()
+            data = self._inventory
+            fetch = now - self._kindi_budget_tried >= 60
+            if fetch:
+                self._kindi_budget_tried = now
+        if fetch:
+            threading.Thread(target=self._refresh_kindi_budget, daemon=True).start()
+        live = data.get("kindi_read_timeout_seconds") if isinstance(data, dict) else None
+        if isinstance(live, bool) or not isinstance(live, (int, float)) or live <= 0:
+            return KINDI_READ_TIMEOUT
+        if live > KINDI_READ_TIMEOUT and live != self._kindi_drift_logged:
+            self._kindi_drift_logged = live
+            LOG.warning("the router now allows Kindi %ss of silence, but this CT was configured for %ss; "
+                        "run its provision-lxc.sh --reconfigure to raise its limits",
+                        int(live), int(KINDI_READ_TIMEOUT))
+        return max(READ_TIMEOUT, min(KINDI_READ_TIMEOUT, live))
+
+    def _refresh_kindi_budget(self):
+        """Refresh router state without holding up a direct model request."""
+        try:
+            self.inventory(timeout=2)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -376,20 +474,40 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         LOG.info("%s %s", self.client_address[0], fmt % args)
 
-    def json_response(self, status, payload, close=False):
+    def json_response(self, status, payload, close=False, headers=None):
         data = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         if close:
             self.send_header("Connection", "close")
             self.close_connection = True
         self.end_headers()
         self.wfile.write(data)
 
-    def error(self, status, message):
+    def error(self, status, message, *, kind="server_error", headers=None):
         # The request body may be unread, so the connection is not reused.
-        self.json_response(status, {"error": {"message": message, "type": "server_error"}}, close=True)
+        self.json_response(status, {"error": {"message": message, "type": kind}},
+                           close=True, headers=headers)
+
+    def no_answer(self, prefix):
+        """The response when no candidate answered. A Kindi request that got
+        no reply may still be running there, so it is reported as 424 with
+        x-should-retry: false: a retry would queue behind it, and an SDK
+        retries a 5xx. The message avoids the words clients match as a
+        timeout. While such a Kindi is still busy, its 503 is retryable,
+        since nothing was sent to it. A failed connection stays a 502."""
+        if self.uncertain_kindi_timeout:
+            self.error(424, prefix + " No complete reply arrived within the read budget; the request "
+                       "was not sent again, because Kindi may still be working on it.",
+                       kind="upstream_no_reply", headers={"x-should-retry": "false"})
+        elif self.kindi_busy_seen:
+            self.error(503, prefix + " " + self.last_error, kind="kindi_busy",
+                       headers={"Retry-After": "15"})
+        else:
+            self.error(502, prefix + " " + self.last_error)
 
     def direct_target(self):
         """(name, server, rest of the path) for /t/<name>/..., else None."""
@@ -453,9 +571,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.last_error = ""
         if not self.relay(body, Candidates([{"server": server, "name": model}]), set(), final=True):
-            self.error(502, f"Direct target {name} did not answer. " + self.last_error)
+            self.no_answer(f"Direct target {name} did not answer.")
 
     def do_POST(self):
+        self.uncertain_kindi_timeout = False
+        self.kindi_busy_seen = False
         target = self.direct_target()
         if target:
             name, server, rest = target
@@ -494,7 +614,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.last_error += f"; could not rank a fallback: {exc}"
             if rest and self.relay(body, rest, tried, final=True):
                 return
-        self.error(502, "No model server answered directly. " + self.last_error)
+        self.no_answer("No model server answered directly.")
 
     def relay(self, body, candidates, tried, final):
         """Try candidates in order; True once a response was sent. With final
@@ -503,6 +623,12 @@ class Handler(BaseHTTPRequestHandler):
         for index, entry in enumerate(candidates):
             last = final and index == len(candidates) - 1
             tried.add((entry["server"], entry["name"]))
+            is_kindi = server_parts(entry["server"])[0] == "kindi"
+            if is_kindi and self.dispatcher.kindi_busy(entry["server"]):
+                self.last_error = (f"{entry['name']} at {entry['server']} is still busy after an earlier "
+                                   "request got no reply; nothing was sent to it")
+                self.kindi_busy_seen = True
+                continue
             try:
                 upstream = self.dispatcher.open_backend(entry, body)
             except HTTPError as exc:
@@ -514,6 +640,11 @@ class Handler(BaseHTTPRequestHandler):
                     if not last:
                         continue
                 if exc.code in (404, 429, 500, 502, 503, 504) and not last:
+                    continue
+                if self.uncertain_kindi_timeout and (exc.code in (408, 409, 429) or
+                                                     500 <= exc.code < 600):
+                    # A retryable last-candidate error must not hide an
+                    # earlier Kindi POST that may still be running.
                     continue
                 self.send_response(exc.code)
                 self.send_header("Content-Type", exc.headers.get("Content-Type", "application/json"))
@@ -531,19 +662,47 @@ class Handler(BaseHTTPRequestHandler):
                 # unreachable from this CT (URLError and TimeoutError are
                 # OSErrors; HTTPError, an answer, was handled above).
                 self.last_error = f"{entry['name']} at {entry['server']}: {exc}"
+                if is_kindi and uncertain_kindi_timeout(exc):
+                    self.uncertain_kindi_timeout = True
+                    LOG.warning("Kindi %s sent no reply (%s); not sending it again", entry["server"], exc)
+                    self.dispatcher.mark_kindi_draining(entry["server"])
+                    continue
                 LOG.warning("model server %s is unreachable (%s); skipping it for %ss",
                             entry["server"], exc, SKIP_SECONDS)
                 self.dispatcher.mark_failed(entry["server"])
                 continue
             LOG.info("direct dispatch %s -> %s", entry["name"], entry["server"])
-            self.dispatcher.mark_ok(entry["server"])
             with upstream:
-                if self.stream(upstream, entry, body):
+                first_chunk = None
+                if is_kindi:
+                    # Kindi may send HTTP headers before it has produced a
+                    # token. Buffer a non-streaming reply completely before
+                    # committing our status; for an SSE reply wait for its
+                    # first chunk. A silent backend can then be reported as
+                    # unanswered, and a dropped one can fail over.
+                    try:
+                        first_chunk = (upstream.read1(65536) if body.get("stream") is True
+                                       else upstream.read())
+                    except TimeoutError as exc:
+                        self.last_error = f"{entry['name']} at {entry['server']}: {exc}"
+                        self.uncertain_kindi_timeout = True
+                        LOG.warning("Kindi %s sent headers but no reply (%s); not sending it again",
+                                    entry["server"], exc)
+                        self.dispatcher.mark_kindi_draining(entry["server"])
+                        continue
+                    except (http.client.HTTPException, OSError) as exc:
+                        self.last_error = f"{entry['name']} at {entry['server']}: {exc!r}"
+                        LOG.warning("model server %s dropped its response (%r); skipping it for %ss",
+                                    entry["server"], exc, SKIP_SECONDS)
+                        self.dispatcher.mark_failed(entry["server"])
+                        continue
+                self.dispatcher.mark_ok(entry["server"])
+                if self.stream(upstream, entry, body, first_chunk=first_chunk):
                     self.dispatcher.record_success(body, entry)
             return True
         return False
 
-    def stream(self, upstream, entry, body):
+    def stream(self, upstream, entry, body, first_chunk=None):
         """Relay a backend response as chunked HTTP/1.1. True if the backend
         finished cleanly and the client received the whole response."""
         streaming = body.get("stream") is True
@@ -564,12 +723,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         while True:
-            try:
-                chunk = upstream.read1(65536)
-            except (http.client.HTTPException, OSError) as exc:
-                LOG.warning("model server %s dropped its response (%s); skipping it for %ss",
-                            entry["server"], exc, SKIP_SECONDS)
-                break
+            if first_chunk is not None:
+                chunk, first_chunk = first_chunk, None
+            else:
+                try:
+                    chunk = upstream.read1(65536)
+                except (http.client.HTTPException, OSError) as exc:
+                    LOG.warning("model server %s dropped its response (%s); skipping it for %ss",
+                                entry["server"], exc, SKIP_SECONDS)
+                    if (server_parts(entry["server"])[0] == "kindi" and
+                            isinstance(exc, TimeoutError)):
+                        self.dispatcher.mark_kindi_draining(entry["server"])
+                    break
             if not chunk:
                 # read1() returns EOF quietly for a body shorter than its
                 # Content-Length; the length left says so.

@@ -152,6 +152,8 @@ SERVER_KINDS = {
                "label": "Xolotl", "openai": True},
     "avalon": {"prefix": "avalon+", "key_env": "AVALON_API_KEY",
                "label": "Avalon", "openai": True},
+    "kindi": {"prefix": "kindi+", "key_env": "KINDI_API_KEY",
+              "label": "Kindi", "openai": True},
 }
 KIND_KEYS = {kind: (os.getenv(spec["key_env"]) or "").strip()
              for kind, spec in SERVER_KINDS.items()}

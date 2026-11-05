@@ -104,6 +104,7 @@ settings_record() {
   printf 'HERMES_API_PORT=%s\n' "$HERMES_API_PORT"
   printf 'HERMES_API_MODEL_NAME=%s\n' "$HERMES_API_MODEL_NAME"
   printf 'HERMES_DASHBOARD=%s\n' "$HERMES_DASHBOARD"
+  printf 'KINDI_READ_TIMEOUT_SECONDS=%s\n' "${KINDI_READ_TIMEOUT_SECONDS:-3600}"
   printf 'HONCHO_URL=%s\nHONCHO_KEY_SHA256=%s\n' "$HONCHO_URL" "$honcho_key_sha256"
   printf 'ROUTER_KEY_SHA256=%s\n' "$router_key_sha256"
   printf 'BACKEND_KEYS_SHA256=%s\n' "$backend_keys_sha256"
@@ -237,9 +238,19 @@ BACKEND_KEYS_FILE=${BACKEND_KEYS_FILE:-$source_dir/backend-keys}
 TARGETS_FILE=${TARGETS_FILE:-$source_dir/targets}
 # target_names FILE: the direct target names in a targets file.
 target_names() { [[ -f $1 ]] && cut -d= -f1 "$1" || true; }
+kindi_target_names() { [[ -f $1 ]] && awk -F= '$2 ~ /^kindi[+]/ {print $1}' "$1" || true; }
 # This run's targets: the pushed file, else the installed one.
 targets_source=$TARGETS_FILE
 [[ -f $targets_source ]] || targets_source=$HERMES_ETC/targets
+KINDI_READ_TIMEOUT_SECONDS=${KINDI_READ_TIMEOUT_SECONDS:-3600}
+[[ $KINDI_READ_TIMEOUT_SECONDS =~ ^[1-9][0-9]{0,5}$ ]] || die 'Invalid KINDI_READ_TIMEOUT_SECONDS.'
+# Hermes's limits for Kindi-facing providers. Its non-streaming stale watchdog
+# runs from the start of a call without resetting on progress, so it is a
+# deadline for the whole reply: twice the dispatcher's silent-read budget plus
+# an 8192-token reply at one token a second.
+KINDI_CLIENT_TIMEOUT_SECONDS=$((KINDI_READ_TIMEOUT_SECONDS * 2 + 8192))
+kindi_targets="$(kindi_target_names "$targets_source" | paste -sd' ' -)"
+previous_kindi_targets="$(kindi_target_names "$HERMES_ETC/targets" | paste -sd' ' -)"
 
 if [[ -z $ROUTER_URL && ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
   IFS= read -r -p 'Router base URL (http(s)://router-address:port): ' ROUTER_URL ||
@@ -609,6 +620,13 @@ set_provider() {
   run_hermes config set "providers.$1.api_key" no-key
   run_hermes config set "providers.$1.transport" chat_completions
   run_hermes config set "providers.$1.context_length" "$HERMES_CONTEXT_LENGTH"
+  if [[ $1 == osr && -n $kindi_targets || " $kindi_targets " == *" $1 "* ]]; then
+    run_hermes config set "providers.$1.request_timeout_seconds" "$KINDI_CLIENT_TIMEOUT_SECONDS"
+    run_hermes config set "providers.$1.stale_timeout_seconds" "$KINDI_CLIENT_TIMEOUT_SECONDS"
+  elif [[ $1 == osr && -n $previous_kindi_targets || " $previous_kindi_targets " == *" $1 "* ]]; then
+    run_hermes config unset "providers.$1.request_timeout_seconds" || true
+    run_hermes config unset "providers.$1.stale_timeout_seconds" || true
+  fi
 }
 set_provider osr "$DIRECT_URL/v1"
 run_hermes config set providers.osr.default_model "$HERMES_MODEL"
@@ -678,6 +696,14 @@ else
   ENV_UNSET_API_SERVER_ENABLED=1 ENV_UNSET_API_SERVER_HOST=1 ENV_UNSET_API_SERVER_PORT=1 \
   ENV_UNSET_API_SERVER_MODEL_NAME=1 ENV_UNSET_API_SERVER_KEY=1 \
   ENV_UNSET_IF_OPENAI_API_KEY=no-key \
+    env_file_update "$HERMES_HOME/.env"
+fi
+if [[ -n $kindi_targets ]]; then
+  ENV_SET_HERMES_STREAM_READ_TIMEOUT=$KINDI_CLIENT_TIMEOUT_SECONDS \
+  ENV_SET_HERMES_LOCAL_STREAM_STALE_TIMEOUT=$KINDI_CLIENT_TIMEOUT_SECONDS \
+    env_file_update "$HERMES_HOME/.env"
+elif [[ -n $previous_kindi_targets ]]; then
+  ENV_UNSET_HERMES_STREAM_READ_TIMEOUT=1 ENV_UNSET_HERMES_LOCAL_STREAM_STALE_TIMEOUT=1 \
     env_file_update "$HERMES_HOME/.env"
 fi
 if [[ $HERMES_DASHBOARD == true &&

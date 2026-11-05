@@ -39,6 +39,7 @@ flowchart LR
         o1["Ollama / llama.cpp bridge / AirLLM<br/>:11434"]
         o2["LM Studio<br/>:1234"]
         o3["Strata / Basalt / Maya / Xolotl / Avalon<br/>:8080"]
+        o4["Kindi<br/>:8093"]
     end
     term["Open Terminal LXC<br/>:8000"]
     hermes["Hermes Agent LXC<br/>API server :8642"]
@@ -76,7 +77,7 @@ flowchart LR
 
 | Dependency | Criticality | If unavailable |
 |---|---|---|
-| Model hosts (`:11434`, `:1234`, `:8080`) | **Critical** | Fail forward to other hosts; all down → 502 |
+| Model hosts (`:11434`, `:1234`, `:8080`, `:8093`) | **Critical** | Fail forward to other hosts; all down → 502 |
 | Gitea (HTTP(S)) | Provisioning only | Install falls back to local config; running system unaffected |
 | Mattermost (webhook) | Optional | Alerts logged and retried |
 | Open Terminal (`:8000`) | Optional | Terminal tool unavailable; chat unaffected |
@@ -140,7 +141,7 @@ FastAPI/uvicorn on `:8000`; the only component that makes routing decisions.
 |---|---|
 | `POST /v1/chat/completions` | Classify, select, dispatch |
 | `GET /v1/models` | `auto`, tier aliases and discovered chat models (`owned_by` = server kind) |
-| `GET /routing/inventory` / `POST /routing/refresh` | Live inventory with per-host state; force a re-poll |
+| `GET /routing/inventory` / `POST /routing/refresh` | Live inventory with per-host state and the Kindi read budget (`kindi_read_timeout_seconds`, which the tool targets' dispatchers follow when it is lower than theirs); force a re-poll |
 | `POST /routing/explain` | Decision and scored candidates, without executing |
 | `GET /healthz` | Process liveness (never needs the key) |
 | `ANY /v1/{path}` | Passthrough to LiteLLM (embeddings, etc.) |
@@ -186,7 +187,7 @@ own venv (§7). The version is pinned in
 No listener. Every `interval_seconds` (15) it probes each distinct host in
 `MODEL_SERVERS`/`BACKEND_*` once, labelling alerts with that host's tiers:
 Ollama on `/api/tags`, other kinds on `/v1/models` with their token.
-Strata-style servers (Strata, Basalt, Maya, Xolotl, Avalon) also count as down while
+Strata-style servers (Strata, Basalt, Maya, Xolotl, Avalon, Kindi) also count as down while
 that list is empty, and a rejected
 token counts as down. It also probes LiteLLM, the router's `/healthz` and Open
 WebUI's `/health`. A state change needs `fail_threshold` (3) or
@@ -243,7 +244,7 @@ to lack tools gets `X-Router-Warning: no-tool-model`, or a 400
 | **Residency** | `+loaded_bonus` for models reported loaded (LM Studio and Strata-style servers); `lmstudio_loaded_only` excludes cold LM Studio models |
 | **Unknown size** | `unknown_params` (0.3): usable, never preferred |
 | **Embeddings** | Structurally excluded; naming one on the chat endpoint is a 400 |
-| **Tools** | On a tool request, models known to lack tools are excluded (kept only if nothing else is left); `+tool_match` for a model reported tool-capable over an unknown one. Support is known from Ollama's `/api/show` capabilities (also the llama.cpp bridge's `MODEL_CAPABILITIES` and AirLLM) LM Studio's `trained_for_tool_use`, and `tool_kinds` in `router.ini` for the `/v1/models` kinds (Strata, Basalt, Maya, Xolotl and Avalon by default; their text models are reported capable, an image generator is not). Untrained LM Studio models and a kind left out of `tool_kinds` are unknown. Shown per entry as `tools` in `/routing/inventory` |
+| **Tools** | On a tool request, models known to lack tools are excluded (kept only if nothing else is left); `+tool_match` for a model reported tool-capable over an unknown one. Support is known from Ollama's `/api/show` capabilities (also the llama.cpp bridge's `MODEL_CAPABILITIES` and AirLLM) LM Studio's `trained_for_tool_use`, and `tool_kinds` in `router.ini` for the `/v1/models` kinds (Strata, Basalt, Maya, Xolotl, Avalon and Kindi by default; their text models are reported capable, an image generator is not). Untrained LM Studio models and a kind left out of `tool_kinds` are unknown. Shown per entry as `tools` in `/routing/inventory` |
 | **Context length** | Recorded in `/routing/inventory`, not scored. Ollama uses the smaller of the model limit and configured `num_ctx`; the llama.cpp bridge reports active per-slot context, AirLLM its window, the `/v1/models` kinds `context_length`, `max_model_len`, `context_window` or else the served `meta.n_ctx`, and other APIs their reported limit. Ollama's `/api/show` is cached for 60 s, retaining the last good answer after a failed poll. The value can still overstate served context; Hermes uses it (§17.1) |
 | **Tie rotation** | Candidates within `tie_epsilon` of the best rotate, spreading load. For a tool request only the same model on several hosts rotates, so an agent loop keeps one model (and its prompt cache) |
 
@@ -268,6 +269,29 @@ candidate is passed through as-is.
 
 `[http] connect_timeout_seconds` (3) bounds how long a dead host delays
 failover; `read_timeout_seconds` (300) bounds the gap between bytes.
+`kindi_read_timeout_seconds` (3600, never below `read_timeout_seconds`) applies
+to Kindi servers instead, because Kindi serves one request at a time and can
+spend minutes reading a long prompt. The LiteLLM hop gets it when the
+requested tier contains Kindi. In `litellm_config.yaml` each Kindi deployment's
+`timeout` follows `router.ini` (regenerating the model list, and `apply`, keep
+it in step); other backends keep the router-wide 600. Every tier with a Kindi
+deployment gets a `model_group_retry_policy`: no retry after a timeout, one
+after a 429. LiteLLM 1.75 does not read `InternalServerErrorRetries`, so the
+router caps every other error for those tiers at one retry with
+`x-litellm-num-retries: 1`. Other tiers keep their configured retry counts. A
+tier with Kindi is a fallback only for another Kindi tier on other Kindi
+servers: a request for a tier without Kindi gets the router's 300 seconds, and
+a fallback to the same Kindi server would queue behind the request it is still
+reading. A Kindi request that was sent but got no reply in that budget is not
+replayed by the router or direct dispatcher. The router (and, for Hermes,
+OpenClaw and Honcho, their dispatchers) answers 424 with
+`x-should-retry: false`, and turns LiteLLM's 408
+into the same for a Kindi tier. On direct paths, the router and dispatchers
+  send that Kindi nothing until its `/health` confirms it is idle; a failed
+  health probe keeps it gated. A newer busy request is insufficient evidence
+  because the unanswered request could still be queued. Callers get a retryable
+  503 meanwhile, and a new request can proceed once Kindi reports idle
+(targets/kindi/README.md).
 
 ---
 
@@ -381,7 +405,7 @@ service account before building its venv.
 | 8000 | Smart Router | `0.0.0.0` | LAN API |
 | 8080 | Open WebUI | `0.0.0.0` | LAN UI (port chosen at install) |
 | 4000 | LiteLLM | `127.0.0.1` | CT-local only |
-| 11434 / 1234 / 8080 | Model hosts | outbound | Router, LiteLLM, monitor → pool |
+| 11434 / 1234 / 8080 / 8093 | Model hosts | outbound | Router, LiteLLM, monitor → pool |
 | 8000 | Open Terminal CT | outbound | Open WebUI → terminal |
 | 8642 / 8765 | Hermes CT API / local dispatcher | `0.0.0.0` / `127.0.0.1` in its CT | Open WebUI → Hermes; dispatcher → router metadata and model servers |
 | 18789 / 8765 | OpenClaw CT Gateway (API, Control UI) / local dispatcher | `0.0.0.0` (loopback without Open WebUI and Control UI) / `127.0.0.1` in its CT | Open WebUI → OpenClaw, browsers → Control UI; dispatcher as for Hermes |
@@ -412,7 +436,7 @@ registered model server endpoints, DNS and internet HTTP(S) (§17.1, §17.4).
 |---|---|---|
 | Gitea deploy token, Mattermost webhook | `/app/router/secrets.env` (0640 root:ollama-router) | Never committed; moved out of `env/router.env` by `commit`/`apply` |
 | `ROUTER_API_KEY` (= Open WebUI `OPENAI_API_KEYS`) | `secrets.env` | Generated on new installs; `set-api-key` |
-| `LMSTUDIO_API_TOKEN`, `STRATA_API_KEY`, `BASALT_API_KEY`, `MAYA_API_KEY`, `XOLOTL_API_KEY`, `AVALON_API_KEY` | `secrets.env` | `set-<kind>-token`; sent only to that kind; LiteLLM reads `os.environ/...` |
+| `LMSTUDIO_API_TOKEN`, `STRATA_API_KEY`, `BASALT_API_KEY`, `MAYA_API_KEY`, `XOLOTL_API_KEY`, `AVALON_API_KEY`, `KINDI_API_KEY` | `secrets.env` | `set-<kind>-token`; sent only to that kind; LiteLLM reads `os.environ/...` |
 | Target API keys | `/etc/<target>-target/api-key` (0600) in each target CT; Xolotl's also in its server config `/etc/xolotl/xolotl-ds41.json` (0640 root:xolotl); Avalon's also in `/etc/avalon/api-key` (0640 root:avalon, read by llama-server's `--api-key-file`) | Generated in the CT; never in a unit, log or the router's process list |
 | Open Terminal key | `/etc/open-terminal/api-key`; Open WebUI connection settings | Generated in the terminal CT |
 | Hermes API server key | `/etc/hermes-target/api-key` (0600), `~hermes/.hermes/.env` (0600); Open WebUI connection settings | Generated in the Hermes CT |
@@ -529,6 +553,7 @@ URLs; other kinds are identified only by their prefix.
 | Maya | `maya+http://host:8080` | `/v1/models` | `openai/` | `MAYA_API_KEY` |
 | Xolotl | `xolotl+http://host:8080` | `/v1/models` | `openai/` | `XOLOTL_API_KEY` |
 | Avalon | `avalon+http://host:8080` | `/v1/models` | `openai/` | `AVALON_API_KEY` |
+| Kindi | `kindi+http://host:8093` | `/v1/models` | `openai/` | `KINDI_API_KEY` |
 
 ### 15.1 The kind table
 
@@ -549,7 +574,7 @@ The 0.4+ API gives `params_string`, `capabilities.vision` and
 `lmstudio_loaded_only` excludes cold ones. Keep-alive is not sent, because LM
 Studio uses its own idle TTL.
 
-### 15.3 Strata-style servers (Strata, Basalt, Maya, Xolotl, Avalon)
+### 15.3 Strata-style servers (Strata, Basalt, Maya, Xolotl, Avalon, Kindi)
 
 * **Discovery:** model ID, image support (`input_modalities` or
   `architecture.input_modalities`), residency (`status`), `parameter_size` if
@@ -566,7 +591,8 @@ Studio uses its own idle TTL.
   Strata key is never sent to it (or the other way round). Avalon is a
   llama-server, whose `/health` carries no marker: it is identified from
   `/v1/models` (`"owned_by": "llamacpp"` and an id containing `avalon`), which
-  answers without a key only when none is set.
+  answers without a key only when none is set. Kindi names itself and its
+  version on its public `/health` (`"kindi": "0.4.0"`).
   Strata also has older fingerprints. A keyed server that cannot identify
   itself is added as `kind://host`.
 * **Keep-alive** is never sent.
@@ -591,6 +617,7 @@ treats it as another host of its API kind. Every target provisioner offers
 | [Maya](targets/maya/README.md) | `maya`, :8080 | GLM-5.3-Flash; CUDA chosen for CT and card |
 | [Xolotl](targets/xolotl/README.md) | `xolotl`, :8080 | DeepSeek-V4.1-Flash; pinned weights |
 | [Avalon](targets/avalon/README.md) | `avalon`, :8080 | Qwen3.8-Flash-Next llama.cpp fork; ROCm (RDNA 3) or CUDA; pinned weights |
+| [Kindi](targets/kindi/README.md) | `kindi`, :8093 | Ternary-Bonsai-2 2B-27B (or Nanbeige 33B) on any NVIDIA card from Kepler, or the CPU; CUDA 10.2, CuPy 9.6, pinned weights |
 
 Target units use their own service accounts, limited writable paths and no
 capabilities. GPU nodes are group-accessible rather than root-owned.
@@ -598,13 +625,14 @@ Strata-style keys are generated inside the CT and stored outside unit files.
 The [README's distribution table](README.md#lxc-distribution-support) lists
 supported CT releases; GPU driver setup precedes CT creation. The installer
 asks each target that also runs on AMD Radeon or Intel Arc (Ollama, llama.cpp,
-Avalon, ComfyUI) which of the host's GPUs it gets (`tools/setup-host-gpu.sh --list`),
+Avalon, ComfyUI), and Kindi (meant for a spare old NVIDIA card), which of the host's GPUs it gets (`tools/setup-host-gpu.sh --list`),
 then checks or sets up the driver once per chosen card (`--card`) and once for
 the NVIDIA-only targets, so targets on one host can use different cards and
 vendors. Ollama and ComfyUI receive `GPU_CARD` and keep only that card's
 device nodes after their community scripts pass every card of the vendor;
 llama.cpp receives the card's nodes as `GPU_DEVICES`, and so does Avalon
-(`/dev/kfd` and the render node for ROCm, with `AVALON_BACKEND`).
+(`/dev/kfd` and the render node for ROCm, with `AVALON_BACKEND`), and so does
+Kindi (the card's NVIDIA nodes with `KINDI_BACKEND=cuda`, or `cpu` for none).
 `tools/update-gpu-drivers.sh` keeps those drivers current afterwards: it finds
 the GPU containers from their configs and offers the newest compatible NVIDIA
 release (checked against the cards' `supported-gpus.json` and test-built for
@@ -633,7 +661,7 @@ takes the rollback path; DeepSeek Harness and Honcho turn a signal into a
 failing exit for their EXIT-trap rollback. After a hangup the output goes to
 `/var/log/osr-install-interrupted.log` (`OSR_INTERRUPT_LOG`).
 
-Strata, Basalt, Maya, Xolotl and Avalon save the last good settings and use them on
+Strata, Basalt, Maya, Xolotl, Avalon and Kindi save the last good settings and use them on
 rerun unless non-empty environment overrides are given. An interrupted first
 install resumes its pending settings. Existing installations without a
 readable settings record require explicit values rather than fresh-install
@@ -768,12 +796,12 @@ calls the model makes.
   need no root. Honcho's provisioner suite checks dry-run plans and its pins.
 * `tests/test-repo.sh` checks repository invariants: unit hardening, no secrets
   in `env/`, UTF-8, embedded copies in sync, Maya's update switch, Xolotl's
-  and Avalon's pinned weights and the upgrade contract.
+  Avalon's and Kindi's pinned weights and the upgrade contract.
 * `.gitea/workflows/tests.yml` runs the suites with `--strict` (so its job
   container must run as root), shellcheck and ruff, with
   separate router and bridge venvs. ShellCheck discovers all repository shell
   files, including test helpers. The `strata-upstream`, `maya-upstream`,
-  `xolotl-upstream` and `avalon-upstream` jobs fetch one pinned commit each, kept separate so a GitHub outage cannot
+  `xolotl-upstream`, `avalon-upstream` and `kindi-upstream` jobs fetch one pinned commit each, kept separate so a GitHub outage cannot
   hide the main results.
 
 ---

@@ -4,7 +4,10 @@ Every upstream (Ollama hosts, LiteLLM) is an httpx.MockTransport, so nothing
 leaves the process. Run: python3 -m pytest -q tests/test_router.py
 """
 import importlib.util
+import asyncio
 import json
+import time
+import re
 import os
 import sys
 from pathlib import Path
@@ -355,12 +358,82 @@ def test_litellm_fallback_uses_the_classifier(served, monkeypatch):
     def litellm(request):
         captured["body"] = json.loads(request.content)
         captured["headers"] = dict(request.headers)
+        captured["timeout"] = request.extensions["timeout"]
         return streamed(200, {"ok": True})
 
     router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(litellm))
     response = chat(client, messages=[user("please analyze this")])
     assert response.headers["x-router-mode"] == "litellm"
     assert captured["body"]["model"] == router.TIER_LARGE
+    assert "x-litellm-num-retries" not in captured["headers"]
+    assert captured["timeout"]["connect"] == 3
+    # No Kindi server is configured, so the LiteLLM hop keeps read_timeout_seconds.
+    assert captured["timeout"]["read"] == router.READ_TIMEOUT == 300
+
+
+def test_litellm_read_timeout_follows_configured_kindi(router, monkeypatch):
+    """Only an assigned Kindi deployment extends the LiteLLM hop."""
+    monkeypatch.setattr(router, "SERVERS", ["http://10.0.0.51:11434"])
+    monkeypatch.setenv("MODEL_SERVERS", "kindi+http://10.0.0.14:8093")
+    assert router.litellm_read_timeout() == router.READ_TIMEOUT
+    monkeypatch.setenv("BACKEND_FAST", "http://10.0.0.51:11434,kindi+http://10.0.0.14:8093")
+    assert router.litellm_read_timeout("fast") == router.KINDI_READ_TIMEOUT == 3600
+    assert router.litellm_read_timeout() == router.READ_TIMEOUT
+
+
+def test_litellm_kindi_tier_caps_retries(served, monkeypatch):
+    router, _, client = served
+    monkeypatch.setattr(router, "INVENTORY", dict(router.INVENTORY, models=[]))
+    monkeypatch.setenv("BACKEND_LARGE", "kindi+http://10.0.0.14:8093")
+    captured = {}
+
+    def litellm(request):
+        captured.update(request.headers)
+        captured["read_timeout"] = request.extensions["timeout"]["read"]
+        return streamed(200, {"ok": True})
+
+    router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(litellm))
+    client.post("/v1/chat/completions", headers={"X-LiteLLM-Num-Retries": "9",
+                                                 "X-LiteLLM-Timeout": "10"},
+                json={"model": "auto", "messages": [user("please analyze this")]})
+    assert captured["x-litellm-num-retries"] == "1"
+    # The timeout comes from each deployment, so the tier's other servers keep
+    # LiteLLM's own; the client's header is dropped.
+    assert "x-litellm-timeout" not in captured
+    assert captured["read_timeout"] == router.KINDI_READ_TIMEOUT
+
+
+def test_litellm_embeddings_keep_normal_timeout_with_kindi_tier(served, monkeypatch):
+    router, _, client = served
+    monkeypatch.setenv("BACKEND_FAST", "kindi+http://10.0.0.14:8093")
+    captured = {}
+
+    def litellm(request):
+        captured["read_timeout"] = request.extensions["timeout"]["read"]
+        return streamed(200, {"data": []})
+
+    router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(litellm))
+    response = client.post("/v1/embeddings", json={"model": "nomic-embed", "input": "hi"})
+    assert response.status_code == 200
+    assert captured["read_timeout"] == router.READ_TIMEOUT
+
+
+def test_kindi_read_timeout_never_shortens_read_timeout(monkeypatch, tmp_path):
+    """kindi_read_timeout_seconds comes from router.ini and is never below
+    read_timeout_seconds."""
+    ini = tmp_path / "router.ini"
+    ini.write_text("[http]\nread_timeout_seconds = 7200\nkindi_read_timeout_seconds = 1800\n")
+    module = load_router(monkeypatch, ROUTER_INI=str(ini))
+    assert module.READ_TIMEOUT == 7200 and module.KINDI_READ_TIMEOUT == 7200
+    ini.write_text("[http]\nkindi_read_timeout_seconds = 2400\n")
+    module = load_router(monkeypatch, ROUTER_INI=str(ini))
+    assert (module.READ_TIMEOUT, module.KINDI_READ_TIMEOUT) == (300, 2400)
+
+
+def test_inventory_publishes_the_kindi_budget(served):
+    """The tool targets' dispatchers compare their own Kindi budget with this."""
+    router, _, client = served
+    assert client.get("/routing/inventory").json()["kindi_read_timeout_seconds"] == router.KINDI_READ_TIMEOUT
 
 
 def test_os_env_is_restored():
@@ -977,6 +1050,322 @@ def test_avalon_discovery_and_dispatch(monkeypatch):
                      ("/v1/chat/completions", "Bearer avalon-secret")]
 
 
+def test_kindi_discovery_and_dispatch(monkeypatch):
+    """Kindi lists one model with its fitted context_length and its own key;
+    its ids carry their size (bonsai2-27b), and no other kind's key is sent."""
+    kindi = "kindi+http://10.0.0.14:8093"
+    calls = []
+    chat_timeout = []
+
+    def handler(request):
+        calls.append((request.url.path, request.headers.get("authorization")))
+        if request.headers.get("authorization") != "Bearer kindi-secret":
+            return httpx.Response(401, json={"error": {"message": "invalid API key", "type": "authentication_error",
+                                                       "code": "authentication_error"}})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": [
+                {"id": "bonsai2-27b", "object": "model", "created": 1, "owned_by": "kindi",
+                 "context_length": 110592}]})
+        if request.url.path == "/v1/chat/completions":
+            chat_timeout.append(request.extensions["timeout"])
+            return streamed(200, {"model": json.loads(request.content)["model"]})
+        return httpx.Response(404)
+
+    router = load_router(monkeypatch, MODEL_SERVERS=kindi, AVALON_API_KEY="avalon-secret",
+                         KINDI_API_KEY="kindi-secret", ROUTER_API_KEY="client-secret")
+    router._HTTP["transport"] = httpx.MockTransport(handler)
+    with TestClient(router.app) as client:
+        models = {e["name"]: e for e in router.INVENTORY["models"]}
+        response = client.post("/v1/chat/completions",
+                               headers={"Authorization": "Bearer client-secret"},
+                               json={"model": "bonsai2-27b", "messages": [user("hi")], "tools": TOOLS})
+    assert router.server_kind(kindi) == "kindi"
+    assert router.server_base(kindi) == "http://10.0.0.14:8093"
+    assert models["bonsai2-27b"]["params_b"] == 27
+    assert models["bonsai2-27b"]["context_length"] == 110592
+    assert models["bonsai2-27b"]["tools"] is True
+    assert not models["bonsai2-27b"]["is_vision"]
+    assert response.status_code == 200 and response.json()["model"] == "bonsai2-27b"
+    assert response.headers["x-router-server"] == kindi
+    assert calls == [("/v1/models", "Bearer kindi-secret"),
+                     ("/v1/chat/completions", "Bearer kindi-secret")]
+    assert chat_timeout[0]["connect"] == 3
+    assert chat_timeout[0]["read"] == 3600
+
+
+def _kindi_router(monkeypatch, handler):
+    kindi = "kindi+http://10.0.0.14:8093"
+    router = load_router(monkeypatch, MODEL_SERVERS=kindi, KINDI_API_KEY="kindi-secret")
+    router._HTTP["transport"] = httpx.MockTransport(handler)
+    router._KINDI_DRAINING.clear()
+    return router, kindi
+
+
+def _kindi_listing(request):
+    return httpx.Response(200, json={"object": "list", "data": [
+        {"id": "bonsai2-2b", "object": "model", "created": 1, "owned_by": "kindi", "context_length": 24576}]})
+
+
+def test_kindi_no_reply_is_not_retryable_and_drains(monkeypatch):
+    """A Kindi request that was sent but got no reply is answered 424 with
+    x-should-retry: false, once. While Kindi's /health shows it busy, nothing
+    more is sent and callers get a retryable 503; once idle, requests go."""
+    posts, state = [], {"silent": True, "busy": {"phase": "prompt"}}
+
+    def handler(request):
+        if request.url.path == "/v1/models":
+            return _kindi_listing(request)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"ok": True, "kindi": "0.4.0", "busy": state["busy"]})
+        if request.url.path == "/v1/chat/completions":
+            posts.append(request.url.path)
+            if state["silent"]:
+                raise httpx.ReadTimeout("timed out", request=request)
+            return streamed(200, {"model": "bonsai2-2b"})
+        return httpx.Response(404)
+
+    router, kindi = _kindi_router(monkeypatch, handler)
+    with TestClient(router.app) as client:
+        body = {"model": "bonsai2-2b", "messages": [user("hi")]}
+        response = client.post("/v1/chat/completions", json=body)
+        assert response.status_code == 424
+        assert response.headers["x-should-retry"] == "false"
+        error = response.json()["error"]
+        assert error["type"] == "upstream_no_reply"
+        assert not re.search(r"(?i)timed out|timeout", error["message"])
+        assert posts == ["/v1/chat/completions"]
+        state["silent"] = False
+        response = client.post("/v1/chat/completions", json=body)
+        assert response.status_code == 503 and response.headers["retry-after"] == "15"
+        assert posts == ["/v1/chat/completions"]
+        state["busy"] = None
+        router._KINDI_DRAINING[kindi][0] = float("-inf")  # the 5 s /health cache has passed
+        router.INVENTORY["servers"][kindi]["up"] = True
+        response = client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 200
+    assert posts == ["/v1/chat/completions"] * 2
+    assert kindi not in router._KINDI_DRAINING
+
+
+def test_kindi_connect_failure_stays_retryable(monkeypatch):
+    def handler(request):
+        if request.url.path == "/v1/models":
+            return _kindi_listing(request)
+        if request.url.path == "/v1/chat/completions":
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(404)
+
+    router, _ = _kindi_router(monkeypatch, handler)
+    with TestClient(router.app) as client:
+        response = client.post("/v1/chat/completions", json={"model": "bonsai2-2b", "messages": [user("hi")]})
+    assert response.status_code == 502
+    assert "x-should-retry" not in response.headers
+
+
+def test_kindi_drain_requires_a_confirmed_idle_health(router):
+    kindi = "kindi+http://k:8093"
+    responses = [httpx.Response(200, json={"busy": {"phase": "prompt"}}),
+                 httpx.Response(503, json={"error": "unavailable"}),
+                 httpx.Response(200, json={}),
+                 httpx.Response(200, json={"busy": None})]
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return responses.pop(0)
+
+    async def check():
+        router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            # A full hour passing does not release a server that reports busy.
+            router._KINDI_DRAINING[kindi] = [time.monotonic() - 3600, True]
+            for _ in range(3):
+                assert await router.kindi_busy(kindi) is True
+                router._KINDI_DRAINING[kindi][0] = float("-inf")
+            assert await router.kindi_busy(kindi) is False
+        finally:
+            await router._HTTP["client"].aclose()
+
+    asyncio.run(check())
+    assert calls == ["/health"] * 4
+    assert kindi not in router._KINDI_DRAINING
+
+
+def test_kindi_newer_busy_request_keeps_gate_closed(router, monkeypatch):
+    """A newer request may run while the unanswered one is still queued."""
+    kindi = "kindi+http://10.0.0.14:8093"
+    clock = [1000.0]
+    monkeypatch.setattr(router.time, "monotonic", lambda: clock[0])
+
+    async def check():
+        busy = iter([{"phase": "prompt", "elapsed_s": 3},
+                     {"phase": "prompt", "elapsed_s": 1}, None])
+        router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"ok": True, "busy": next(busy)})))
+        try:
+            router.mark_kindi_draining(kindi)
+            clock[0] += 600
+            assert await router.kindi_busy(kindi) is True
+            clock[0] += router.KINDI_HEALTH_CACHE_SECONDS
+            assert await router.kindi_busy(kindi) is True
+            clock[0] += router.KINDI_HEALTH_CACHE_SECONDS
+            assert await router.kindi_busy(kindi) is False
+        finally:
+            await router._HTTP["client"].aclose()
+
+    asyncio.run(check())
+    assert kindi not in router._KINDI_DRAINING
+
+
+def test_kindi_partial_nonstreaming_body_timeout_returns_424(monkeypatch):
+    posts = []
+
+    class PartialBody(httpx.AsyncByteStream):
+        def __init__(self, request):
+            self.request = request
+
+        async def __aiter__(self):
+            yield b'{"choices":'
+            raise httpx.ReadTimeout("read timed out", request=self.request)
+
+        async def aclose(self):
+            pass
+
+    def handler(request):
+        if request.url.path == "/v1/models":
+            return _kindi_listing(request)
+        if request.url.path == "/v1/chat/completions":
+            posts.append(request.url.path)
+            return httpx.Response(200, headers={"content-type": "application/json"},
+                                  stream=PartialBody(request))
+        return httpx.Response(404)
+
+    router, kindi = _kindi_router(monkeypatch, handler)
+    with TestClient(router.app) as client:
+        response = client.post("/v1/chat/completions",
+                               json={"model": "bonsai2-2b", "messages": [user("hi")]})
+    assert response.status_code == 424
+    assert response.headers["x-should-retry"] == "false"
+    assert posts == ["/v1/chat/completions"]
+    assert kindi in router._KINDI_DRAINING
+
+
+def test_kindi_stream_timeout_after_first_chunk_marks_it_draining(router):
+    kindi = "kindi+http://k:8093"
+    router.INVENTORY["servers"] = {kindi: {"up": True}}
+
+    class PartialStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices": []}\n\n'
+            raise httpx.ReadTimeout("read timed out")
+
+        async def aclose(self):
+            pass
+
+    async def check():
+        router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                           stream=PartialStream())))
+        try:
+            response = await router._dispatch_direct(
+                [{"server": kindi, "name": "bonsai2-2b", "kind": "kindi"}],
+                {"stream": True, "messages": [user("hi")]}, {},
+                {"class": "fast", "code": False, "vision": False, "tools": False,
+                 "approx_tokens": 1})
+            assert response.status_code == 200
+            chunks = []
+            with pytest.raises(httpx.ReadTimeout):
+                async for chunk in response.body_iterator:
+                    chunks.append(chunk)
+            assert chunks == [b'data: {"choices": []}\n\n']
+        finally:
+            await router._HTTP["client"].aclose()
+
+    asyncio.run(check())
+    assert kindi in router._KINDI_DRAINING
+
+
+def test_last_fallback_503_does_not_hide_kindi_no_reply(router):
+    kindi = "kindi+http://k:8093"
+    other = "strata+http://s:8080"
+    router.INVENTORY["servers"] = {kindi: {"up": True}, other: {"up": True}}
+    posts = []
+
+    def handler(request):
+        posts.append(request.url.host)
+        if request.url.host == "k":
+            raise httpx.ReadTimeout("read timed out", request=request)
+        return streamed(503, {"error": "unavailable"})
+
+    async def check():
+        router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            return await router._dispatch_direct(
+                [{"server": kindi, "name": "bonsai2-2b", "kind": "kindi"},
+                 {"server": other, "name": "other", "kind": "strata"}],
+                {"messages": [user("hi")]}, {},
+                {"class": "fast", "code": False, "vision": False, "tools": False,
+                 "approx_tokens": 1})
+        finally:
+            await router._HTTP["client"].aclose()
+
+    response = asyncio.run(check())
+    assert response.status_code == 424
+    assert response.headers["x-should-retry"] == "false"
+    assert posts == ["k", "s"]
+
+
+@pytest.mark.parametrize("kindi_tier,status", [(True, 424), (False, 408)])
+def test_litellm_timeout_for_a_kindi_tier_is_not_retryable(served, monkeypatch, kindi_tier, status):
+    """LiteLLM answers its own timeout with 408, which an SDK retries; for a
+    tier with Kindi the router answers 424 with x-should-retry: false."""
+    router, _, client = served
+    monkeypatch.setattr(router, "INVENTORY", dict(router.INVENTORY, models=[]))
+    if kindi_tier:
+        monkeypatch.setenv("BACKEND_LARGE", "kindi+http://10.0.0.14:8093")
+    router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: streamed(408, {"error": {"message": "litellm.Timeout"}})))
+    response = chat(client, messages=[user("please analyze this")])
+    assert response.status_code == status
+    assert (response.headers.get("x-should-retry") == "false") is kindi_tier
+
+
+def test_litellm_kindi_tier_partial_body_timeout_is_424(served, monkeypatch):
+    router, _, client = served
+    monkeypatch.setattr(router, "INVENTORY", dict(router.INVENTORY, models=[]))
+    monkeypatch.setenv("BACKEND_LARGE", "kindi+http://10.0.0.14:8093")
+    posts = []
+
+    class PartialBody(httpx.AsyncByteStream):
+        def __init__(self, request):
+            self.request = request
+
+        async def __aiter__(self):
+            yield b'{"choices":'
+            raise httpx.ReadTimeout("read timed out", request=self.request)
+
+        async def aclose(self):
+            pass
+
+    def handler(request):
+        posts.append(request.url.path)
+        return httpx.Response(200, headers={"content-type": "application/json"},
+                              stream=PartialBody(request))
+
+    router._HTTP["client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = chat(client, messages=[user("please analyze this")])
+    assert response.status_code == 424
+    assert response.headers["x-should-retry"] == "false"
+    assert posts == ["/v1/chat/completions"]
+
+
+@pytest.mark.parametrize("model_id,size", [("bonsai2-2b", 2), ("bonsai2-9b", 9), ("nanbeige-33b-iq3", 33)])
+def test_kindi_ids_are_sized_from_the_id(router, model_id, size):
+    """Kindi's model ids name their size, so they need no [model_sizes] line."""
+    entries = _openai_listing(router, "kindi+http://h:8093", [{"id": model_id, "context_length": 24576}])
+    assert entries[model_id]["params_b"] == size
+
+
 # --- named models on unreachable hosts ----------------------------------------
 def test_named_model_on_a_down_host_is_routed_with_a_warning(served):
     router, upstream, client = served
@@ -1243,7 +1632,7 @@ def test_openai_kind_context_from_meta_n_ctx(router):
         "served": 131072, "train-only": None, "named": 32768, "odd": None, "no-meta": None}
 
 
-@pytest.mark.parametrize("kind", ["strata", "basalt", "maya", "xolotl", "avalon"])
+@pytest.mark.parametrize("kind", ["strata", "basalt", "maya", "xolotl", "avalon", "kindi"])
 def test_openai_kind_text_models_report_tools(router, kind):
     """Each of these servers takes "tools" and returns tool_calls, so its text
     models are tool-capable; an image generator listed beside them is not."""
@@ -1260,23 +1649,23 @@ def test_tool_kinds_setting(monkeypatch, tmp_path, caplog):
     """A kind left out of tool_kinds is unknown again; a name that is not a
     /v1/models kind is ignored with a warning."""
     ini = (ROOT / "services/ollama-router/router.ini").read_text()
-    assert "\ntool_kinds = strata, basalt, maya, xolotl, avalon\n" in ini
+    assert "\ntool_kinds = strata, basalt, maya, xolotl, avalon, kindi\n" in ini
     custom = tmp_path / "router.ini"
-    custom.write_text(ini.replace("tool_kinds = strata, basalt, maya, xolotl, avalon",
+    custom.write_text(ini.replace("tool_kinds = strata, basalt, maya, xolotl, avalon, kindi",
                                   "tool_kinds = Avalon, ollama, nonsense"))
     with caplog.at_level("WARNING", logger="router"):
         router = load_router(monkeypatch, ROUTER_INI=str(custom))
     assert router.TOOL_KINDS == {"avalon"}
     assert sorted(r.getMessage() for r in caplog.records if "tool_kinds" in r.getMessage()) == [
-        "ignoring [classification] tool_kinds entry 'nonsense' (use avalon, basalt, maya, strata, xolotl)",
-        "ignoring [classification] tool_kinds entry 'ollama' (use avalon, basalt, maya, strata, xolotl)"]
+        "ignoring [classification] tool_kinds entry 'nonsense' (use avalon, basalt, kindi, maya, strata, xolotl)",
+        "ignoring [classification] tool_kinds entry 'ollama' (use avalon, basalt, kindi, maya, strata, xolotl)"]
     assert _openai_listing(router, "avalon+http://h:8080", [{"id": "m"}])["m"]["tools"] is True
     assert _openai_listing(router, "strata+http://h:8080", [{"id": "m"}])["m"]["tools"] is None
-    custom.write_text(ini.replace("tool_kinds = strata, basalt, maya, xolotl, avalon", "tool_kinds ="))
+    custom.write_text(ini.replace("tool_kinds = strata, basalt, maya, xolotl, avalon, kindi", "tool_kinds ="))
     assert load_router(monkeypatch, ROUTER_INI=str(custom)).TOOL_KINDS == frozenset()
     # The built-in default matches router.ini, for a router.ini without the line.
     assert load_router(monkeypatch, ROUTER_INI=str(tmp_path / "missing.ini")).TOOL_KINDS == {
-        "strata", "basalt", "maya", "xolotl", "avalon"}
+        "strata", "basalt", "maya", "xolotl", "avalon", "kindi"}
 
 
 @pytest.mark.parametrize("body,expected", [

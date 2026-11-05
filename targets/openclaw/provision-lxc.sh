@@ -272,7 +272,7 @@ from urllib.parse import urlsplit
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 if not data.get("enabled") or not isinstance(data.get("servers"), list):
     raise SystemExit("Router discovery is disabled; enable [discovery] before installing OpenClaw")
-kinds = ("lmstudio", "strata", "basalt", "maya", "xolotl", "avalon")
+kinds = ("lmstudio", "strata", "basalt", "maya", "xolotl", "avalon", "kindi")
 names = {}
 seen = set()
 for item in data["servers"]:
@@ -643,6 +643,8 @@ cleanup() {
 trap cleanup EXIT
 
 # --- the router: reachable, its key, its address and port ----------------------------
+# The router's Kindi read budget; a dry run shows where it comes from.
+kindi_timeout='<router.ini kindi_read_timeout_seconds>'
 if (( ! dry_run )); then
   # id, not $EUID, so the tests can run the whole flow without root.
   [[ $(id -u) == 0 ]] || die 'Run as root on the Proxmox host.'
@@ -660,10 +662,14 @@ if (( ! dry_run )); then
   fi
   router_exec test -f /app/router/router.py ||
     die "No ollama-smart-router at /app/router on ${router_label}."
+  kindi_timeout=$(router_exec python3 -c 'import configparser, math, sys; c=configparser.ConfigParser(); c.read(sys.argv[1]); print(math.ceil(max(c.getfloat("http", "read_timeout_seconds", fallback=300), c.getfloat("http", "kindi_read_timeout_seconds", fallback=3600))))' /app/router/router.ini) ||
+    die "Cannot read the router timeout on ${router_label}."
+  kindi_timeout=${kindi_timeout//[$'\r\n ']/}
+  [[ $kindi_timeout =~ ^[1-9][0-9]{0,5}$ ]] || die "Invalid router Kindi timeout: $kindi_timeout"
   # Straight into a 0600 file: the key never passes through argv or a variable.
   router_exec awk -F= '$1=="ROUTER_API_KEY" {sub(/^[^=]*=/,""); print; exit}' /app/router/secrets.env \
     > "$stage/router-api-key" 2>/dev/null || : > "$stage/router-api-key"
-  router_exec awk -F= '$1 ~ /^(LMSTUDIO_API_TOKEN|STRATA_API_KEY|BASALT_API_KEY|MAYA_API_KEY|XOLOTL_API_KEY|AVALON_API_KEY)$/ {print}' /app/router/secrets.env \
+  router_exec awk -F= '$1 ~ /^(LMSTUDIO_API_TOKEN|STRATA_API_KEY|BASALT_API_KEY|MAYA_API_KEY|XOLOTL_API_KEY|AVALON_API_KEY|KINDI_API_KEY)$/ {print}' /app/router/secrets.env \
     > "$stage/backend-keys" 2>/dev/null || : > "$stage/backend-keys"
   if [[ -s $stage/router-api-key ]]; then
     note "Read ROUTER_API_KEY from ${router_label}."
@@ -921,6 +927,7 @@ if [[ $mode != integrate ]]; then
   [[ $nvm_sha_set != set ]] || guest_env+=("NVM_INSTALLER_SHA256=$NVM_INSTALLER_SHA256")
   # Empty turns off a Honcho memory set up earlier.
   guest_env+=("HONCHO_URL=${HONCHO_URL:-}")
+  guest_env+=("KINDI_READ_TIMEOUT_SECONDS=$kindi_timeout")
   run pct exec "$CT_ID" -- install -d -m 0700 "$deploy"
   run pct push "$CT_ID" "$source_dir/install-target.sh" "$deploy/install-target.sh" --perms 0755
   run pct push "$CT_ID" "$source_dir/openclaw-gateway.service" "$deploy/openclaw-gateway.service" --perms 0644

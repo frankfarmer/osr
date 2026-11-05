@@ -492,6 +492,30 @@ out=$(guest) && fail "an invalid targets file was accepted: $out"
 rm -f "$deploy/targets"
 pass 'direct targets: a provider per model server, kept in sync with the router inventory'
 
+# 15b. Kindi targets: Hermes waits for Kindi's silent prompt read and a reply.
+reset_tree; push_key
+printf 'strata-192-168-11-154-8080=strata+http://192.168.11.154:8080\nkindi-192-168-11-14-8093=kindi+http://192.168.11.14:8093\n' > "$deploy/targets"
+out=$(guest KINDI_READ_TIMEOUT_SECONDS=5400) || fail "install with a Kindi target: $out"
+want=$((5400 * 2 + 8192))
+for name in osr kindi-192-168-11-14-8093; do
+  [[ $(kv "providers.$name.request_timeout_seconds" "$config") == "$want" &&
+     $(kv "providers.$name.stale_timeout_seconds" "$config") == "$want" ]] || fail "Kindi limits on $name: $(cat "$config")"
+done
+grep -q '^providers.strata-192-168-11-154-8080.\(request\|stale\)_timeout_seconds=' "$config" &&
+  fail "a non-Kindi target got Kindi's limits: $(cat "$config")"
+[[ $(kv HERMES_STREAM_READ_TIMEOUT "$env_file") == "$want" &&
+   $(kv HERMES_LOCAL_STREAM_STALE_TIMEOUT "$env_file") == "$want" ]] || fail "Kindi stream limits: $(cat "$env_file")"
+grep -qx 'KINDI_READ_TIMEOUT_SECONDS=5400' "$etc/settings" || fail 'the dispatcher budget is not in the settings record'
+grep -qx 'EnvironmentFile=-/etc/hermes-target/settings' "$units/hermes-direct.service" || fail 'the dispatcher does not read its budget'
+out=$(guest KINDI_READ_TIMEOUT_SECONDS=abc) && fail "an invalid Kindi budget was accepted: $out"
+[[ $out == *'Invalid KINDI_READ_TIMEOUT_SECONDS'* ]] || fail "invalid budget message: $out"
+printf 'strata-192-168-11-154-8080=strata+http://192.168.11.154:8080\n' > "$deploy/targets"
+out=$(guest KINDI_READ_TIMEOUT_SECONDS=5400) || fail "rerun without Kindi: $out"
+grep -q '^providers.osr.\(request\|stale\)_timeout_seconds=' "$config" && fail "osr kept Kindi's limits: $(cat "$config")"
+grep -q '^HERMES_\(STREAM_READ\|LOCAL_STREAM_STALE\)_TIMEOUT=' "$env_file" && fail "Kindi stream limits kept: $(cat "$env_file")"
+rm -f "$deploy/targets"
+pass 'Kindi targets: osr and the Kindi provider wait for a silent read and a reply; removing Kindi restores the defaults'
+
 # 14. One run at a time.
 exec {held}>>"$tmp_root/etc/hermes-target.lock"
 flock "$held"

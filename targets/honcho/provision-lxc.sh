@@ -687,12 +687,16 @@ fi
 router_ip=${ROUTER_IP:-$router_source_ip}
 router_port=$(pct exec "$ROUTER_CT_ID" -- sh -c "sed -n 's/^ROUTER_PORT=//p' /app/router/.env | head -n1" | tr -d '\r\n')
 router_port=${router_port:-8000}
+kindi_timeout=$(pct exec "$ROUTER_CT_ID" -- python3 -c 'import configparser, math, sys; c=configparser.ConfigParser(); c.read(sys.argv[1]); print(math.ceil(max(c.getfloat("http", "read_timeout_seconds", fallback=300), c.getfloat("http", "kindi_read_timeout_seconds", fallback=3600))))' /app/router/router.ini) ||
+  die 'Cannot read the router timeout.'
+kindi_timeout=${kindi_timeout//[$'\r\n ']/}
+[[ $kindi_timeout =~ ^[1-9][0-9]{0,5}$ ]] || die "Invalid router Kindi timeout: $kindi_timeout"
 [[ $router_port =~ ^[0-9]{2,5}$ ]] || die 'Invalid router port.'
 router_url="http://${router_ip}:${router_port}"
 pct exec "$ROUTER_CT_ID" -- awk -F= '$1=="ROUTER_API_KEY" {sub(/^[^=]*=/,""); print; exit}' \
   /app/router/secrets.env > "$stage/router-api-key"
 [[ -s $stage/router-api-key ]] || printf 'no-key\n' > "$stage/router-api-key"
-pct exec "$ROUTER_CT_ID" -- awk -F= '$1 ~ /^(LMSTUDIO_API_TOKEN|STRATA_API_KEY|BASALT_API_KEY|MAYA_API_KEY|XOLOTL_API_KEY|AVALON_API_KEY)$/ {print}' \
+pct exec "$ROUTER_CT_ID" -- awk -F= '$1 ~ /^(LMSTUDIO_API_TOKEN|STRATA_API_KEY|BASALT_API_KEY|MAYA_API_KEY|XOLOTL_API_KEY|AVALON_API_KEY|KINDI_API_KEY)$/ {print}' \
   /app/router/secrets.env > "$stage/backend-keys"
 # Validate the admin token and endpoint before creating or modifying a Honcho CT.
 printf '%s\n' "$OPENWEBUI_ADMIN_TOKEN" > "$stage/openwebui-admin-token"
@@ -790,6 +794,7 @@ pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" \
   "HONCHO_EMBEDDING_DIMENSIONS=$HONCHO_EMBEDDING_DIMENSIONS" \
   "HONCHO_EMBEDDING_BASE_URL=$HONCHO_EMBEDDING_BASE_URL" \
   "HONCHO_SKIP_CHAT_PROBE=$HONCHO_SKIP_CHAT_PROBE" "HONCHO_ROTATE_KEYS=$rotate_keys" \
+  "KINDI_READ_TIMEOUT_SECONDS=$kindi_timeout" \
   "${kept_env[@]}" "${budget_env[@]}" \
   bash /root/honcho-deploy/install-target.sh
 pct exec "$ROUTER_CT_ID" -- curl -fsS --max-time 10 "http://${honcho_ip}:3000/health" >/dev/null ||

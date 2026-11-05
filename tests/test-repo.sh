@@ -153,7 +153,7 @@ describe upgrade_contract
 # rollback restores configuration as well as code, is health-checked, and
 # says when it failed too. The behaviour itself is exercised by each target's
 # own tests; this keeps a new or edited target from silently dropping a part.
-for name in strata basalt maya xolotl avalon; do
+for name in strata basalt maya xolotl avalon kindi; do
   t="${ROOT}/targets/${name}/install-target.sh"
   assert_ok "${name}: stages the settings of a good install" grep -q 'stage_record "\$[A-Z_]*ETC_DIR/installed-env" settings_env' "$t"
   assert_ok "${name}: publishes installed settings durably" grep -q 'publish_record "\$env_temporary" "\$[A-Z_]*ETC_DIR/installed-env"' "$t"
@@ -286,6 +286,32 @@ assert_ok "CI fetches the default pin" grep -q 'targets/avalon/upstream-commit.t
 assert_ok "CI checks the target against the pinned upstream code" \
   grep -q 'targets/avalon/test-pinned-upstream.py' "${ROOT}/.gitea/workflows/tests.yml"
 
+describe kindi_target
+# The Kindi target downloads pinned model files and CUDA 10.2, builds a venv
+# from hash locks and keeps its API key in Kindi's config file only.
+kindi="${ROOT}/targets/kindi"
+assert_ok "every weight URL names a commit of its repository" \
+  awk '!/^#/ && NF && $5 !~ /^https:\/\/huggingface\.co\/[^ ]+\/resolve\/[0-9a-f]{40}\// { exit 1 }' "${kindi}/kindi-weights.txt"
+assert_ok "every weight has a SHA-256" \
+  awk '!/^#/ && NF && $4 !~ /^sha256:[0-9a-f]{64}$/ { exit 1 }' "${kindi}/kindi-weights.txt"
+assert_fail "the unit carries no key" grep -qi 'api.key' <(grep -v '^#' "${kindi}/kindi.service")
+assert_ok "the unit leaves the checkout read-only" grep -qx 'ReadWritePaths=/var/lib/kindi /dev/shm' "${kindi}/kindi.service"
+assert_ok "the venv is built from a hash lock" grep -q 'pip sync --quiet --require-hashes' "${kindi}/install-target.sh"
+assert_ok "and uv from its own" grep -q -- '--no-deps --require-hashes' "${kindi}/install-target.sh"
+for lock in requirements-cpu.lock requirements-cuda.lock uv.lock; do
+  assert_ok "${lock} pins every package with a hash" \
+    awk '/^[A-Za-z0-9]/ { if ($0 !~ /^[A-Za-z0-9_.-]+==[^ ]+ \\$/) exit 1; n++ } /--hash=sha256:/ { h++ } END { exit !(n && h >= n) }' "${kindi}/${lock}"
+done
+assert_ok "the CUDA 10.2 runfile is checked against NVIDIA's published MD5" \
+  grep -qx 'CUDA_RUNFILE_MD5=${CUDA_RUNFILE_MD5:-3d816c583759efa8567a92c1a2af90db}' "${kindi}/cuda-toolkit.sh"
+assert_ok "and installed as the toolkit only" grep -q 'sh "$runfile" --silent --toolkit ' "${kindi}/cuda-toolkit.sh"
+pin="$(< "${kindi}/upstream-commit.txt")"
+assert_ok "the Kindi default pin is a full commit" grep -Eq '^[0-9a-f]{40}$' "${kindi}/upstream-commit.txt"
+assert_ok "the README names the tested pin" grep -q "$pin" "${kindi}/README.md"
+assert_ok "CI fetches the default pin" grep -q 'targets/kindi/upstream-commit.txt' "${ROOT}/.gitea/workflows/tests.yml"
+assert_ok "CI checks the target against the pinned upstream code" \
+  grep -q 'targets/kindi/test-pinned-upstream.py' "${ROOT}/.gitea/workflows/tests.yml"
+
 describe venv_permissions
 # Venvs are built after the secret-bearing tree (umask 077); the service account
 # must still be able to run them (litellm-proxy failed with 203/EXEC otherwise).
@@ -321,5 +347,12 @@ assert_ok "the lock matches the pin" grep -q "^litellm==${pin} " "$lock"
 assert_fail "the lock never contains the compromised releases" grep -Eq '^litellm==1\.82\.[78] ' "$lock"
 router_venv="$(sed -n '/python3 -m venv \/app\/router\/venv/,/Installing LiteLLM/p' "$INSTALLER")"
 assert_not_contains "the router venv no longer installs litellm" "litellm-proxy/requirements" "$router_venv"
+ci="${ROOT}/.gitea/workflows/tests.yml"
+assert_ok "CI builds the retry test's LiteLLM from the hash lock" \
+  grep -q 'pip install --require-hashes -r services/litellm-proxy/requirements.lock' "$ci"
+assert_ok "CI runs the retry test under that LiteLLM" grep -q 'LITELLM_PYTHON: .*/.venv-litellm/bin/python' "$ci"
+assert_ok "the runner registers the retry test" grep -q 'test-litellm-retries.py.*LITELLM_PYTHON' "${ROOT}/tests/run-tests.sh"
+assert_ok "CI checks Honcho's model-client timeout at the pinned release" \
+  grep -q 'targets/honcho/test-pinned-upstream.py' "$ci"
 
 summary

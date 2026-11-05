@@ -35,9 +35,9 @@ LITELLM_REQ="${REPO_DIR}/services/litellm-proxy/requirements.txt"
 LITELLM_LOCK="${REPO_DIR}/services/litellm-proxy/requirements.lock"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 # Default ports of the other server kinds are in kind_field (LM Studio 1234,
-# Strata/Basalt/Maya/Xolotl/Avalon 8080); LMSTUDIO_PORT, STRATA_PORT,
-# BASALT_PORT, MAYA_PORT, XOLOTL_PORT and AVALON_PORT in the environment
-# override them.
+# Strata/Basalt/Maya/Xolotl/Avalon 8080, Kindi 8093); LMSTUDIO_PORT,
+# STRATA_PORT, BASALT_PORT, MAYA_PORT, XOLOTL_PORT, AVALON_PORT and KINDI_PORT
+# in the environment override them.
 LMSTUDIO_PORT="${LMSTUDIO_PORT:-1234}"
 SERVER_TYPE="auto"   # --type ollama|<kind>|auto for add / set-tier (see server_kinds)
 MODEL_SERVER_MAX="${MODEL_SERVER_MAX:-20}"
@@ -85,10 +85,11 @@ Commands:
   status                     As list, plus a live reachability probe of each host
   discover                   Ask OSR to re-poll and print the live model inventory
   add <addr> [addr...]       Add server(s). Address may be IP, host:port or a URL.
-                             LM Studio, Strata, Basalt, Maya, Xolotl and Avalon are
-                             detected automatically, or use lmstudio://host /
-                             strata://host / basalt://host / maya://host /
-                             xolotl://host / avalon://host or --type.
+                             LM Studio, Strata, Basalt, Maya, Xolotl, Avalon and
+                             Kindi are detected automatically, or use
+                             lmstudio://host / strata://host / basalt://host /
+                             maya://host / xolotl://host / avalon://host /
+                             kindi://host or --type.
                              Detection sends no API key.
   remove <addr> [addr...]    Remove server(s) by address (or by list number)
   set-tier <tier> <addr...>  Replace a tier's servers (tier: fast|medium|large|xlarge)
@@ -130,6 +131,9 @@ Commands:
   set-avalon-token [token|--off]
                              Bearer token for Avalon servers with an API key
                              (stored in secrets.env)
+  set-kindi-token [token|--off]
+                             Bearer token for Kindi servers with an API key
+                             (stored in secrets.env)
   set-api-key [key|--generate|--off]
                              Require "Authorization: Bearer <key>" on OSR
                              API (Open WebUI is given the same key)
@@ -143,7 +147,7 @@ Commands:
 
 Options:
   --tier <t[,t...]>          With 'add': also assign the new server(s) to these tiers
-  --type <ollama|lmstudio|strata|basalt|maya|xolotl|avalon> With 'add' / 'set-tier': the server's API (default:
+  --type <ollama|lmstudio|strata|basalt|maya|xolotl|avalon|kindi> With 'add' / 'set-tier': the server's API (default:
                              auto-detect by probing; ollama when --no-probe)
   --apply                    Apply + restart services after the change
   --commit[=msg]             Commit and push the change after applying
@@ -186,7 +190,7 @@ valid_hostname_or_ip() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
 #   port   -- default port (overridable through the <KIND>_PORT variable)
 #   openai -- 1 for Strata-style servers (models at /v1/models, LiteLLM's
 #             openai provider), 0 for LM Studio (its own API and provider)
-server_kinds() { printf '%s\n' lmstudio strata basalt maya xolotl avalon; }
+server_kinds() { printf '%s\n' lmstudio strata basalt maya xolotl avalon kindi; }
 kind_field() {
   local spec key label port_var port_default openai value
   case "$1" in
@@ -196,6 +200,7 @@ kind_field() {
     maya)     spec='MAYA_API_KEY|Maya|MAYA_PORT|8080|1' ;;
     xolotl)   spec='XOLOTL_API_KEY|Xolotl|XOLOTL_PORT|8080|1' ;;
     avalon)   spec='AVALON_API_KEY|Avalon|AVALON_PORT|8080|1' ;;
+    kindi)    spec='KINDI_API_KEY|Kindi|KINDI_PORT|8093|1' ;;
     *) return 1 ;;
   esac
   IFS='|' read -r key label port_var port_default openai <<< "$spec"
@@ -219,7 +224,7 @@ is_server_kind() {
 }
 is_openai_kind() { is_server_kind "$1" && [[ "$(kind_field "$1" openai)" == 1 ]]; }
 openai_kinds() { local k; for k in $(server_kinds); do is_openai_kind "$k" && echo "$k"; done; return 0; }
-# "Ollama, LM Studio, Strata, Basalt, Maya, Xolotl or Avalon"
+# "Ollama, LM Studio, Strata, Basalt, Maya, Xolotl, Avalon or Kindi"
 kind_labels() {
   local out=Ollama k label last=""
   for k in $(server_kinds); do
@@ -354,6 +359,10 @@ detect_server_kind() {
     if [[ "$body" =~ \"model\"[[:space:]]*:[[:space:]]*\"glm-5\.3-flash\" ]] &&
        [[ "$body" == *'"version"'* ]]; then
       echo maya; return 0
+    fi
+    # Kindi names itself and its version ("kindi": "0.4.0") on /health.
+    if [[ "$body" =~ \"kindi\"[[:space:]]*:[[:space:]]*\"[0-9] ]]; then
+      echo kindi; return 0
     fi
   fi
   local code path status_code=''
@@ -802,19 +811,27 @@ else:
 # the sorted list of its deployments (tag@url). Each tier falls back to the
 # nearest other tiers, smaller first on a tie. A tier whose deployments are
 # IDENTICAL to this one's is skipped: falling back to the same model on the
-# same host cannot succeed where the original failed.
+# same host cannot succeed where the original failed. A tier with Kindi is a
+# fallback only for another Kindi tier on other Kindi servers: the router waits
+# read_timeout_seconds (not Kindi's budget) on a request for a tier without
+# Kindi, and a fallback to the same Kindi server would queue behind the request
+# it is still reading.
 litellm_fallbacks() {
   python3 -c '
-import json, sys
+import json, re, sys
 tiers = []
 for line in sys.stdin.read().splitlines():
     if line.strip():
         name, _, sig = line.partition(" ")
         tiers.append((name, sig))
+def kindi(sig):
+    return set(re.findall(r"kindi[+][^,@\s]+", sig))
+def may_fall_back(sig, osig):
+    return not kindi(osig) or (kindi(sig) and not kindi(sig) & kindi(osig))
 rows = []
 for i, (name, sig) in enumerate(tiers):
     others = [(abs(i - j), j, other) for j, (other, osig) in enumerate(tiers)
-              if other != name and osig != sig]
+              if other != name and osig != sig and may_fall_back(sig, osig)]
     if others:
         rows.append("    - %s: %s" % (name, json.dumps([o for _, _, o in sorted(others)])))
 if rows:
@@ -823,8 +840,139 @@ if rows:
 '
 }
 
+# router_settings.model_group_retry_policy for litellm_config.yaml, from the
+# same "<model_name> <signature>" lines. Kindi serves one request at a time and
+# upstream asks for one retry at most: no retry after a timeout (Kindi may
+# still be reading the prompt), one after a 429. LiteLLM 1.75 does not read
+# InternalServerErrorRetries, so the router caps every other error at one retry
+# with x-litellm-num-retries: 1 on requests for these tiers. Policies for other
+# current tiers are kept, block or flow style. The marker lets removal discard
+# only OSR's policy; the unmarked forms written before it are recognised too.
+litellm_retry_policy() {
+  python3 -c '
+import re, sys
+tiers = dict(line.strip().partition(" ")[::2] for line in sys.stdin.read().splitlines() if line.strip())
+with open(sys.argv[1], encoding="utf-8") as source:
+    old = source.read().splitlines()
+preserved = {}
+in_policy = False
+name = None
+for line in old:
+    if line == "  model_group_retry_policy:":
+        in_policy = True
+        continue
+    if in_policy and line and not line.startswith("    "):
+        in_policy = False
+    if not in_policy:
+        continue
+    match = re.match(r"^    ([^:#\s][^:#]*):\s*(.*)$", line)
+    if match:
+        name = match.group(1).strip().strip("\"\x27")
+        if name in tiers and "@kindi+" not in tiers[name]:
+            preserved[name] = [line]
+        if match.group(2) and not match.group(2).startswith("#"):
+            name = None  # a flow-style entry is complete on its line
+        continue
+    if name in preserved:
+        preserved[name].append(line)
+unmarked = ({"TimeoutErrorRetries: 0", "InternalServerErrorRetries: 1", "RateLimitErrorRetries: 1"},
+            {"TimeoutErrorRetries: 0", "RateLimitErrorRetries: 1"})
+for name, lines in list(preserved.items()):
+    fields = {line.strip() for line in lines[1:] if line.strip() and not line.lstrip().startswith("#")}
+    if any("# osr-kindi-policy" in line for line in lines) or fields in unmarked:
+        del preserved[name]
+rows = []
+for name, sig in tiers.items():
+    if "@kindi+" in sig:
+        rows += ["    %s:" % name, "      # osr-kindi-policy", "      TimeoutErrorRetries: 0",
+                 "      RateLimitErrorRetries: 1"]
+    elif name in preserved:
+        rows += preserved[name]
+if rows:
+    print("  model_group_retry_policy:")
+    print("\n".join(rows))
+' "$LITELLM_YAML"
+}
+
+# kindi_timeout_seconds: the router's Kindi read budget from router.ini, never
+# below read_timeout_seconds (as router.py computes it), in whole seconds.
+kindi_timeout_seconds() {
+  python3 -c 'import configparser, math, sys; c=configparser.ConfigParser(); c.read(sys.argv[1]); print(math.ceil(max(c.getfloat("http", "read_timeout_seconds", fallback=300), c.getfloat("http", "kindi_read_timeout_seconds", fallback=3600))))' "$ROUTER_INI"
+}
+
+# sync_kindi_timeouts: give every Kindi deployment in litellm_config.yaml the
+# router.ini budget, so `apply` after editing kindi_read_timeout_seconds keeps
+# LiteLLM in step without rebuilding the model list. Only the timeout line of
+# a deployment whose api_base is a configured Kindi server changes.
+sync_kindi_timeouts() {
+  local timeout url changed
+  local -a bases=()
+  [[ -f "$LITELLM_YAML" ]] || return 0
+  timeout="$(kindi_timeout_seconds)" || die 'Invalid router.ini timeout.'
+  while IFS= read -r url; do
+    [[ -n "$url" && "$(server_kind "$url")" == kindi ]] && bases+=("$(litellm_api_base "$url")")
+  done < <(get_servers)
+  ((${#bases[@]})) || return 0
+  changed="$(KINDI_BASES="${bases[*]}" python3 - "$LITELLM_YAML" "$timeout" <<'PY'
+import os, re, sys
+path, timeout = sys.argv[1], sys.argv[2]
+bases = set(os.environ["KINDI_BASES"].split())
+lines = open(path, encoding="utf-8").read().splitlines()
+out, block, changed = [], [], False
+def flush():
+    global changed
+    base = next((m.group(1) for m in (re.match(r"^      api_base:\s*(\S+)\s*$", l) for l in block) if m), None)
+    if base in bases:
+        want = "      timeout: %s" % timeout
+        if want not in block:
+            kept = [l for l in block if not re.match(r"^      timeout:", l)]
+            at = next(i for i, l in enumerate(kept) if l.startswith("      api_base:")) + 1
+            block[:] = kept[:at] + [want] + kept[at:]
+            changed = True
+    out.extend(block)
+    block.clear()
+in_list = False
+for line in lines:
+    if line.startswith("  - model_name:") and in_list:
+        flush()
+    if re.match(r"^\S", line):
+        flush()
+        in_list = line.startswith("model_list:")
+        out.append(line)
+        continue
+    (block if in_list else out).append(line)
+flush()
+if changed:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+print("yes" if changed else "")
+PY
+)" || die "Could not update the Kindi timeouts in ${LITELLM_YAML}."
+  [[ -z "$changed" ]] || echo "  Kindi deployments in $(basename "$LITELLM_YAML") now wait ${timeout}s (router.ini)."
+}
+
+# kindi_budget_note OLD NEW: after an apply that changed the router's Kindi
+# read budget, say what does not follow it. The dispatchers of Hermes, OpenClaw
+# and Honcho take a lower budget from the router at once, but keep their own
+# for a higher one (their callers' limits were sized for it) and log that.
+kindi_budget_note() {
+  local old="$1" new="$2" url kindi=false
+  [[ -n "$old" && -n "$new" && "$old" != "$new" ]] || return 0
+  while IFS= read -r url; do
+    [[ -n "$url" && "$(server_kind "$url")" == kindi ]] && kindi=true
+  done < <(get_servers)
+  $kindi || return 0
+  echo "The router's Kindi read budget is now ${new}s (was ${old}s)."
+  if (( new > old )); then
+    echo "  Hermes, OpenClaw and Honcho keep ${old}s until each is reconfigured:"
+  else
+    echo "  Their dispatchers already use ${new}s; their callers' longer limits stay until each is reconfigured:"
+  fi
+  echo "  run its targets/<hermes|openclaw|honcho>/provision-lxc.sh --reconfigure on the Proxmox host."
+}
+
 regenerate_litellm() {
-  local tmp tier name tag tier_tag url tail_block keep_alive fallbacks sig
+  local tmp tier name tag tier_tag url tail_block keep_alive fallbacks retry_policy sig kindi_timeout
   local -a sig_lines=()
   local kind key_env k
   local -A kind_has_token=()
@@ -834,6 +982,7 @@ regenerate_litellm() {
   done
   $DRY_RUN && { echo "  [dry-run] would regenerate ${LITELLM_YAML}"; return 0; }
   [[ -f "$LITELLM_YAML" ]] || die "missing ${LITELLM_YAML}"
+  kindi_timeout="$(kindi_timeout_seconds)" || die 'Invalid router.ini timeout.'
   tmp="$(mktemp)"
   {
     echo "model_list:"
@@ -862,6 +1011,11 @@ regenerate_litellm() {
         printf '      model: %s/%s\n' "$(litellm_provider "$url")" "$tag"
         printf '      api_base: %s\n' "$(litellm_api_base "$url")"
         kind="$(server_kind "$url")"
+        if [[ "$kind" == kindi ]]; then
+          # A first prompt can take minutes on a small card, and Kindi serves
+          # one request at a time: allow the hour its agent guide asks for.
+          printf '      timeout: %s\n' "$kindi_timeout"
+        fi
         if [[ "$kind" == ollama ]]; then
           [[ -n "$keep_alive" ]] && printf '      keep_alive: %s\n' "$keep_alive"
         else
@@ -882,16 +1036,22 @@ regenerate_litellm() {
       fi
     done
     # router_settings: every hand-edited key (strategy, retries, ...) is kept,
-    # but `fallbacks` is REGENERATED from the tiers that exist now. Carrying it
-    # verbatim left fallbacks pointing at renamed or removed tiers.
+    # `fallbacks` are regenerated. Retry policies for non-Kindi tiers survive;
+    # stale tiers and Kindi-specific policies are regenerated.
     fallbacks="$( ((${#sig_lines[@]})) && printf '%s\n' "${sig_lines[@]}" | litellm_fallbacks)"
+    retry_policy="$( ((${#sig_lines[@]})) && printf '%s\n' "${sig_lines[@]}" | litellm_retry_policy)"
     tail_block="$(awk '/^router_settings:/{f=1} f' "$LITELLM_YAML")"
     [[ -n "$tail_block" ]] || tail_block=$'router_settings:\n  routing_strategy: latency-based-routing\n  num_retries: 2\n  timeout: 600'
-    printf '%s\n' "$tail_block" | FALLBACKS="$fallbacks" awk '
-      /^router_settings:/ { print; if (ENVIRON["FALLBACKS"] != "") print ENVIRON["FALLBACKS"]; next }
+    printf '%s\n' "$tail_block" | FALLBACKS="$fallbacks" RETRY_POLICY="$retry_policy" awk '
+      /^router_settings:/ {
+        print
+        if (ENVIRON["FALLBACKS"] != "") print ENVIRON["FALLBACKS"]
+        if (ENVIRON["RETRY_POLICY"] != "") print ENVIRON["RETRY_POLICY"]
+        next
+      }
       skip && ($0 ~ /^   / || $0 ~ /^  -/) { next }
       { skip = 0 }
-      /^  fallbacks:/ { skip = 1; next }
+      /^  (fallbacks|model_group_retry_policy):/ { skip = 1; next }
       { print }'
   } > "$tmp"
   cat "$tmp" > "$LITELLM_YAML"
@@ -1615,6 +1775,20 @@ else:
             for name in [source] + list(targets or []):
                 if name not in names:
                     err(rel, "fallback names %r, which has no deployment" % name)
+        policy = settings.get("model_group_retry_policy") or {}
+        retry_fields = {"BadRequestErrorRetries", "AuthenticationErrorRetries", "TimeoutErrorRetries",
+                        "RateLimitErrorRetries", "ContentPolicyViolationErrorRetries",
+                        "InternalServerErrorRetries"}
+        if not isinstance(policy, dict):
+            err(rel, "model_group_retry_policy must map tiers to retry counts")
+            policy = {}
+        for name, counts in policy.items():
+            if name not in names:
+                err(rel, "model_group_retry_policy names %r, which has no deployment" % name)
+            if not isinstance(counts, dict) or any(
+                    key not in retry_fields or not isinstance(value, int) or isinstance(value, bool) or value < 0
+                    for key, value in counts.items()):
+                err(rel, "model_group_retry_policy %r needs <Error>Retries: <count> entries" % name)
 
 if not errors:
     seen = {}
@@ -1807,6 +1981,7 @@ cmd_apply() {
   # preserve the executable bit, and we invoke it via `bash` anyway.
   [[ -f "$APPLY_SCRIPT" ]] || die "apply script not found: ${APPLY_SCRIPT}"
   migrate_secrets
+  sync_kindi_timeouts
 
   echo "Validating configuration..."
   if ! validate_config; then
@@ -1815,6 +1990,10 @@ cmd_apply() {
   fi
 
   mapfile -t affected < <(affected_services)
+  local budget_before="" budget_after=""
+  [[ ! -f "${ROUTER_DIR}/router.ini" ]] ||
+    budget_before="$(ROUTER_INI="${ROUTER_DIR}/router.ini" kindi_timeout_seconds 2>/dev/null)" || budget_before=""
+  budget_after="$(kindi_timeout_seconds 2>/dev/null)" || budget_after=""
   snapshot="$(snapshot_runtime)"
   echo "Applying configuration (previous files saved in ${snapshot})..."
   bash "$APPLY_SCRIPT" "$REPO_DIR"
@@ -1866,12 +2045,14 @@ cmd_apply() {
   if (( ${#affected[@]} == 0 )); then
     echo "No service is affected by this change; nothing restarted."
     secrets_fingerprint > "${ROUTER_DIR}/.secrets.applied"
+    kindi_budget_note "$budget_before" "$budget_after"
     return 0
   fi
   echo "Restarting: ${affected[*]}"
   if failed="$(restart_and_check "${affected[@]}")"; then
     secrets_fingerprint > "${ROUTER_DIR}/.secrets.applied"
     echo "Applied; all restarted services are healthy."
+    kindi_budget_note "$budget_before" "$budget_after"
     return 0
   fi
 
@@ -2183,7 +2364,7 @@ cmd_set_api_key() {
 
 # Bearer token for one server kind (set-lmstudio-token, set-maya-token, ...):
 # LM Studio servers with "Require authentication" on, or Strata, Basalt, Maya,
-# Xolotl and Avalon servers started with an API key. One token per kind, stored in
+# Xolotl, Avalon and Kindi servers started with an API key. One token per kind, stored in
 # secrets.env (outside the repo) like the other secrets.
 cmd_set_kind_token() {
   local kind="$1" token="${2:-}" confirm_token="" key_env name noun cmd

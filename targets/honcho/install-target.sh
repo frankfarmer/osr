@@ -52,6 +52,7 @@ embedding_dimensions_mode=${HONCHO_EMBEDDING_DIMENSIONS_MODE:-never}
 # backends that only do JSON mode.
 structured_output_mode=${HONCHO_STRUCTURED_OUTPUT_MODE:-}
 skip_probe=${HONCHO_SKIP_CHAT_PROBE:-false}
+KINDI_READ_TIMEOUT_SECONDS=${KINDI_READ_TIMEOUT_SECONDS:-3600}
 rotate_keys=${HONCHO_ROTATE_KEYS:-false}
 # Bun runs the MCP server, from its release zip checked against a pinned
 # SHA-256: bun-linux-x64 needs AVX2, bun-linux-x64-baseline does not.
@@ -67,6 +68,7 @@ bun=$bun_dir/bun
 units=(honcho-proxy honcho-api honcho-deriver honcho-mcp)
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
+[[ $KINDI_READ_TIMEOUT_SECONDS =~ ^[1-9][0-9]{0,5}$ ]] || die 'Invalid KINDI_READ_TIMEOUT_SECONDS.'
 (( ${#kept_from_last_run[@]} == 0 )) || note "Kept from the last run: ${kept_from_last_run[*]}"
 
 if [[ ${1:-} == --help ]]; then
@@ -153,6 +155,7 @@ context_tokens=${context_tokens:-131072}
     "$embedding_url" "$embedding_model" "$embedding_dimensions"
   printf 'EMBEDDING_DIMENSIONS_MODE=%s\nHONCHO_STRUCTURED_OUTPUT_MODE=%s\nHONCHO_SKIP_CHAT_PROBE=%s\n' \
     "$embedding_dimensions_mode" "$structured_output_mode" "$skip_probe"
+  printf 'KINDI_READ_TIMEOUT_SECONDS=%s\n' "$KINDI_READ_TIMEOUT_SECONDS"
 } > "$deploy/proxy.settings"
 selected_model=$(python3 "$deploy/honcho-proxy.py" --probe "$deploy") ||
   die 'Honcho proxy could not validate a direct chat and embedding target.'
@@ -339,19 +342,28 @@ if [[ $rotate_keys == true ]]; then
   rm -f -- "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key"
 fi
 if [[ ! -s $etc/jwt-secret ]]; then openssl rand -hex 48 > "$etc/jwt-secret"; fi
+llm_timeout=$((KINDI_READ_TIMEOUT_SECONDS * 2))
 {
   printf 'DB_CONNECTION_URI=postgresql+psycopg://honcho:%s@127.0.0.1:5432/honcho\n' "$db_password"
   printf 'AUTH_USE_AUTH=true\nAUTH_JWT_SECRET=%s\n' "$(<"$etc/jwt-secret")"
   printf 'LLM_OPENAI_API_KEY=honcho-local-proxy\n'
+  # Honcho's OpenAI client gives up after 600 s without a byte and then retries.
+  # The proxy already ends a silent request at its own per-server read timeout
+  # (5 minutes; an hour for Kindi, which reads a long prompt slowly and serves
+  # one request at a time), so Honcho waits for the proxy instead of sending a
+  # retry that would queue behind the request Kindi is still reading.
+  # provider_params.timeout is Honcho's per-request client timeout (v3.5.0).
   for prefix in DERIVER SUMMARY DREAM_DEDUCTION DREAM_INDUCTION; do
     printf '%s_MODEL_CONFIG__MODEL=%s\n' "$prefix" "$model"
     printf '%s_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$prefix" "$proxy_url"
+    printf '%s_MODEL_CONFIG__OVERRIDES__PROVIDER_PARAMS__TIMEOUT=%s\n' "$prefix" "$llm_timeout"
     [[ -z $structured_output_mode ]] ||
       printf '%s_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=%s\n' "$prefix" "$structured_output_mode"
   done
   for level in minimal low medium high max; do
     printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__MODEL=%s\n' "$level" "$model"
     printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$level" "$proxy_url"
+    printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__OVERRIDES__PROVIDER_PARAMS__TIMEOUT=%s\n' "$level" "$llm_timeout"
     [[ -z $structured_output_mode ]] ||
       printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=%s\n' "$level" "$structured_output_mode"
   done

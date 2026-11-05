@@ -21,7 +21,7 @@ Normal request path: **client or Open WebUI → router :8000 → model host**.
 LiteLLM handles static tiers when discovery is off or the inventory is empty.
 
 The pool can mix Ollama, LM Studio, llama.cpp, AirLLM, Strata, Basalt, Maya,
-Xolotl and Avalon. Optional service and companion CTs are listed under
+Xolotl, Avalon and Kindi. Optional service and companion CTs are listed under
 [Inference targets](#inference-targets).
 
 ## Install
@@ -33,7 +33,7 @@ bash ollama-smart-router-install.sh
 ```
 
 The installer asks which targets to create: Gitea and Mattermost services;
-Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl and Avalon model servers; and
+Ollama, llama.cpp, AirLLM, Kindi, Strata, Basalt, Maya, Xolotl and Avalon model servers; and
 Honcho memory, Hermes, OpenClaw and DeepSeek Harness agents, and Open Terminal and ComfyUI tools. Enter comma-separated names or
 menu numbers, or press Enter for none. Gitea stores configuration history and
 Mattermost receives alerts; both are optional and can also be installed
@@ -43,7 +43,7 @@ separately from [targets/gitea](targets/gitea/README.md) and
 Enter the router's CT ID and static IP/CIDR, then a unique CT ID, static
 IP/CIDR and storage for each selected target. The installer does not choose
 CT IDs or IP addresses; environment presets prefill the prompts when supplied.
-Strata, Basalt, Maya, Xolotl and Avalon also ask for a template. The installer then
+Strata, Basalt, Maya, Xolotl, Avalon and Kindi also ask for a template. The installer then
 checks the host GPU, creates selected service CTs, verifies the Gitea token,
 creates the router CT, provisions model targets, then Honcho and the selected
 agents and tools. The menu groups CPU and GPU targets by purpose. Choose **Default** in the Gitea, Mattermost and
@@ -75,6 +75,7 @@ Generated Gitea and Mattermost admin passwords are in
 | llama.cpp | Debian 13 listed first | Debian 12/13 for CUDA or CPU; Debian 13 for Vulkan |
 | Basalt, Maya, Xolotl | Debian 13 | Debian 12; Ubuntu 22.04, 24.04, 26.04 |
 | Strata | Debian 13 | Debian 12; Ubuntu 22.04/24.04 (no Ubuntu 26.04) |
+| Kindi | Debian 13 | Debian 12; Ubuntu 22.04/24.04 (the CUDA 10.2 runfile; no Ubuntu 26.04) |
 | Avalon | Ubuntu 24.04 | Ubuntu 22.04 (AMD ROCm); with CUDA also Debian 12/13, Ubuntu 26.04 |
 
 Mattermost's `MATTERMOST_CT_VERSION` also accepts Ubuntu 26.04 as an explicit
@@ -107,6 +108,7 @@ target README for Python, CUDA and GPU requirements.
 | llama.cpp | NVIDIA CUDA or AMD/Intel Vulkan; `BACKEND=cpu` needs no GPU |
 | AirLLM | NVIDIA when `GPU_DEVICES` is set |
 | Ollama, ComfyUI | NVIDIA, AMD or Intel if present; otherwise CPU |
+| Kindi | NVIDIA of any generation from Kepler (sm_30) if present, on the host's driver (Kepler: the 470 driver, installed by hand); otherwise its CPU engine (AVX2) |
 
 **Which GPU each target gets.** The installer lists the host's NVIDIA cards
 and its AMD Radeon RX 7000/9000 and Intel Arc A/B cards (from `lspci`; Intel
@@ -114,22 +116,23 @@ iGPUs and older Radeons are not listed). Ollama, llama.cpp and ComfyUI, the
 targets that also run on AMD and Intel, then each ask which of those cards to
 use, so one host can give Ollama a Radeon, llama.cpp an Arc and ComfyUI an
 NVIDIA card. Avalon is asked too: an RDNA 3 Radeon (built with ROCm) or an
-NVIDIA card (CUDA). Ollama and ComfyUI also offer `none` (the CPU). Several targets
+NVIDIA card (CUDA). So is Kindi, which is meant for a spare old or small
+NVIDIA card. Ollama, Kindi and ComfyUI also offer `none` (the CPU). Several targets
 may pick the same card. When only one card fits a target that needs a GPU,
 it is taken without asking. Cards bound to `vfio-pci` are not offered.
-Presets: `OLLAMA_GPU_CARD`, `LLAMACPP_GPU_CARD`, `AVALON_GPU_CARD`, `COMFYUI_GPU_CARD` (a PCI
+Presets: `OLLAMA_GPU_CARD`, `LLAMACPP_GPU_CARD`, `AVALON_GPU_CARD`, `KINDI_GPU_CARD`, `COMFYUI_GPU_CARD` (a PCI
 address such as `0000:03:00.0`, or `none`). Strata, Basalt, Maya, Xolotl and
 AirLLM run on NVIDIA only and are not asked; they use the NVIDIA driver's
 GPU 0 (or their `GPU_DEVICES`).
 
 **Each model target's context window.** Next, the installer asks for the
 context window (tokens per request) of each selected Ollama, llama.cpp,
-Strata, Basalt, Maya, Xolotl and Avalon target. Every one defaults to 65536.
+Strata, Basalt, Maya, Xolotl, Avalon and Kindi target. Every one defaults to 65536 (Kindi to `auto`).
 Each prompt shows a recommendation that weighs three things:
 
 - the target's GPU memory, read from `nvidia-smi` or amdgpu's sysfs file.
   It is unknown on a host whose driver is not set up yet;
-- the target's engine: Avalon follows its own `auto` rule, Xolotl's 128k needs
+- the target's engine: Avalon and Kindi follow their own `auto` rules, Xolotl's 128k needs
   a 24 GB card, and Strata, Basalt and Maya keep a small KV cache. Ollama and
   llama.cpp are sized for full-attention models, whose cache grows fastest;
 - the selected agents: Hermes needs 64000 tokens or more, OpenClaw 32768,
@@ -140,7 +143,7 @@ Harness's windows are asked last and default to the smallest window chosen
 above. A llama.cpp window is multiplied by its `PARALLEL_SLOTS` for
 `CONTEXT_SIZE`. Presets are the defaults: `OLLAMA_CONTEXT_LENGTH`,
 `LLAMACPP_CONTEXT` (or `CONTEXT_SIZE`), `STRATA_CONTEXT`, `BASALT_CONTEXT`,
-`MAYA_CONTEXT`, `XOLOTL_CONTEXT`, `AVALON_CONTEXT` (also `auto`),
+`MAYA_CONTEXT`, `XOLOTL_CONTEXT`, `AVALON_CONTEXT`, `KINDI_CONTEXT` (both also `auto`),
 `HONCHO_CONTEXT_TOKENS` and `DEEPSEEK_HARNESS_CONTEXT_WINDOW`. AirLLM, which
 streams layers from disk, keeps its own small window.
 
@@ -253,6 +256,7 @@ and recovery steps. Provisioners support `--dry-run`.
 | [Maya](targets/maya/README.md) | `maya://` | 8080 | NVIDIA; CUDA version must suit CT and card |
 | [Xolotl](targets/xolotl/README.md) | `xolotl://` | 8080 | NVIDIA; ~372 GB of pinned weights |
 | [Avalon](targets/avalon/README.md) | `avalon://` | 8080 | Qwen3.8-Flash-Next on an AMD RX 7000 (ROCm) or NVIDIA GPU, experts in RAM; ~90 GiB of pinned weights |
+| [Kindi](targets/kindi/README.md) | `kindi://` | 8093 | Ternary-Bonsai-2 2B to 27B (or Nanbeige 33B) on an old or small NVIDIA card from a 1 GB Kepler up, or the CPU; one request at a time |
 
 [Gitea](targets/gitea/README.md) and
 [Mattermost](targets/mattermost/README.md) provide config history and alerts.
@@ -293,7 +297,7 @@ servers, services and companions); the last tag names the target.
 | CT | Tags |
 |---|---|
 | Router (`ollama-smart-router-install.sh`) | `ai`, `ai-tools`, `osr-router`, `openwebui` |
-| Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl, Avalon, ComfyUI | `ai`, `ai-model`, `osr-target`, `<target>` |
+| Ollama, llama.cpp, AirLLM, Strata, Basalt, Maya, Xolotl, Avalon, Kindi, ComfyUI | `ai`, `ai-model`, `osr-target`, `<target>` |
 | Gitea, Mattermost, Honcho, Open Terminal, Hermes, OpenClaw, DeepSeek Harness | `ai`, `ai-tools`, `osr-target`, `<target>` |
 
 `<target>` is the target's directory name under `targets/` (`ollama`,
@@ -458,7 +462,7 @@ manage-model-servers set-model large qwen3:32b --apply       # every server in t
 manage-model-servers set-server-model large 10.0.0.54 llama3.3:70b --apply   # one server
 manage-model-servers set-keepalive 2h --apply
 manage-model-servers set-api-key [key|--generate|--off]
-manage-model-servers set-<kind>-token [token|--off]          # lmstudio, strata, basalt, maya, xolotl, avalon
+manage-model-servers set-<kind>-token [token|--off]          # lmstudio, strata, basalt, maya, xolotl, avalon, kindi
 manage-model-servers set-token | set-webhook [url] | test-alert [message]
 manage-model-servers set-webui-version [version|latest] [--apply]
 manage-model-servers apply [--all] | commit [message]
@@ -485,7 +489,8 @@ default port. Xolotl runs Strata's server, so its `/health` says `strata`; a
 DeepSeek-V4 model there identifies Xolotl. Avalon is a llama-server whose
 `/health` says only `status`; it is identified from `/v1/models`
 (`"owned_by": "llamacpp"` and an Avalon model id), which needs its key once
-one is set, so add a keyed Avalon as `avalon://host`.
+one is set, so add a keyed Avalon as `avalon://host`. Kindi's public `/health`
+names it (`"kindi": "<version>"`), so it is found without a key.
 
 | Kind | Default port | Token (in `secrets.env`) | Notes |
 |---|---|---|---|
@@ -496,6 +501,7 @@ one is set, so add a keyed Avalon as `avalon://host`.
 | Maya | 8080 | `set-maya-token` | Model ID `glm-5.3-flash` |
 | Xolotl | 8080 | `set-xolotl-token` | Model ID `XOLOTL_MODEL_NAME` (default `deepseek-v4.1-flash`, sized 552B) |
 | Avalon | 8080 | `set-avalon-token` | Model ID `AVALON_MODEL_NAME` (default `qwen3.8-flash-next-avalon`, sized 125B) |
+| Kindi | 8093 | `set-kindi-token` | Model ID `bonsai2-<size>` or `nanbeige-33b-iq3`, sized from the id; serves one request at a time |
 
 Example for a keyed Strata-style server. Set the token first, so the probe can
 authenticate:
@@ -517,13 +523,13 @@ instead of `--host`; it [creates a key by default](https://github.com/Niko1221/S
 
 If an older keyed Strata cannot be identified without a key, add it as
 `strata://host` (that probe uses the key) or with `--no-probe`. Strata, Basalt,
-Maya, Xolotl and Avalon load models themselves, so no keep-alive is sent. The monitor counts
+Maya, Xolotl, Avalon and Kindi load models themselves, so no keep-alive is sent. The monitor counts
 them as down while `/v1/models` is empty, which is how they answer when the
 engine is not running.
 
 ### Model sizes for unsized IDs
 
-Strata, Basalt, Maya, Xolotl and Avalon report no parameter count. `[model_sizes]` in
+Strata, Basalt, Maya, Xolotl and Avalon report no parameter count (Kindi's ids name it). `[model_sizes]` in
 `router.ini` maps exact model IDs (case-insensitive) to a size:
 
 ```ini
@@ -582,7 +588,10 @@ In local mode, edit `/app/config-repo` directly and skip `git pull`.
 
 Regenerating the LiteLLM config keeps model tags and hand-edited
 `router_settings` (`num_retries: 2`, `timeout: 600`). It rebuilds `fallbacks`
-from the existing tiers and never falls back to an identical tier.
+from the existing tiers and never falls back to an identical tier, or into a
+tier with Kindi except from a tier on other Kindi servers. It keeps operator
+retry policies (block or flow style) for other current tiers and writes Kindi's
+own for Kindi tiers (see targets/kindi/README.md).
 
 **Secrets** (deploy token, webhook, router key, backend tokens) live only in
 `/app/router/secrets.env` (`0640 root:ollama-router`). `apply` and `commit`
@@ -652,7 +661,7 @@ to change: it handles both the 0.11.4+ connection check and the older one.
 ### Targets
 
 Target upgrades check readiness and restore the prior code and settings on
-failure. Strata, Basalt, Maya, Xolotl and Avalon need disk for one runtime snapshot;
+failure. Strata, Basalt, Maya, Xolotl, Avalon and Kindi need disk for one runtime snapshot;
 their existing installation settings carry forward unless explicitly
 overridden. See the target README and [architecture upgrade contract](ARCHITECTURE.md#16-inference-targets-targets)
 before upgrading. Interrupting an upgrade (Ctrl-C, a closed SSH session)
@@ -759,7 +768,7 @@ OpenClaw's provider `osr` works the same way; its dispatcher logs to
 | No Mattermost alerts | `journalctl -u ollama-monitor` shows rejected webhooks. Use `set-webhook` and `test-alert`. Alerts fire after 3 failed checks and recover after 2; the startup notice is sent at most hourly. |
 | `apply` failed | The snapshot was restored and the services were restarted on the old files. Read the reported check, then `journalctl -u <unit>`. Snapshots are in `/var/backups/ollama-smart-router/`. |
 | "config is locked" | Another change is running. A hung one: `manage-model-servers clear-lock` shows the holder, and `--force` stops it. Afterwards check `git -C /app/config-repo status` and re-run `apply`. |
-| Target upgrade failed | The installer says whether the previous version is "running again". If not, use `journalctl -u <unit>` in the target CT. Replaced files are kept as `*.prev` (llama.cpp, AirLLM, Ollama); Strata, Basalt, Maya, Xolotl and Avalon keep their snapshot in `/var/lib/<target>-target/` when the rollback fails. Maya, Basalt and Xolotl: the CT's distro must carry the CUDA release, or the toolkit must already be installed. Debian 13 starts at 13.1 (no V100 support for Maya; set `CUDA_VERSION=13.1` for Basalt). |
+| Target upgrade failed | The installer says whether the previous version is "running again". If not, use `journalctl -u <unit>` in the target CT. Replaced files are kept as `*.prev` (llama.cpp, AirLLM, Ollama); Strata, Basalt, Maya, Xolotl, Avalon and Kindi keep their snapshot in `/var/lib/<target>-target/` when the rollback fails. Maya, Basalt and Xolotl: the CT's distro must carry the CUDA release, or the toolkit must already be installed. Debian 13 starts at 13.1 (no V100 support for Maya; set `CUDA_VERSION=13.1` for Basalt). |
 
 ## Development
 
@@ -774,4 +783,4 @@ To run CI (`.gitea/workflows/tests.yml`) in Gitea, enable Actions on the
 repository and register an `act_runner` with an ubuntu-latest style image.
 Configure its job containers to run as root, because
 `--strict` fails on skipped root-only tests. The `strata-upstream`,
-`maya-upstream`, `xolotl-upstream` and `avalon-upstream` jobs also need access to GitHub.
+`maya-upstream`, `xolotl-upstream`, `avalon-upstream` and `kindi-upstream` jobs also need access to GitHub.
