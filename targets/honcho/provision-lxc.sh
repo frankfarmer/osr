@@ -130,6 +130,14 @@ choose_from() {
 honcho_reconfigure_preflight() {
   local ct=$1 previous_embedding
   pct status "$ct" 2>/dev/null | grep -q 'status: running' || die "Honcho CT $ct is not running."
+  pct config "$ct" 2>/dev/null | awk '
+    /^tags:/ {
+      sub(/^tags:[[:space:]]*/, "")
+      n = split($0, tags, /[;, ]+/)
+      for (i = 1; i <= n; i++) if (tags[i] == "honcho") found = 1
+    }
+    END { exit !found }
+  ' || die "CT $ct has no honcho tag. Check pct config $ct and select the Honcho CT."
   previous_embedding=$(pct exec "$ct" -- sed -n 's/^EMBEDDING_MODEL_CONFIG__MODEL=//p' \
     /etc/honcho-target/honcho.env 2>/dev/null | head -n1) ||
     die "Cannot read the embedding model in Honcho CT $ct."
@@ -584,9 +592,9 @@ if (( dry_run )); then
   [[ $rotate_keys == false ]] || printf 'Would replace the JWT secret and both Honcho keys.\n'
   (( ${#budget_env[@]} == 0 )) || printf 'Would pass these budget settings to the CT: %s\n' "${budget_env[*]}"
   (( ${#kept_env[@]} == 0 )) || printf 'Would pass these settings to the CT: %s\n' "${kept_env[*]}"
-  # A dry run does not look inside the CT, so it cannot apply this check.
+  # A dry run does not inspect the CT, so it cannot apply these checks.
   [[ $mode != reconfigure ]] ||
-    printf 'Not checked by a dry run: CT %s must be running and embed with qwen3-embedding-0.6b; a real run refuses it otherwise.\n' "$CT_ID"
+    printf 'Not checked by a dry run: CT %s must be running, tagged honcho, and embed with qwen3-embedding-0.6b; a real run refuses it otherwise.\n' "$CT_ID"
   exit 0
 fi
 # Checked before anything is created: the run ends by registering MCP.
@@ -659,8 +667,6 @@ if [[ $mode == create ]]; then
   pct start "$CT_ID"
 else
   pct status "$CT_ID" 2>/dev/null | grep -q 'status: running' || die "Honcho CT $CT_ID is not running."
-  pct config "$CT_ID" | grep -qx 'description: Honcho AI for Ollama Smart Router' ||
-    die "CT $CT_ID is not marked as this target's Honcho CT."
 fi
 
 rules=$(honcho_rules "$router_ip" $HONCHO_CLIENT_IPS)

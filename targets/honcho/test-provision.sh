@@ -30,7 +30,7 @@ assert_fail "a moving branch other than main is refused" env "${common[@]}" HONC
 assert_fail "--rotate-keys needs an existing CT" env "${common[@]}" bash "$provision" --dry-run --rotate-keys
 plan=$(env "${common[@]}" bash "$provision" --dry-run --reconfigure --rotate-keys)
 assert_contains "a reconfigure can rotate the keys" "Would replace the JWT secret and both Honcho keys" "$plan"
-assert_contains "a dry-run reconfigure names the check it cannot make" "Not checked by a dry run: CT 285 must be running and embed with qwen3-embedding-0.6b" "$plan"
+assert_contains "a dry-run reconfigure names the checks it cannot make" "Not checked by a dry run: CT 285 must be running, tagged honcho, and embed with qwen3-embedding-0.6b" "$plan"
 assert_not_contains "a dry-run create has no such check" "Not checked by a dry run" "$(env "${common[@]}" bash "$provision" --dry-run)"
 assert_contains "and admits Honcho in the router's firewall" "Would admit 192.0.2.85 to the router API in /etc/pve/firewall/280.fw" "$plan"
 assert_not_contains "unless that is turned off" "Would admit" "$(env "${common[@]}" HONCHO_ROUTER_FIREWALL=false bash "$provision" --dry-run)"
@@ -46,6 +46,7 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 pct() {
   case $1 in
     status) [[ ${FAKE_CT_DOWN:-false} != true ]] && printf 'status: running\n' ;;
+    config) printf 'description: Honcho AI for Ollama Smart Router%%0A\ntags: %s\n' "${FAKE_CT_TAGS:-osr-target;honcho}" ;;
     exec)
       case $4 in
         sed) printf '%s\n' "${FAKE_PREVIOUS_EMBEDDING:-qwen3-embedding-0.6b}" ;;
@@ -53,13 +54,19 @@ pct() {
   esac
 }
 preflight() ( honcho_reconfigure_preflight 285 )
-assert_ok "the same model permits reconfigure" preflight
+assert_ok "the encoded Proxmox description and same model permit reconfigure" preflight
 out=$(FAKE_PREVIOUS_EMBEDDING=nomic-embed-text preflight 2>&1) && rc=0 || rc=$?
 assert_ne "an older model is refused" 0 "$rc"
 assert_contains "with migration guidance" "cannot migrate stored vectors" "$out"
 out=$(FAKE_CT_DOWN=true preflight 2>&1) && rc=0 || rc=$?
 assert_ne "a stopped CT is refused by the helper" 0 "$rc"
 assert_contains "with its CT ID" "Honcho CT 285 is not running" "$out"
+out=$(FAKE_CT_TAGS='osr-target;openclaw' preflight 2>&1) && rc=0 || rc=$?
+assert_ne "an untagged CT is refused" 0 "$rc"
+assert_contains "before any guest operation" "CT 285 has no honcho tag" "$out"
+guard_line=$(grep -n 'honcho_reconfigure_preflight "\$CT_ID"' "$provision" | tail -n1 | cut -d: -f1)
+token_line=$(grep -n 'if \[\[ -z ${OPENWEBUI_ADMIN_TOKEN' "$provision" | head -n1 | cut -d: -f1)
+assert_ok "the CT identity is checked before asking for the admin token" test "$guard_line" -lt "$token_line"
 
 describe router_fw_with_honcho
 # shellcheck disable=SC1090

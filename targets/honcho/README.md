@@ -465,6 +465,8 @@ for the Honcho CT (offering the one tagged `honcho`), then the router
 CT. The chat model, context window and the agents admitted to Honcho are
 all offered from what the running CT recorded (`/etc/honcho-target/proxy.settings`, `budgets.env` and its
 firewall), so Enter keeps each one; unattended, the recorded values are kept.
+Before asking for the Open WebUI admin token, the installer checks that the
+CT is running, has the `honcho` tag, and uses the expected embedding model.
 The Open WebUI admin token is requested again. A dry-run reconfigure also
 needs `IP_CIDR` because it does not inspect the CT.
 
