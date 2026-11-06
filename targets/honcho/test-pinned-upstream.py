@@ -20,6 +20,10 @@ A Kindi that accepts a request and never answers, behind this target's own
 dispatcher, must get exactly one POST through the dispatcher, the SDK and
 Honcho's outer retry loop.
 
+Honcho's settings loader must also read the local embedding model's block as
+written: its model, URL, vector size, no dimensions= field, float vectors,
+the timeout and the CPU-sized input and request limits.
+
 Change the target's HONCHO_REF default only after this passes against it.
 """
 import asyncio
@@ -52,6 +56,14 @@ def pinned_ref():
     return match.group(1)
 
 
+def installer_value(name):
+    """A constant install-target.sh sets at its top (embedding_model=...)."""
+    match = re.search(r"^%s=(\S+)$" % re.escape(name), INSTALLER.read_text(), re.M)
+    if not match:
+        raise SystemExit(f"No {name}= in {INSTALLER}")
+    return match.group(1)
+
+
 def honcho_env():
     """The honcho.env lines install-target.sh writes, from its own block."""
     text = INSTALLER.read_text()
@@ -63,8 +75,9 @@ def honcho_env():
         script = text[start:end] + "}\n"
         env = {"PATH": os.environ["PATH"], "KINDI_READ_TIMEOUT_SECONDS": str(BUDGET), "etc": tmp,
                "deploy": tmp, "db_password": "pw", "model": "fast", "proxy_url": "http://127.0.0.1:9",
-               "structured_output_mode": "", "embedding_dimensions": "768",
-               "embedding_model": "nomic-embed-text", "embedding_dimensions_mode": "auto"}
+               "structured_output_mode": "",
+               **{name: installer_value(name) for name in
+                  ("embedding_model", "embedding_dimensions", "embedding_url")}}
         out = subprocess.run(["bash", "-euc", script], env=env, check=True,
                              capture_output=True, text=True).stdout
     return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
@@ -170,6 +183,24 @@ def main(checkout):
         check(config.transport == "openai" and config.base_url == "http://127.0.0.1:9/v1"
               and sent.get("timeout") == want and "timeout" not in (sent.get("extra_body") or {}),
               f"{name}: Honcho sends the OpenAI client timeout={sent.get('timeout')} to {config.base_url}")
+
+    # The local embedding model's block, as Honcho reads it.
+    embedding = settings.EMBEDDING
+    overrides = embedding.MODEL_CONFIG.overrides
+    url = installer_value("embedding_url") + "/v1"
+    check(embedding.MODEL_CONFIG.model == installer_value("embedding_model") and overrides.base_url == url
+          and embedding.MODEL_CONFIG.transport == "openai" and bool(overrides.api_key),
+          f"embeddings go to {embedding.MODEL_CONFIG.model} at {overrides.base_url}")
+    check(embedding.VECTOR_DIMENSIONS == int(installer_value("embedding_dimensions"))
+          and embedding.MODEL_CONFIG.dimensions_mode == "never"
+          and not embedding.resolve_send_dimensions(),
+          f"{embedding.VECTOR_DIMENSIONS}-value vectors, without a dimensions= field")
+    check(embedding.MODEL_CONFIG.encoding_format_mode == "float" and embedding.MODEL_CONFIG.timeout == 600,
+          f"float vectors, a {embedding.MODEL_CONFIG.timeout} s timeout")
+    check((embedding.MAX_INPUT_TOKENS, embedding.MAX_TOKENS_PER_REQUEST, embedding.MAX_CONCURRENT_EMBEDDINGS)
+          == (1536, 4096, 2),
+          f"inputs of {embedding.MAX_INPUT_TOKENS} tokens, {embedding.MAX_TOKENS_PER_REQUEST} a request, "
+          f"{embedding.MAX_CONCURRENT_EMBEDDINGS} at a time")
 
     # The OpenAI SDK Honcho pins gives up after that per-request timeout.
     import openai  # noqa: E402

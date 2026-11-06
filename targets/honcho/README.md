@@ -3,7 +3,10 @@
 [Honcho](https://github.com/plastic-labs/honcho) stores conversations and
 derives persistent peer memory. This CPU-only target creates a separate
 unprivileged Debian 13 LXC with PostgreSQL/pgvector, the Honcho API and
-deriver, and the upstream HTTP MCP server. No GPU is passed through. The
+deriver, the upstream HTTP MCP server and Honcho's own embedding model:
+[Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF)
+(Q8_0, 1024 dimensions) on llama.cpp's `llama-server`, on the CT's CPU. No
+GPU is passed through, and no embedding server elsewhere is needed. The
 Proxmox firewall allows the router and the selected agent CTs (Hermes,
 OpenClaw, DeepSeek Harness) to reach API port 8000 and MCP port 3000. Other
 inbound traffic is blocked. Honcho uses JWT authentication with two keys in
@@ -16,8 +19,9 @@ an agent's MCP rule is tagged `# osr-honcho-client-mcp`).
 
 ## Requirements
 
-Honcho itself needs no GPU; the models it calls run on your model servers
-(an Ollama CT or another target behind the router). Before installing, check
+Honcho itself needs no GPU; its chat model runs on your model servers (an
+Ollama CT or another target behind the router), and its embedding model in
+its own CT. Before installing, check
 that you have all of the following.
 
 **The Honcho CT (this target)**
@@ -25,10 +29,12 @@ that you have all of the following.
 - A Debian 13 amd64 LXC template: Honcho needs Python 3.13, which Debian 12
   does not ship.
 - 4 cores, 8 GiB RAM and 48 GiB disk by default, plus room in
-  `/var/lib/honcho-target/` for a database dump during each reconfigure.
-- Network access to GitHub (the Honcho release and Bun) and the Debian
-  mirrors during install, and to the router inventory and selected model
-  targets at all times. The router CT's Proxmox firewall must admit the Honcho CT; the
+  `/var/lib/honcho-target/` for a database dump during each reconfigure. The
+  embedding model takes up to about 3.3 GiB of that RAM while it embeds, and
+  about 2 GiB of disk with llama.cpp's build tools.
+- Network access to GitHub (the Honcho release, Bun and llama.cpp), Hugging
+  Face (the 639 MB model file, once) and the Debian mirrors during install,
+  and to the router inventory and selected chat model targets at all times. The router CT's Proxmox firewall must admit the Honcho CT; the
   provisioner adds that rule when the router CT has a firewall file. If a
   model CT blocks inbound requests, allow the Honcho CT's IP to reach its
   inference port as well.
@@ -75,10 +81,9 @@ that you have all of the following.
   only when someone asks a question, so it competes with interactive chats on
   the same GPU.
 
-**An embedding model** on any OpenAI-compatible `/v1` endpoint, with a fixed
-vector size that you choose once: changing it later needs a new Honcho
-database. `nomic-embed-text` (768 dimensions, under 1 GB) in an Ollama CT is
-enough.
+**No embedding model elsewhere.** The CT runs its own (see
+[The local embedding model](#the-local-embedding-model)); there is nothing to
+choose and no vector size to give.
 
 ### Choosing a model for your GPU
 
@@ -180,11 +185,11 @@ the budgets it set.
 ## Configuration
 
 The local `honcho-proxy` service listens only on `127.0.0.1:8765`. Honcho's
-chat and embedding settings always point to its `/v1` endpoint with a
-placeholder API key. The proxy alone reads the router key and model backend
-keys, consults `/routing/inventory` and `/routing/explain`, and sends inference
-requests directly to the selected model target. The router does not handle
-Honcho's chat or embedding payloads. The proxy requires a live inventory entry
+chat settings always point to its `/v1` endpoint with a placeholder API key.
+The proxy alone reads the router key and model backend keys, consults
+`/routing/inventory` and `/routing/explain`, and sends chat requests directly
+to the selected model target. The router does not handle Honcho's chat
+payloads, and embeddings never leave the CT. The proxy requires a live inventory entry
 that explicitly reports tool support and a context window at least as large as
 `HONCHO_CONTEXT_TOKENS`. At install or reconfigure it probes the selected
 model's tool calling and structured JSON output, then records the resolved
@@ -196,24 +201,7 @@ is the default tier; an exact model name can pin the choice. If the backend
 only has JSON mode, set
 `HONCHO_STRUCTURED_OUTPUT_MODE=json_object`. `HONCHO_SKIP_CHAT_PROBE=true`
 skips active chat probes, but still requires inventory to report tools and
-sufficient context. Honcho also needs embeddings for memory writes. Set
-`HONCHO_EMBEDDING_MODEL` and `HONCHO_EMBEDDING_DIMENSIONS` to a reachable
-OpenAI-compatible embedding model and its vector size. Set
-`HONCHO_EMBEDDING_BASE_URL` to that server's `/v1` URL (`http(s)://host[:port]/v1`);
-if blank, the proxy finds that embedding model in the router's live inventory
-(ignoring case and Ollama's implicit `:latest` tag, so `nomic-embed-text`
-matches `nomic-embed-text:latest`) and calls its target directly. For example, pull `nomic-embed-text`
-in an Ollama CT and use
-`HONCHO_EMBEDDING_MODEL=nomic-embed-text`, `HONCHO_EMBEDDING_DIMENSIONS=768`,
-and `HONCHO_EMBEDDING_BASE_URL=http://<ollama-ip>:11434/v1`. The installer
-checks the endpoint and dimensions before it configures Honcho. If an
-explicit embedding endpoint differs from the router, the proxy sends it a
-placeholder key; use an endpoint that accepts unauthenticated local requests.
-For inventory targets, the proxy uses the target's backend key if configured.
-If the embedding provider needs the OpenAI `dimensions` parameter, set
-`HONCHO_EMBEDDING_DIMENSIONS_MODE=auto` or `always`; the default is `never` for
-fixed-size local models. Changing vector dimensions after data has been stored
-requires a new Honcho database. The target installs the upstream release
+sufficient context. The target installs the upstream release
 `HONCHO_REF=v3.5.0`; set another release tag, a full commit SHA, or `main`
 (the choice is kept by later reconfigures).
 Its MCP server runs on Bun 1.4.4 from the release zip, checked against a
@@ -223,6 +211,58 @@ pinned SHA-256 (the baseline build on CPUs without AVX2). For another Bun set
 `bun-linux-x64-baseline.zip` (the error names the one missing). The services
 run `uv run --frozen`, so they use exactly the locked dependencies.
 
+### The local embedding model
+
+`honcho-embedding.service` runs llama.cpp's `llama-server` on
+`127.0.0.1:8766` only (no key; Honcho in the CT is its only client) with
+Qwen3-Embedding-0.6B, Q8_0, 1024 dimensions, last-token pooling. Honcho
+calls it directly; it is not behind the proxy or the router.
+
+- **llama.cpp** is the release the llama.cpp target uses, `v0.5.0`, fetched
+  by its tag and refused unless it is commit
+  `7fe450e19305b828c199d602c23a8337aaa1f03b`. It is built in the CT for its
+  CPU: `llama-server` only, static, without the web UI or HTTPS, and with the
+  x86 instruction sets this CPU has (AVX, F16C, FMA, AVX2, BMI2) rather than
+  a native build, which has died with SIGILL on older CPUs. That takes a few
+  minutes on the first install; later runs reuse the binary until the commit
+  or the CPU's instruction sets change (a CT moved to another host is
+  rebuilt). It lives in `/opt/honcho-llama/` with its `build-info`.
+- **The model file** `Qwen3-Embedding-0.6B-Q8_0.gguf` (639 MB) is downloaded
+  once from one fixed revision of Qwen's repository and checked against its
+  SHA-256 (`06507c7b...c3e439`) on every run; a damaged file is downloaded
+  again, a mismatch stops the run. It lives in `/var/lib/honcho-embedding/`.
+- **The install checks it** with one embedding (1024 values) before Honcho
+  is stopped or its data touched.
+- **Sized for a CPU.** For an embedding, llama.cpp also scores the model's
+  151k-word vocabulary for every token of the batch, about 1.2 GB per 1000
+  tokens at the peak, so the server's batch (and context) is 2048 tokens:
+  about 3.3 GB with the model. Honcho splits messages into chunks of at most
+  1536 tokens (`EMBEDDING_MAX_INPUT_TOKENS`; it counts with another tokenizer,
+  so the room is kept), sends at most 4096 tokens a request and two requests
+  at a time, and waits up to 600 s for one. A full chunk takes seconds on a
+  few cores, and the embedding work shares the CT's cores with Honcho.
+- Honcho's settings: `EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-0.6b`,
+  `EMBEDDING_VECTOR_DIMENSIONS=1024`, no `dimensions=` field and float
+  vectors. `journalctl -u honcho-embedding` shows the server.
+
+Settings for an embedding server elsewhere (`HONCHO_EMBEDDING_MODEL`,
+`HONCHO_EMBEDDING_DIMENSIONS`, `HONCHO_EMBEDDING_BASE_URL`,
+`HONCHO_EMBEDDING_DIMENSIONS_MODE`) are no longer used; a run that is given
+one says so and goes on.
+
+### Changing an existing embedding model
+
+An existing CT configured with another embedding model (for example,
+`nomic-embed-text`) cannot switch to the local model through `--reconfigure`.
+The Proxmox provisioner checks this before changing firewall rules or staging
+the Open WebUI admin token; the guest checks it again before dumping the
+database, stopping Honcho or clearing any vectors. Honcho does not provide a
+verified in-place rebuild of all stored message and document embeddings; its
+pgvector-only reconciler does not process pending documents. To move an
+existing deployment, provision a new Honcho CT with the local model. Migrate
+its data using a separately verified procedure. Keep the old CT and its
+database until you have checked the new deployment's search results.
+
 ## Upgrades, rollback and keys
 
 Change the `HONCHO_REF` default only after
@@ -231,17 +271,21 @@ Change the `HONCHO_REF` default only after
 builder on the `honcho.env` this target writes and checks that every model
 config sends the OpenAI client the model-client timeout (twice the router's
 Kindi read budget), and that the pinned OpenAI SDK stops a silent request at
-that timeout.
+that timeout. It also checks that Honcho reads the local embedding model's
+settings as written: model, URL, vector size, no `dimensions=` field, float
+vectors and the input and request limits.
 
 A reconfigure keeps the PostgreSQL database, JWT secret and both keys. Before
-it changes an installed CT, it sets aside the env file, keys, units and Bun
-in `/var/lib/honcho-target/rollback/` (root-only), stops the four services,
+it changes an installed CT, it sets aside the env file, keys, units, Bun and
+`llama-server` in `/var/lib/honcho-target/rollback/` (root-only), stops the
+five services,
 and dumps the database there (`pg_dump -Fc`; leave room for it). The dump is
 taken even when the commit is unchanged because embedding configuration can
 change empty vector columns. If any later
 step fails, the previous commit, its dependencies, the database (dropped,
-recreated and restored from the dump), the env file, keys, units and Bun are
-put back and the services started again; the run reports whether the
+recreated and restored from the dump), the env file, keys, units, Bun and
+`llama-server` are put back and the services the previous install had are
+started again; the run reports whether the
 previous version is healthy. The set-aside copies are deleted after a
 successful run or a clean rollback, and kept for inspection otherwise.
 
@@ -252,35 +296,36 @@ the run says so and keeps `/var/lib/honcho-target/rollback/`. The next
 reconfigure stops at once, changes nothing and points here, so a second run
 cannot overwrite the only copy of the old database. Inside the Honcho CT:
 
-1. Look at `systemctl status honcho-proxy honcho-api honcho-deriver honcho-mcp` and
-   `journalctl -u honcho-proxy -u honcho-api -u honcho-deriver -u honcho-mcp`. The rollback
-   has already put the files back; often the cause is outside Honcho (the
-   router, the embedding endpoint, disk space).
+1. Look at `systemctl status honcho-embedding honcho-proxy honcho-api honcho-deriver honcho-mcp`
+   and `journalctl -u honcho-embedding -u honcho-proxy -u honcho-api -u honcho-deriver -u honcho-mcp`.
+   The rollback has already put the files back; often the cause is outside
+   Honcho (the router, a chat model target, disk space).
 2. If the database is not as it was, restore the dump with the services
    stopped:
 
    ```bash
-   systemctl stop honcho-mcp honcho-deriver honcho-api honcho-proxy
+   systemctl stop honcho-mcp honcho-deriver honcho-api honcho-proxy honcho-embedding
    runuser -u postgres -- dropdb --if-exists honcho
    runuser -u postgres -- createdb -O honcho honcho
    runuser -u postgres -- pg_restore --exit-on-error -d honcho < /var/lib/honcho-target/rollback/honcho.dump
-   systemctl start honcho-proxy honcho-api honcho-deriver honcho-mcp
+   systemctl start honcho-embedding honcho-proxy honcho-api honcho-deriver honcho-mcp
    ```
 
-   `honcho.env`, `budgets.env`, `settings.env`, `jwt-secret`, `api-key`,
-   `client-api-key`, proxy settings and credentials, the four units, the proxy
-   scripts and `bun` in the same directory are the
-   copies from before the failed run; they belong in `/etc/honcho-target/`,
-   `/etc/systemd/system/` and `/opt/honcho-bun/`.
+   `honcho.env`, `budgets.env`, `settings.env`, `embedding.env`, `jwt-secret`,
+   `api-key`, `client-api-key`, proxy settings and credentials, the units,
+   the proxy scripts, `bun`, `llama-server` and its `build-info` in the same
+   directory are the copies from before the failed run; they belong in
+   `/etc/honcho-target/`, `/etc/systemd/system/`, `/opt/honcho-bun/` and
+   `/opt/honcho-llama/` (`bin/` for `llama-server`).
 3. Once Honcho is healthy (`curl -fsS http://127.0.0.1:8000/health` and
    `http://127.0.0.1:3000/health`), remove the directory with
    `rm -r -- /var/lib/honcho-target/rollback` and run the reconfigure again.
 
 The first install migrates with Honcho's default 1536-dimension columns and
-then sets them to `HONCHO_EMBEDDING_DIMENSIONS`, as upstream documents. Later
-runs migrate with the configured size, so a future migration that touches the
+then sets them to the local model's 1024, as upstream documents. Later runs
+migrate with the configured size, so a future migration that touches the
 vector columns keeps it. `configure_embeddings.py` refuses to change the size
-of columns that already hold vectors; that needs a new database.
+of columns that already hold vectors; reconfigure does not clear them.
 
 `--reconfigure --rotate-keys` replaces the JWT secret, which invalidates every
 existing key, and makes a new admin key and `osr` workspace key. The
@@ -330,25 +375,21 @@ there for it (`# osr-honcho-router`, replaced when the Honcho address or
 router port changes; every other line stays). It writes the file under the
 CT's Proxmox firewall lock (`targets/pve-firewall-swap.pl`) and only if nobody
 changed it meanwhile; otherwise it stops and says where the previous content
-is saved. Set `HONCHO_ROUTER_FIREWALL=false` to manage that file yourself. The selected chat and embedding model hosts
+is saved. Set `HONCHO_ROUTER_FIREWALL=false` to manage that file yourself. The selected chat model hosts
 must also be reachable from the Honcho CT.
 
 The selection menu requires you to enter the router CT ID and IP/CIDR and,
 for every selected target, its own CT ID and static IP/CIDR. It does not
 choose IDs or addresses for you. For Honcho it also asks which router chat
-model or tier to use (default `fast`), plus the embedding model, vector
-dimensions, and `/v1` endpoint. The router does not exist yet at that point,
-so it cannot list models; for a common embedding model (`nomic-embed-text`,
-`mxbai-embed-large`, `bge-m3`, `qwen3-embedding`, ...) it offers the model's
-known vector size as the default. Enter the IPs of Hermes, OpenClaw and
+model or tier to use (default `fast`); the embedding model needs no answer.
+Enter the IPs of Hermes, OpenClaw and
 DeepSeek Harness at their own target prompts if you select them; Honcho uses
 those addresses for its firewall rules. `HONCHO_CT_ID`, `HONCHO_IP_CIDR`,
 `HONCHO_STORAGE`, and `HONCHO_TEMPLATE` can preset Honcho's answers. The CT
 defaults to 4 cores, 8 GiB RAM, and 48 GiB disk. To override the guest
-defaults, set any of `HONCHO_MODEL`,
-`HONCHO_EMBEDDING_MODEL`, `HONCHO_EMBEDDING_DIMENSIONS`,
-`HONCHO_EMBEDDING_BASE_URL`, `HONCHO_REF`, `HONCHO_STRUCTURED_OUTPUT_MODE` and
-`HONCHO_SKIP_CHAT_PROBE` before launching the installer.
+defaults, set any of `HONCHO_MODEL`, `HONCHO_REF`,
+`HONCHO_STRUCTURED_OUTPUT_MODE` and `HONCHO_SKIP_CHAT_PROBE` before launching
+the installer.
 An Open WebUI admin API key or JWT is required for the MCP registration. The
 installer asks for it before creating Honcho and stops if none is provided.
 
@@ -365,24 +406,15 @@ router/Open WebUI CT ID and router IP, and Honcho's gateway. Once it has the
 router's address, it reads the router's model inventory with curl
 (`/routing/inventory`, with the router key read from the router CT and given
 to curl on stdin; from inside the router CT if its firewall turns the host
-away). It then asks, each with a suggestion that Enter accepts:
-
-- **Chat model.** It lists the models the proxy can use (tool support
-  reported and at least `HONCHO_CONTEXT_TOKENS` of context; 65536 on a first
-  install), loaded ones first, then larger ones, and names the others with
-  the reason they are left out. Answer with a number, a model name or a tier
-  (`fast`, `medium`, `large`, `xlarge`). With no usable model it suggests
-  `fast` and says the install will need one.
-- **Embedding model.** It lists the inventory's embedding models.
-- **Embedding base URL.** Blank lets the local proxy find the model in the
-  router's inventory and contact its host directly.
-- **Vector dimensions.** It measures them with one short `/embeddings`
-  request to the model's host (the URL given, or the one the inventory lists),
-  or else offers the size a common embedding model is known to have.
-
-A preset `HONCHO_MODEL`, `HONCHO_EMBEDDING_MODEL` or
-`HONCHO_EMBEDDING_DIMENSIONS` is not asked for. If the inventory cannot be
-read, the installer says so and asks for the names without a list. Give the Hermes, OpenClaw and
+away). It then asks for the **chat model**, with a suggestion that Enter
+accepts: it lists the models the proxy can use (tool support reported and at
+least `HONCHO_CONTEXT_TOKENS` of context; 65536 on a first install), loaded
+ones first, then larger ones, and names the others with the reason they are
+left out. Answer with a number, a model name or a tier (`fast`, `medium`,
+`large`, `xlarge`). With no usable model it suggests `fast` and says the
+install will need one. A preset `HONCHO_MODEL` is not asked for; if the
+inventory cannot be read, the installer says so and asks for the name without
+a list. There are no embedding questions: the model runs in the Honcho CT. Give the Hermes, OpenClaw and
 DeepSeek Harness CT IPs at the optional prompts if those agents should access
 Honcho. The router IP must
 match the source address its CT uses to reach Honcho; the installer checks
@@ -390,42 +422,34 @@ this. Open WebUI runs in the router CT, so it needs no separate address.
 
 The installer offers downloaded Debian 13 templates and root-disk storage,
 then asks for the Open WebUI admin API token without echoing it. Have a
-tool-capable chat model with structured output on the router and a reachable
-embedding endpoint before starting. The Proxmox host needs `pct`, `pvesh`,
+tool-capable chat model with structured output on the router before
+starting. The Proxmox host needs `pct`, `pvesh`,
 `pvesm`, and `curl`. The Honcho CT needs outbound access for package downloads.
 No CT ID or IP address is inferred for a new standalone install. To preset
 answers, set `CT_ID`, `IP_CIDR`, `ROUTER_CT_ID`, `ROUTER_IP`, `GATEWAY`,
-`HONCHO_EMBEDDING_MODEL`, `HONCHO_EMBEDDING_DIMENSIONS`,
-`HONCHO_EMBEDDING_BASE_URL`, and `HONCHO_CLIENT_IPS` (space-separated agent
-IPs). `TEMPLATE` and `STORAGE` may also be set. An unattended run requires
-the mandatory values, template, storage, and `OPENWEBUI_ADMIN_TOKEN`. Set
-`HONCHO_EMBEDDING_BASE_URL=` to use the router inventory explicitly.
+`HONCHO_MODEL` and `HONCHO_CLIENT_IPS` (space-separated agent IPs).
+`TEMPLATE` and `STORAGE` may also be set. An unattended run requires the
+mandatory values, template, storage, and `OPENWEBUI_ADMIN_TOKEN`.
 `--dry-run` prints the plan without needing the token; preset `TEMPLATE` and
 `STORAGE` because their selection menus do not run in dry-run mode.
 
 Inside an existing Honcho CT, `install-target.sh` asks for the router base
-URL, embedding model and dimensions if they are unset. If the embedding base
-URL is unset, it asks for that `/v1` endpoint too; a blank answer explicitly
-uses router inventory to find the embedding model's host. An unattended guest
-run needs `ROUTER_URL`, `HONCHO_EMBEDDING_MODEL`,
-`HONCHO_EMBEDDING_DIMENSIONS`, and `HONCHO_EMBEDDING_BASE_URL`. Set the last
-one to an empty string to choose inventory lookup explicitly. The guest installer
+URL if it is unset; an unattended guest run needs `ROUTER_URL`. The guest installer
 does not create an LXC or use a CT ID. Use the Proxmox `--reconfigure` path
 when keys or router integration also need updating.
 
 Use `--reconfigure` to repair or update a CT this target created. It asks
 for the Honcho CT (offering the one tagged `honcho`), then the router
 (offering the one Honcho already uses), and reads the Honcho address from the
-CT. The models, context window, embedding model, `/v1` URL and dimensions,
-and the agents admitted to Honcho are all offered from what the running CT
-recorded (`/etc/honcho-target/proxy.settings`, `budgets.env` and its
+CT. The chat model, context window and the agents admitted to Honcho are
+all offered from what the running CT recorded (`/etc/honcho-target/proxy.settings`, `budgets.env` and its
 firewall), so Enter keeps each one; unattended, the recorded values are kept.
 The Open WebUI admin token is requested again. A dry-run reconfigure also
 needs `IP_CIDR` because it does not inspect the CT.
 
 A reconfigure only changes the settings it is given. The CT keeps
-`HONCHO_REF`, `HONCHO_MODEL`, `HONCHO_STRUCTURED_OUTPUT_MODE`,
-`HONCHO_EMBEDDING_DIMENSIONS_MODE` and the `HONCHO_BUN_*` pins from the run
+`HONCHO_REF`, `HONCHO_MODEL`, `HONCHO_STRUCTURED_OUTPUT_MODE` and the
+`HONCHO_BUN_*` pins from the run
 that last set them (in `/etc/honcho-target/settings.env`), and the token
 budgets in `budgets.env`; the run prints what it kept. So a repair or key
 rotation does not move a CT back to the default release or model. To change

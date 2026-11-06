@@ -43,7 +43,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 models = [{"name": "tool-model", "server": server,
                            "tools": state["tools"], "context_length": state["context"],
                            "loaded": True, "is_embedding": False},
-                          {"name": state.get("embed_name", "embed-model"), "server": server,
+                          {"name": "embed-model", "server": server,
                            "is_embedding": True, "loaded": True}]
                 if state.get("other"):
                     models.insert(0, {"name": "other-model", "server": server,
@@ -122,9 +122,7 @@ class ProxyTest(unittest.TestCase):
 
     def write_settings(self, **changes):
         values = {"ROUTER_URL": self.router_url, "HONCHO_MODEL": "fast",
-                  "HONCHO_CONTEXT_TOKENS": "32768", "EMBEDDING_BASE_URL": self.router_url + "/v1",
-                  "EMBEDDING_MODEL": "embed-model", "EMBEDDING_DIMENSIONS": "3",
-                  "EMBEDDING_DIMENSIONS_MODE": "always", "HONCHO_SKIP_CHAT_PROBE": "false"}
+                  "HONCHO_CONTEXT_TOKENS": "32768", "HONCHO_SKIP_CHAT_PROBE": "false"}
         values.update(changes)
         (self.directory / "proxy.settings").write_text(
             "".join("%s=%s\n" % pair for pair in values.items()))
@@ -132,28 +130,26 @@ class ProxyTest(unittest.TestCase):
     def test_probe_and_loopback_requests_go_directly_to_model(self):
         proxy.probe(str(self.directory))
         self.assertEqual(len(self.model_state["chat"]), 2)
-        self.assertEqual(self.model_state["embed"][0]["dimensions"], 3)
+        self.assertEqual([], self.model_state["embed"], "the probe checks chat only")
         self.router_state["other"] = True
         self.write_settings(RESOLVED_MODEL="tool-model")
         config = proxy.settings(str(self.directory))
-        proxy.HonchoHandler.dispatcher = proxy.HonchoDispatcher(
+        proxy.direct.Handler.dispatcher = proxy.HonchoDispatcher(
             config, proxy.router_key(str(self.directory)),
             proxy.direct.read_env(str(self.directory / "backend-keys")))
-        local = proxy.direct.DispatchServer(("127.0.0.1", 0), proxy.HonchoHandler)
+        local = proxy.direct.DispatchServer(("127.0.0.1", 0), proxy.direct.Handler)
         thread = threading.Thread(target=local.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(local.server_close)
         self.addCleanup(local.shutdown)
         base = "http://127.0.0.1:%s/v1" % local.server_port
         with urlopen(base + "/models", timeout=10) as response:
-            self.assertEqual([item["id"] for item in json.load(response)["data"]],
-                             ["fast", "embed-model"])
+            self.assertEqual([item["id"] for item in json.load(response)["data"]], ["fast"],
+                             "Honcho's embeddings come from its own model, not through here")
         result = post(base + "/chat/completions", {"model": "fast",
                       "messages": [{"role": "user", "content": "remember this"}]})
         self.assertEqual(result["choices"][0]["message"]["content"], '{"ready": true}')
         self.assertEqual(self.model_state["chat"][-1]["model"], "tool-model")
-        result = post(base + "/embeddings", {"model": "embed-model", "input": "hello"})
-        self.assertEqual(len(result["data"][0]["embedding"]), 3)
         self.assertTrue(all(value == "Bearer backend-key" for value in self.model_state["auth"]))
         self.assertFalse(any(path.startswith("/v1/chat/") or path == "/v1/embeddings"
                              for path in self.router_state["paths"]))
@@ -194,20 +190,12 @@ class ProxyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HONCHO_STRUCTURED_OUTPUT_MODE=json_object"):
             proxy.probe(str(self.directory))
 
-    def test_an_embedding_model_without_its_latest_tag_is_found(self):
-        self.router_state["embed_name"] = "embed-model:latest"
-        proxy.probe(str(self.directory))
-        self.assertEqual("embed-model:latest", self.model_state["embed"][-1]["model"],
-                         "the target gets the name it lists")
-        self.write_settings(EMBEDDING_MODEL="Other-Embed")
-        with self.assertRaisesRegex(ValueError, "'Other-Embed' is absent from the router's live inventory"):
-            proxy.probe(str(self.directory))
-
-    def test_same_model(self):
-        self.assertTrue(proxy.same_model("nomic-embed-text", "nomic-embed-text:latest"))
-        self.assertTrue(proxy.same_model("Qwen3:8B", "qwen3:8b"))
-        self.assertFalse(proxy.same_model("qwen3:8b", "qwen3:14b"))
-        self.assertFalse(proxy.same_model("nomic-embed-text:v1.5", "nomic-embed-text"))
+    def test_settings_need_no_embedding_values(self):
+        config = proxy.settings(str(self.directory))
+        self.assertFalse([key for key in config if key.startswith("EMBEDDING")])
+        self.write_settings(HONCHO_CONTEXT_TOKENS="4096")
+        with self.assertRaisesRegex(ValueError, "invalid model context"):
+            proxy.settings(str(self.directory))
 
 
 if __name__ == "__main__":

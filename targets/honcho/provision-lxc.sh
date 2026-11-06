@@ -96,7 +96,6 @@ router_inventory() {
     pct exec "$ct" -- curl -K - "http://127.0.0.1:$port/routing/inventory" <<< "$config" 2>/dev/null
 }
 valid_model_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; }
-valid_dimensions() { [[ $1 =~ ^[1-9][0-9]{0,5}$ ]]; }
 # choose_from LABEL SUGGESTION VALIDATOR [NAME<TAB>DESCRIPTION<TAB>URL...]: a
 # numbered list of the lines, then one answer: Enter takes SUGGESTION, a list
 # number that line's name, anything else what VALIDATOR accepts. Prints the
@@ -124,78 +123,52 @@ choose_from() {
     printf 'Not a valid choice: %s\n' "${answer:-(empty)}" >&2
   done
 }
-# listed_url NAME [NAME<TAB>DESCRIPTION<TAB>URL...]: the URL of NAME's line
-# (any case), or nothing.
-listed_url() {
-  local name=${1,,} line listed
-  shift
-  for line in "$@"; do
-    listed=${line%%$'\t'*}
-    [[ ${listed,,} == "$name" ]] || continue
-    printf '%s\n' "${line##*$'\t'}"; return 0
-  done
-}
-# suggest_dimensions CHOICES MODEL [URL]: the vector size to offer. With URL
-# (an OpenAI-compatible /v1), one short /embeddings request measures it;
-# otherwise, or when that fails, the size MODEL is known to have. Prints the
-# size, then a tab and where it came from, or nothing.
-suggest_dimensions() {
-  local choices=$1 model=$2 url=${3:-} answer size
-  if [[ -n $url ]]; then
-    answer=$(mktemp "${TMPDIR:-/tmp}/honcho-embedding.XXXXXX")
-    if curl -fsS --max-time 60 -H 'Content-Type: application/json' -o "$answer" \
-        -d "{\"model\":\"$model\",\"input\":\"dimension probe\"}" "${url%/}/embeddings" 2>/dev/null; then
-      size=$(python3 "$choices" measured "$answer")
-      if [[ -n $size ]]; then
-        rm -f -- "$answer"
-        printf '%s\tmeasured at %s\n' "$size" "$url"
-        return 0
-      fi
-    fi
-    rm -f -- "$answer"
-  fi
-  size=$(python3 "$choices" dimensions "$model")
-  [[ -z $size ]] || printf '%s\tthe size %s is known to have\n' "$size" "$model"
-}
 # End model choice helpers.
+# Reconfigure guard helper: run before changing either CT's firewall or staging
+# the Open WebUI admin token. The guest repeats the embedding check before its
+# backup.
+honcho_reconfigure_preflight() {
+  local ct=$1 previous_embedding
+  pct status "$ct" 2>/dev/null | grep -q 'status: running' || die "Honcho CT $ct is not running."
+  previous_embedding=$(pct exec "$ct" -- sed -n 's/^EMBEDDING_MODEL_CONFIG__MODEL=//p' \
+    /etc/honcho-target/honcho.env 2>/dev/null | head -n1) ||
+    die "Cannot read the embedding model in Honcho CT $ct."
+  [[ $previous_embedding == qwen3-embedding-0.6b ]] ||
+    die "Honcho CT $ct uses ${previous_embedding:-another embedding model}; --reconfigure cannot migrate stored vectors to qwen3-embedding-0.6b. See 'Changing an existing embedding model' in targets/honcho/README.md."
+}
+# End reconfigure guard helper.
 source "$(dirname -- "${BASH_SOURCE[0]}")/pve-select.sh"
 usage() {
   cat <<'USAGE'
 Usage: bash provision-lxc.sh [--dry-run] [--reconfigure [--rotate-keys]]
 
 Run as root on the Proxmox host. For a new CT, the installer asks for the
-Honcho CT ID and IP/CIDR, router/Open WebUI CT ID and IP, gateway, chat model,
-embedding model, embedding endpoint and dimensions, and optional agent CT IPs.
-Once the router's address is known it reads the router's model inventory
-(curl to /routing/inventory) and lists the chat models Honcho can use and the
-embedding models, each with a suggestion; the vector size is measured with one
-embedding request, or else suggested from the model's known size.
-Set CT_ID, IP_CIDR, ROUTER_CT_ID, ROUTER_IP, GATEWAY,
-HONCHO_EMBEDDING_MODEL, HONCHO_EMBEDDING_DIMENSIONS,
-HONCHO_EMBEDDING_BASE_URL, and HONCHO_CLIENT_IPS to preset these answers.
+Honcho CT ID and IP/CIDR, router/Open WebUI CT ID and IP, gateway, the chat
+model's context window, the chat model, and optional agent CT IPs. Once the
+router's address is known it reads the router's model inventory (curl to
+/routing/inventory) and lists the chat models Honcho can use, with a
+suggestion. Set CT_ID, IP_CIDR, ROUTER_CT_ID, ROUTER_IP, GATEWAY, HONCHO_MODEL
+and HONCHO_CLIENT_IPS to preset these answers.
 Unattended runs require the mandatory values as presets. The admin API token
 is requested without echo unless OPENWEBUI_ADMIN_TOKEN is already set.
 
 Creates an unprivileged Debian 13 LXC with native PostgreSQL/pgvector,
-Honcho API and deriver services, Honcho's Streamable HTTP MCP server and a
-loopback model proxy. The proxy selects from router inventory and contacts
-model targets directly; HONCHO_MODEL=fast by default. Set
-HONCHO_EMBEDDING_MODEL and HONCHO_EMBEDDING_DIMENSIONS for an embedding model.
-HONCHO_EMBEDDING_BASE_URL can point directly to its OpenAI-compatible /v1
-endpoint; set it to an empty string to find the model through router inventory.
-HONCHO_REF
+Honcho API and deriver services, Honcho's Streamable HTTP MCP server, a
+loopback chat proxy and its own embedding model: llama.cpp's llama-server,
+built in the CT for its CPU, runs Qwen3-Embedding-0.6B (Q8_0, 1024 dimensions,
+a pinned 639 MB download) on 127.0.0.1:8766. Nothing outside the CT is needed
+for embeddings. The proxy selects a chat model from router inventory and
+contacts model targets directly; HONCHO_MODEL=fast by default. HONCHO_REF
 (default v3.5.0) may select another upstream tag, main, or a commit. HONCHO_CLIENT_IPS is a space-separated list of agent CT addresses (Hermes,
 OpenClaw, DeepSeek Harness) allowed to the API and MCP ports through the
-Proxmox firewall. The router CT is always allowed. A blank
-embedding URL requires that model in the router's live inventory.
+Proxmox firewall. The router CT is always allowed.
 
 HONCHO_CONTEXT_TOKENS sets Honcho's token budgets for the model's context
 window (at least 8192); HONCHO_<SETTING> overrides one budget (see the
 README). Unset, they keep the CT's last values (a first install sizes them
 for 65536 tokens); set and empty, Honcho's default.
-HONCHO_REF, HONCHO_MODEL, HONCHO_STRUCTURED_OUTPUT_MODE,
-HONCHO_EMBEDDING_DIMENSIONS_MODE and the HONCHO_BUN_* pins are kept the same
-way: a reconfigure only changes the ones it sets.
+HONCHO_REF, HONCHO_MODEL, HONCHO_STRUCTURED_OUTPUT_MODE and the HONCHO_BUN_*
+pins are kept the same way: a reconfigure only changes the ones it sets.
 HONCHO_STRUCTURED_OUTPUT_MODE=json_object is for a selected model whose backend
 lacks JSON-schema output; the install probes the model with tools and
 structured output first (HONCHO_SKIP_CHAT_PROBE=true skips that). Another Bun
@@ -207,7 +180,9 @@ it (HONCHO_ROUTER_FIREWALL=false leaves that file alone).
 This target registers the MCP server in Open WebUI. --reconfigure updates an
 existing Honcho CT and the registration without deleting its PostgreSQL data;
 every reconfigure dumps the database before migrations and restores it if the
-guest setup fails. --rotate-keys (with --reconfigure) replaces the JWT secret and
+guest setup fails. A CT using another embedding model cannot switch to the
+local model through --reconfigure; see the README for migration guidance.
+--rotate-keys (with --reconfigure) replaces the JWT secret and
 both keys; reconfigure Hermes, OpenClaw and DeepSeek Harness with HONCHO_CT_ID afterwards.
 USAGE
 }
@@ -242,8 +217,7 @@ OPENWEBUI_PORT=${OPENWEBUI_PORT:-8080}
 # set here, before the defaults below fill them in: a plain --reconfigure then
 # keeps the CT's release, model and output mode, and an empty value returns a
 # setting to its default.
-honcho_kept_names=(REF MODEL STRUCTURED_OUTPUT_MODE EMBEDDING_DIMENSIONS_MODE
-  BUN_VERSION BUN_SHA256 BUN_BASELINE_SHA256)
+honcho_kept_names=(REF MODEL STRUCTURED_OUTPUT_MODE BUN_VERSION BUN_SHA256 BUN_BASELINE_SHA256)
 kept_env=()
 for name in "${honcho_kept_names[@]}"; do
   var=HONCHO_$name
@@ -253,11 +227,11 @@ honcho_ref_given=${HONCHO_REF+set}
 honcho_model_given=${HONCHO_MODEL:+set}
 HONCHO_MODEL=${HONCHO_MODEL:-}
 HONCHO_REF=${HONCHO_REF:-v3.5.0}
-HONCHO_EMBEDDING_MODEL=${HONCHO_EMBEDDING_MODEL:-}
-HONCHO_EMBEDDING_DIMENSIONS=${HONCHO_EMBEDDING_DIMENSIONS:-}
-embedding_url_explicit=${HONCHO_EMBEDDING_BASE_URL+x}
-HONCHO_EMBEDDING_BASE_URL=${HONCHO_EMBEDDING_BASE_URL:-}
-HONCHO_EMBEDDING_DIMENSIONS_MODE=${HONCHO_EMBEDDING_DIMENSIONS_MODE:-never}
+# Honcho embeds with its own local model; these earlier settings do nothing.
+for name in HONCHO_EMBEDDING_MODEL HONCHO_EMBEDDING_DIMENSIONS HONCHO_EMBEDDING_BASE_URL HONCHO_EMBEDDING_DIMENSIONS_MODE; do
+  [[ -z ${!name+set} ]] || printf 'Note: %s is no longer used: Honcho embeds with its own model in its CT.\n' "$name" >&2
+  unset "$name"
+done
 HONCHO_STRUCTURED_OUTPUT_MODE=${HONCHO_STRUCTURED_OUTPUT_MODE:-}
 HONCHO_SKIP_CHAT_PROBE=${HONCHO_SKIP_CHAT_PROBE:-false}
 HONCHO_ROUTER_FIREWALL=${HONCHO_ROUTER_FIREWALL:-true}
@@ -275,7 +249,6 @@ PVE_ETC=${PVE_ETC:-/etc/pve}
 template_re='^[A-Za-z0-9][A-Za-z0-9._-]*:vztmpl/debian-13-[A-Za-z0-9._-]+_amd64\.tar\.(zst|xz|gz)$'
 valid_template() { [[ $1 =~ $template_re ]]; }
 valid_storage() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
-valid_embedding_url() { [[ -z $1 || $1 =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]]; }
 valid_context() { [[ -z $1 ]] || { [[ $1 =~ ^[1-9][0-9]{3,6}$ ]] && (( $1 >= 8192 && $1 <= 1048576 )); }; }
 valid_agent_ips() { local ip; for ip in $1; do pve_valid_ipv4 "${ip%%/*}" || return 1; done; }
 # recorded_value KEY: KEY from the CT's proxy.settings (a reconfigure), or nothing.
@@ -319,7 +292,7 @@ fi
   die 'Set valid CT_ID and ROUTER_CT_ID (both >=100).'
 
 pve_section 'Honcho models'
-pve_note 'Honcho needs a chat model that calls tools and returns structured output, and an embedding model.'
+pve_note 'Honcho needs a chat model that calls tools and returns structured output. Its embedding model runs in its own CT.'
 # The context window first: it decides which chat models qualify. A set value
 # (even empty: Honcho's own budgets) is the caller's; a reconfigure offers the
 # CT's, and keeps it unasked when the CT never recorded one.
@@ -335,23 +308,21 @@ if [[ -z ${HONCHO_CONTEXT_TOKENS+set} ]]; then
   fi
 fi
 choices=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/model_choices.py
-chat_lines=() embedding_lines=()
+chat_lines=()
 # The models the router serves, to choose from: read once the router's
-# address is known, and only when a model setting is still to be chosen.
-if [[ $interactive == true && -n $inventory_ip && ( -z $honcho_model_given || -z $HONCHO_EMBEDDING_MODEL ||
-      -z $HONCHO_EMBEDDING_DIMENSIONS ) ]]; then
+# address is known, and only when the chat model is still to be chosen.
+if [[ $interactive == true && -n $inventory_ip && -z $honcho_model_given ]]; then
   inventory_file=$(mktemp "${TMPDIR:-/tmp}/honcho-inventory.XXXXXX")
   printf '  Reading the models router CT %s serves (http://%s, /routing/inventory)...\n' "$ROUTER_CT_ID" "$inventory_ip" >&2
   if router_inventory "$ROUTER_CT_ID" "$inventory_ip" > "$inventory_file" &&
-     python3 "$choices" embedding "$inventory_file" > /dev/null 2>&1; then
+     python3 "$choices" chat "$inventory_file" 8192 > /dev/null 2>&1; then
     # The proxy's own test: tools reported and this much context (131072 for
     # Honcho's own budgets).
     min_context=${HONCHO_CONTEXT_TOKENS-65536}
     [[ $min_context =~ ^[1-9][0-9]*$ ]] || min_context=131072
     mapfile -t chat_lines < <(python3 "$choices" chat "$inventory_file" "$min_context" 2> "$inventory_file.skipped")
-    mapfile -t embedding_lines < <(python3 "$choices" embedding "$inventory_file")
   else
-    printf '  Could not read the router inventory; enter the model names yourself.\n' >&2
+    printf '  Could not read the router inventory; enter the model name yourself.\n' >&2
   fi
 fi
 model_recorded=$(recorded_value HONCHO_MODEL)
@@ -371,51 +342,6 @@ if [[ -z $honcho_model_given ]]; then
   else
     HONCHO_MODEL=${model_recorded:-fast}
   fi
-fi
-if [[ -z $HONCHO_EMBEDDING_MODEL ]]; then
-  embedding_recorded=$(recorded_value EMBEDDING_MODEL)
-  if [[ $interactive == true ]]; then
-    _pve_heading
-    if (( ${#embedding_lines[@]} )); then
-      printf '  Embedding model: the router serves these.\n' >&2
-    else
-      printf '  Embedding model: name one its server serves (e.g. nomic-embed-text).\n' >&2
-    fi
-    HONCHO_EMBEDDING_MODEL=$(choose_from '  Embedding model (number or name)' \
-      "${embedding_recorded:-$(cut -f1 <<< "${embedding_lines[0]:-}")}" valid_model_name "${embedding_lines[@]}") ||
-      die 'No embedding model was chosen.'
-  fi
-  pve_ask HONCHO_EMBEDDING_MODEL 'Embedding model' "$embedding_recorded" valid_model_name
-fi
-if [[ -z $embedding_url_explicit ]]; then
-  url_recorded=$(recorded_value EMBEDDING_BASE_URL)
-  if [[ $mode == create && $interactive == false ]] && ! pve_interactive; then
-    die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to use router inventory.'
-  fi
-  [[ $interactive == false ]] || printf '  Embedding endpoint: the model host'"'"'s /v1 URL, or none to find the model in the router inventory.\n' >&2
-  # Optional: empty finds the embedding model in the router inventory.
-  if [[ $interactive == true ]]; then
-    _pve_read HONCHO_EMBEDDING_BASE_URL 'Embedding /v1 URL' "$url_recorded" valid_embedding_url 'Use http(s)://host[:port]/v1, or none.'
-  else
-    HONCHO_EMBEDDING_BASE_URL=$url_recorded
-  fi
-fi
-if [[ -z $HONCHO_EMBEDDING_DIMENSIONS ]]; then
-  dimensions_recorded=$(recorded_value EMBEDDING_DIMENSIONS)
-  if [[ $interactive == true ]]; then
-    dimensions_suggestion=$dimensions_recorded dimensions_source='recorded by the CT; a new size needs a new database'
-    if [[ -z $dimensions_suggestion ]]; then
-      IFS=$'\t' read -r dimensions_suggestion dimensions_source < <(suggest_dimensions "$choices" "$HONCHO_EMBEDDING_MODEL" \
-        "${HONCHO_EMBEDDING_BASE_URL:-$(listed_url "$HONCHO_EMBEDDING_MODEL" "${embedding_lines[@]}")}") || true
-    fi
-    if [[ -n ${dimensions_suggestion:-} ]]; then
-      printf '  Embedding vector dimensions: %s suggested (%s).\n' "$dimensions_suggestion" "$dimensions_source" >&2
-    else
-      printf '  Embedding vector dimensions: the size of %s'"'"'s vectors (e.g. 768 for nomic-embed-text).\n' "$HONCHO_EMBEDDING_MODEL" >&2
-    fi
-  fi
-  pve_ask HONCHO_EMBEDDING_DIMENSIONS 'Embedding vector dimensions' "${dimensions_suggestion:-$dimensions_recorded}" valid_dimensions \
-    'Use a whole number such as 768.'
 fi
 [[ -z ${inventory_file:-} ]] || rm -f -- "$inventory_file" "$inventory_file.skipped"
 
@@ -453,10 +379,6 @@ fi
 [[ $CT_ID != "$ROUTER_CT_ID" ]] || die 'Honcho and router CT IDs must differ.'
 [[ $OPENWEBUI_PORT =~ ^[0-9]{2,5}$ ]] && (( OPENWEBUI_PORT <= 65535 )) || die 'Invalid OPENWEBUI_PORT.'
 [[ $HONCHO_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HONCHO_MODEL.'
-[[ $HONCHO_EMBEDDING_MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Set HONCHO_EMBEDDING_MODEL.'
-[[ $HONCHO_EMBEDDING_DIMENSIONS =~ ^[1-9][0-9]{0,5}$ ]] || die 'Set HONCHO_EMBEDDING_DIMENSIONS.'
-[[ -z $HONCHO_EMBEDDING_BASE_URL || $HONCHO_EMBEDDING_BASE_URL =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]] || die 'Invalid HONCHO_EMBEDDING_BASE_URL; use http(s)://host[:port]/v1.'
-[[ $HONCHO_EMBEDDING_DIMENSIONS_MODE =~ ^(never|auto|always)$ ]] || die 'Invalid HONCHO_EMBEDDING_DIMENSIONS_MODE.'
 [[ -z $HONCHO_STRUCTURED_OUTPUT_MODE || $HONCHO_STRUCTURED_OUTPUT_MODE =~ ^(json_schema|json_object)$ ]] || die 'HONCHO_STRUCTURED_OUTPUT_MODE must be json_schema or json_object.'
 [[ $HONCHO_SKIP_CHAT_PROBE =~ ^(true|false)$ ]] || die 'HONCHO_SKIP_CHAT_PROBE must be true or false.'
 [[ $HONCHO_ROUTER_FIREWALL =~ ^(true|false)$ ]] || die 'HONCHO_ROUTER_FIREWALL must be true or false.'
@@ -509,7 +431,7 @@ for ip in $HONCHO_CLIENT_IPS; do
 done
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 [[ -r $source_dir/../pve-firewall-swap.pl ]] || die "Missing $source_dir/../pve-firewall-swap.pl"
-for file in install-target.sh budgets.py honcho-proxy.py direct_dispatch.py honcho-proxy.service honcho-api.service honcho-deriver.service honcho-mcp.service integrate-webui.py; do
+for file in install-target.sh budgets.py honcho-proxy.py direct_dispatch.py honcho-proxy.service honcho-api.service honcho-deriver.service honcho-mcp.service honcho-embedding.service integrate-webui.py; do
   [[ -r $source_dir/$file ]] || die "Missing $source_dir/$file"
 done
 honcho_ip=${IP_CIDR%/*}
@@ -645,8 +567,7 @@ if [[ -z ${HONCHO_CONTEXT_TOKENS+set} ]]; then context_label='kept from the CT'
 elif [[ -z $HONCHO_CONTEXT_TOKENS ]]; then context_label="Honcho's own budgets (128k)"
 else context_label="$HONCHO_CONTEXT_TOKENS tokens"; fi
 pve_row 'Context window' "$context_label"
-pve_row 'Embedding model' "$HONCHO_EMBEDDING_MODEL ($HONCHO_EMBEDDING_DIMENSIONS dimensions)"
-pve_row 'Embedding endpoint' "${HONCHO_EMBEDDING_BASE_URL:-router inventory}"
+pve_row 'Embedding model' 'Qwen3-Embedding-0.6B (1024 dimensions), llama.cpp on the CT'"'"'s CPU'
 pve_row 'Agents allowed' "${HONCHO_CLIENT_IPS:-none}"
 [[ $rotate_keys == false ]] || pve_row 'Keys' 'replace the JWT secret and both keys'
 pve_confirm "$( [[ $mode == create ]] && printf 'Create Honcho CT %s?' "$CT_ID" || printf 'Reconfigure Honcho CT %s?' "$CT_ID")"
@@ -655,19 +576,22 @@ if (( dry_run )); then
   if [[ $mode == reconfigure && -z $honcho_ref_given ]]; then ref_label="its recorded release ($HONCHO_REF if none)"; fi
   printf 'Would %s Honcho CT %s at %s with %s, then register MCP in router CT %s.\n' \
     "$mode" "$CT_ID" "$honcho_ip" "$ref_label" "$ROUTER_CT_ID"
-  printf 'Router IP: %s; chat model: %s; embedding: %s (%s dimensions) via %s.\n' \
-    "${ROUTER_IP:-detected from router route}" "$HONCHO_MODEL" "$HONCHO_EMBEDDING_MODEL" \
-    "$HONCHO_EMBEDDING_DIMENSIONS" "${HONCHO_EMBEDDING_BASE_URL:-router inventory (direct target)}"
+  printf 'Router IP: %s; chat model: %s; embedding: qwen3-embedding-0.6b (1024 dimensions) in the Honcho CT.\n' \
+    "${ROUTER_IP:-detected from router route}" "$HONCHO_MODEL"
   printf 'Agent IPs allowed to Honcho: %s.\n' "${HONCHO_CLIENT_IPS:-none}"
   [[ $HONCHO_ROUTER_FIREWALL == false ]] ||
     printf 'Would admit %s to the router API in %s/firewall/%s.fw, if that file exists.\n' "$honcho_ip" "$PVE_ETC" "$ROUTER_CT_ID"
   [[ $rotate_keys == false ]] || printf 'Would replace the JWT secret and both Honcho keys.\n'
   (( ${#budget_env[@]} == 0 )) || printf 'Would pass these budget settings to the CT: %s\n' "${budget_env[*]}"
   (( ${#kept_env[@]} == 0 )) || printf 'Would pass these settings to the CT: %s\n' "${kept_env[*]}"
+  # A dry run does not look inside the CT, so it cannot apply this check.
+  [[ $mode != reconfigure ]] ||
+    printf 'Not checked by a dry run: CT %s must be running and embed with qwen3-embedding-0.6b; a real run refuses it otherwise.\n' "$CT_ID"
   exit 0
 fi
 # Checked before anything is created: the run ends by registering MCP.
 for tool in pct pvesh pvesm curl; do command -v "$tool" >/dev/null || die "Missing $tool"; done
+if [[ $mode == reconfigure ]]; then honcho_reconfigure_preflight "$CT_ID"; fi
 if [[ -z ${OPENWEBUI_ADMIN_TOKEN:-} ]]; then
   [[ ${NONINTERACTIVE:-false} != true && -t 0 ]] ||
     die 'Set OPENWEBUI_ADMIN_TOKEN to register Honcho MCP in Open WebUI.'
@@ -774,7 +698,7 @@ for attempt in {1..60}; do
   sleep 2
 done
 pct exec "$CT_ID" -- install -d -m 0700 /root/honcho-deploy
-for file in install-target.sh budgets.py honcho-proxy.py direct_dispatch.py honcho-proxy.service honcho-api.service honcho-deriver.service honcho-mcp.service; do
+for file in install-target.sh budgets.py honcho-proxy.py direct_dispatch.py honcho-proxy.service honcho-api.service honcho-deriver.service honcho-mcp.service honcho-embedding.service; do
   pct push "$CT_ID" "$source_dir/$file" "/root/honcho-deploy/$file" --perms 0600
 done
 pct push "$CT_ID" "$stage/router-api-key" /root/honcho-deploy/router-api-key --perms 0600
@@ -790,9 +714,6 @@ if [[ $rotate_keys == true ]]; then
   rotation_pending=true
 fi
 pct exec "$CT_ID" -- env "ROUTER_URL=$router_url" \
-  "HONCHO_EMBEDDING_MODEL=$HONCHO_EMBEDDING_MODEL" \
-  "HONCHO_EMBEDDING_DIMENSIONS=$HONCHO_EMBEDDING_DIMENSIONS" \
-  "HONCHO_EMBEDDING_BASE_URL=$HONCHO_EMBEDDING_BASE_URL" \
   "HONCHO_SKIP_CHAT_PROBE=$HONCHO_SKIP_CHAT_PROBE" "HONCHO_ROTATE_KEYS=$rotate_keys" \
   "KINDI_READ_TIMEOUT_SECONDS=$kindi_timeout" \
   "${kept_env[@]}" "${budget_env[@]}" \

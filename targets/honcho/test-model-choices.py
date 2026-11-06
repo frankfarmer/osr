@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""model_choices.py: the chat and embedding models offered, and vector sizes."""
+"""model_choices.py: the chat models offered to the Honcho provisioner."""
 import contextlib
 import importlib.util
 import io
@@ -74,11 +74,6 @@ class InventoryTest(unittest.TestCase):
         self.assertEqual("http://192.0.2.92:8080/v1", out.splitlines()[0].split("\t")[2],
                          "a kind prefix is not part of the URL")
 
-    def test_embedding_models(self):
-        _, out, _ = run("embedding", self.path)
-        self.assertEqual(["bge-m3", "nomic-embed-text:latest"],
-                         [line.split("\t")[0] for line in out.splitlines()], "the loaded one first")
-
     def test_an_empty_inventory_offers_nothing(self):
         with open(self.path, "w") as out:
             json.dump({"models": []}, out)
@@ -86,38 +81,7 @@ class InventoryTest(unittest.TestCase):
 
     def test_bad_usage(self):
         self.assertEqual(2, run("chat", self.path)[0])
-
-
-class DimensionsTest(unittest.TestCase):
-    def test_known_sizes(self):
-        cases = {"nomic-embed-text": 768, "nomic-embed-text:latest": 768, "mxbai-embed-large:335m": 1024,
-                 "all-minilm:l6-v2": 384, "bge-m3": 1024, "bge-large-en-v1.5": 1024,
-                 "qwen3-embedding:0.6b": 1024, "qwen3-embedding:4b": 2560, "qwen3-embedding": 4096,
-                 "hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0": 1024, "snowflake-arctic-embed:33m": 384,
-                 "snowflake-arctic-embed:l": 1024, "snowflake-arctic-embed2": 1024,
-                 "embeddinggemma:300m": 768, "granite-embedding:278m": 768, "granite-embedding:30m": 384,
-                 "text-embedding-3-large": 3072}
-        for name, size in cases.items():
-            with self.subTest(name=name):
-                self.assertEqual(size, choices.known_dimensions(name))
-        self.assertIsNone(choices.known_dimensions("my-own-embedder"))
-        self.assertIsNone(choices.known_dimensions("bge"), "a prefix of a name is not that name")
-
-    def test_measured_from_an_answer(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as out:
-            json.dump({"data": [{"embedding": [0.1] * 384}]}, out)
-        try:
-            self.assertEqual((0, "384\n", ""), run("measured", out.name))
-            with open(out.name, "w") as bad:
-                bad.write('{"error": "model not found"}')
-            self.assertEqual((0, "", ""), run("measured", out.name))
-        finally:
-            os.unlink(out.name)
-        self.assertEqual((0, "", ""), run("measured", "/nonexistent"))
-
-    def test_dimensions_command(self):
-        self.assertEqual((0, "768\n", ""), run("dimensions", "nomic-embed-text"))
-        self.assertEqual((0, "", ""), run("dimensions", "unknown-model"))
+        self.assertEqual(2, run("embedding", self.path)[0], "embedding models are not chosen any more")
 
 
 if __name__ == "__main__":

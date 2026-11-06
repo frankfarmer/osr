@@ -1,62 +1,17 @@
 #!/usr/bin/env python3
-"""Model choices for the Honcho provisioner, from the router's inventory.
+"""Chat model choices for the Honcho provisioner, from the router's inventory.
 
 Usage:
   model_choices.py chat INVENTORY MIN_CONTEXT   chat models the proxy can use
-  model_choices.py embedding INVENTORY          embedding models
-  model_choices.py dimensions NAME              a model's known vector size
-  model_choices.py measured RESPONSE            the vector size in an answer
 
-chat and embedding print one model per line, best first, as
-NAME<TAB>DESCRIPTION<TAB>BASE_URL (the model host's OpenAI-compatible /v1).
-chat writes the models it left out, and why, to stderr. dimensions prints the
-size a common embedding model is known to have, measured the length of the
-first vector in RESPONSE (a /v1/embeddings answer); either prints nothing when
-it does not know.
+It prints one model per line, best first, as NAME<TAB>DESCRIPTION<TAB>BASE_URL
+(the model host's OpenAI-compatible /v1), and writes the models it left out,
+and why, to stderr. (Honcho's embedding model runs in its own CT and is not
+chosen from the inventory.)
 """
 import json
 import re
 import sys
-
-# Vector sizes of common embedding models, by the name without tag or
-# namespace. Longest prefix wins, so "bge-m3" is not read as "bge".
-KNOWN_DIMENSIONS = {
-    "nomic-embed-text": 768,
-    "nomic-embed-text-v2": 768,
-    "mxbai-embed-large": 1024,
-    "all-minilm": 384,
-    "bge-m3": 1024,
-    "bge-large": 1024,
-    "bge-base": 768,
-    "bge-small": 384,
-    "snowflake-arctic-embed": 1024,
-    "snowflake-arctic-embed2": 1024,
-    "embeddinggemma": 768,
-    "granite-embedding": 384,
-    "paraphrase-multilingual": 768,
-    "multilingual-e5-large": 1024,
-    "e5-large": 1024,
-    "e5-base": 768,
-    "e5-small": 384,
-    "jina-embeddings-v2": 768,
-    "text-embedding-3-small": 1536,
-    "text-embedding-3-large": 3072,
-    "text-embedding-ada-002": 1536,
-    "qwen3-embedding": 4096,
-}
-# Sizes that a variant decides, in the tag or the rest of the name (an Ollama
-# tag such as qwen3-embedding:0.6b, or a GGUF repo such as
-# Qwen3-Embedding-0.6B-GGUF): (name prefix, variant pattern, size).
-SIZED_VARIANTS = (
-    ("qwen3-embedding", r"0\.6b", 1024),
-    ("qwen3-embedding", r"4b", 2560),
-    ("qwen3-embedding", r"8b", 4096),
-    ("snowflake-arctic-embed2", r"568m", 1024),
-    ("snowflake-arctic-embed", r"22m|33m|xs|s", 384),
-    ("snowflake-arctic-embed", r"110m|137m|m", 768),
-    ("granite-embedding", r"278m", 768),
-)
-
 
 def base_url(server):
     """The /v1 URL of an inventory server entry (strata+http://h:8080 -> http://h:8080/v1)."""
@@ -122,30 +77,6 @@ def chat(models, min_context):
     return ranked(grouped(usable)), sorted(set(skipped))
 
 
-def embedding(models):
-    return ranked(grouped([m for m in models if m.get("is_embedding")]))
-
-
-def known_dimensions(name):
-    lowered = name.lower().rsplit("/", 1)[-1]
-    model = lowered.partition(":")[0]
-    for prefix, pattern, size in SIZED_VARIANTS:
-        if lowered.startswith(prefix) and re.search(
-                rf"(?:^|[-:_])(?:{pattern})(?:$|[-:_])", lowered[len(prefix):]):
-            return size
-    matches = [p for p in KNOWN_DIMENSIONS if model == p or model.startswith(p + "-")]
-    return KNOWN_DIMENSIONS[max(matches, key=len)] if matches else None
-
-
-def probed_dimensions(path):
-    try:
-        with open(path, encoding="utf-8") as source:
-            vector = json.load(source)["data"][0]["embedding"]
-    except (OSError, ValueError, KeyError, IndexError, TypeError):
-        return None
-    return len(vector) if isinstance(vector, list) and vector else None
-
-
 def print_groups(groups):
     for best, hosts in groups:
         print(f"{best['name']}\t{describe(best, hosts)}\t{base_url(best.get('server', ''))}")
@@ -158,12 +89,6 @@ def main(argv):
         if skipped:
             print("Left out (the proxy needs reported tool support and context): "
                   + "; ".join(f"{name} ({reason})" for name, reason in skipped), file=sys.stderr)
-    elif len(argv) == 2 and argv[0] == "embedding":
-        print_groups(embedding(load(argv[1])))
-    elif len(argv) == 2 and argv[0] in ("dimensions", "measured"):
-        size = known_dimensions(argv[1]) if argv[0] == "dimensions" else probed_dimensions(argv[1])
-        if size:
-            print(size)
     else:
         print(__doc__, file=sys.stderr)
         return 2

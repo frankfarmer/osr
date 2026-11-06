@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Honcho's loopback OpenAI endpoint. The router supplies inventory and ranking;
-chat and embedding payloads go to model targets from this process only.
+"""Honcho's loopback OpenAI chat endpoint. The router supplies inventory and
+ranking; chat payloads go to model targets from this process only. Embeddings
+do not pass through here: Honcho asks its own local model
+(honcho-embedding.service) for them.
 
 The HTTP relay is the same implementation used by Hermes and OpenClaw. Keep
 direct_dispatch.py in this target synchronized when that relay is fixed.
@@ -11,25 +13,14 @@ import logging
 import os
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.request import Request
 
 import direct_dispatch as direct
 
 
 LOG = logging.getLogger("honcho-proxy")
-MAX_EMBEDDING_BODY = 16 * 1024 * 1024
 TOOL_PROBE_ATTEMPTS = 2
 NOOP_TOOL = {"type": "function", "function": {"name": "noop", "description": "Do nothing",
                                               "parameters": {"type": "object", "properties": {}}}}
-
-
-def same_model(a, b):
-    """Model names as the router lists them: case aside, Ollama's implicit
-    ":latest" tag is the same model ("nomic-embed-text" is "nomic-embed-text:latest")."""
-    def plain(name):
-        name = str(name).lower()
-        return name[:-len(":latest")] if name.endswith(":latest") else name
-    return plain(a) == plain(b)
 
 
 def json_content(content):
@@ -59,15 +50,13 @@ def no_model_error(min_context):
 
 def settings(directory):
     values = direct.read_env(os.path.join(directory, "proxy.settings"))
-    required = ("ROUTER_URL", "HONCHO_MODEL", "HONCHO_CONTEXT_TOKENS",
-                "EMBEDDING_BASE_URL", "EMBEDDING_MODEL", "EMBEDDING_DIMENSIONS")
+    required = ("ROUTER_URL", "HONCHO_MODEL", "HONCHO_CONTEXT_TOKENS")
     missing = [name for name in required if not values.get(name)]
     if missing:
         raise ValueError("missing proxy settings: " + ", ".join(missing))
     values["HONCHO_CONTEXT_TOKENS"] = int(values["HONCHO_CONTEXT_TOKENS"])
-    values["EMBEDDING_DIMENSIONS"] = int(values["EMBEDDING_DIMENSIONS"])
-    if values["HONCHO_CONTEXT_TOKENS"] < 8192 or values["EMBEDDING_DIMENSIONS"] < 1:
-        raise ValueError("invalid model context or embedding dimensions")
+    if values["HONCHO_CONTEXT_TOKENS"] < 8192:
+        raise ValueError("invalid model context")
     return values
 
 
@@ -83,9 +72,6 @@ class HonchoDispatcher(direct.Dispatcher):
                          config["HONCHO_CONTEXT_TOKENS"])
         self.alias = config["HONCHO_MODEL"]
         self.resolved_model = config.get("RESOLVED_MODEL", "")
-        self.embedding_base = config["EMBEDDING_BASE_URL"].rstrip("/")
-        self.embedding_model = config["EMBEDDING_MODEL"]
-        self.embedding_dimensions = config["EMBEDDING_DIMENSIONS"]
 
     def usable(self, entry):
         # Honcho's background jobs use tools even when one individual request
@@ -110,60 +96,9 @@ class HonchoDispatcher(direct.Dispatcher):
         return matches
 
     def model_list(self):
-        # Honcho sees stable chat and embedding names. The resolved host and
-        # chat model stay in proxy settings, outside Honcho's environment.
-        names = dict.fromkeys((self.alias, self.embedding_model))
-        return {"object": "list", "data": [{"id": name, "object": "model"}
-                                           for name in names]}
-
-    def embedding_targets(self):
-        """(base URL, key, model name to send) for each place to embed."""
-        if self.embedding_base != self.router_url + "/v1":
-            return [(self.embedding_base, "no-key", self.embedding_model)]
-        inventory = self.inventory()
-        matches = [entry for entry in inventory["models"]
-                   if entry.get("is_embedding") and same_model(entry.get("name", ""), self.embedding_model)]
-        matches.sort(key=lambda entry: direct.LOADED_ORDER.get(entry.get("loaded"), 1))
-        return [(direct.server_parts(entry["server"])[1] + "/v1",
-                 self.backend_key(entry["server"]), entry["name"]) for entry in matches]
-
-    def embed(self, body):
-        if body.get("model") != self.embedding_model:
-            raise ValueError("Honcho proxy received an unconfigured embedding model")
-        targets = self.embedding_targets()
-        if not targets:
-            raise ValueError(f"embedding model {self.embedding_model!r} is absent from the router's "
-                             "live inventory (or not marked as an embedding model there)")
-        error = None
-        for base, key, name in targets:
-            headers = {"Content-Type": "application/json", "Accept": "application/json"}
-            if key:
-                headers["Authorization"] = "Bearer " + key
-            request = Request(base + "/embeddings", json.dumps(dict(body, model=name)).encode(), headers)
-            try:
-                with direct.BACKEND.open(request, timeout=90) as response:
-                    return json.load(response)
-            except (HTTPError, URLError, OSError, ValueError) as exc:
-                error = exc
-                LOG.warning("embedding target %s failed: %s", base, exc)
-        raise ValueError("no embedding target answered: " + str(error))
-
-
-class HonchoHandler(direct.Handler):
-    def do_POST(self):
-        if self.path != "/v1/embeddings":
-            return super().do_POST()
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= MAX_EMBEDDING_BODY:
-                self.error(413, "Invalid embedding request size")
-                return
-            body = json.loads(self.rfile.read(length))
-            if not isinstance(body, dict):
-                raise ValueError("embedding request must be a JSON object")
-            self.json_response(200, self.dispatcher.embed(body))
-        except (ValueError, TypeError, OSError) as exc:
-            self.error(502, "Embedding request failed: " + str(exc))
+        # Honcho sees one stable chat name. The resolved host and chat model
+        # stay in proxy settings, outside Honcho's environment.
+        return {"object": "list", "data": [{"id": self.alias, "object": "model"}]}
 
 
 def tool_probe(dispatcher, entry, model):
@@ -232,15 +167,6 @@ def probe(directory):
         dispatcher.resolved_model = candidates[0]["name"]
     else:
         chat_probe(dispatcher, model, config.get("HONCHO_STRUCTURED_OUTPUT_MODE", ""))
-    embedding_body = {"model": dispatcher.embedding_model, "input": "Honcho setup check",
-                      "encoding_format": "float"}
-    if config.get("EMBEDDING_DIMENSIONS_MODE") in ("auto", "always"):
-        embedding_body["dimensions"] = dispatcher.embedding_dimensions
-    result = dispatcher.embed(embedding_body)
-    vector = result["data"][0]["embedding"]
-    if len(vector) != dispatcher.embedding_dimensions:
-        raise ValueError("embedding returned %d values; configured %d" %
-                         (len(vector), dispatcher.embedding_dimensions))
     print(dispatcher.resolved_model)
 
 
@@ -248,11 +174,11 @@ def serve(directory):
     config = settings(directory)
     if not config.get("RESOLVED_MODEL"):
         raise ValueError("RESOLVED_MODEL missing: run the provisioner to select a model")
-    HonchoHandler.dispatcher = HonchoDispatcher(config, router_key(directory),
+    direct.Handler.dispatcher = HonchoDispatcher(config, router_key(directory),
                                                  direct.read_env(os.path.join(directory, "backend-keys")))
     logging.basicConfig(level=logging.INFO)
     port = int(os.environ.get("HONCHO_PROXY_PORT", "8765"))
-    direct.DispatchServer(("127.0.0.1", port), HonchoHandler).serve_forever()
+    direct.DispatchServer(("127.0.0.1", port), direct.Handler).serve_forever()
 
 
 if __name__ == "__main__":

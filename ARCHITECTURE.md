@@ -740,9 +740,16 @@ LAN when enabled.
 [Honcho](targets/honcho/README.md) is shared agent memory in a CPU-only Debian
 13 CT: PostgreSQL with pgvector, the Honcho API (8000) and deriver from a
 pinned upstream release, and its Streamable HTTP MCP server (3000) on a
-checksum-pinned Bun. Honcho's chat model is a router tier (`HONCHO_MODEL=fast`);
-embeddings come from an OpenAI-compatible `/v1` endpoint or the router, with
-the vector size set at bootstrap. The admin JWT stays in the CT; Open WebUI
+checksum-pinned Bun. Honcho's chat model is a router tier (`HONCHO_MODEL=fast`).
+Embeddings stay in the CT: `honcho-embedding.service` runs llama.cpp's
+`llama-server` (the llama.cpp target's pinned v0.5.0, built in the CT for its
+CPU's instruction sets) with Qwen3-Embedding-0.6B Q8_0 (a pinned revision
+and SHA-256; 1024 dimensions, last-token pooling) on `127.0.0.1:8766`, which
+Honcho calls directly. llama.cpp scores the whole vocabulary for every token
+of an embedding batch (about 1.2 GB per 1000 tokens), so the batch is 2048
+tokens and Honcho's chunks 1536. Reconfigure refuses an existing CT that uses
+another embedding model before changing its data, because Honcho does not
+provide a verified in-place rebuild of all stored vectors. The admin JWT stays in the CT; Open WebUI
 (MCP tool server, admin-only until granted), Hermes, OpenClaw and DeepSeek
 Harness get a JWT scoped to the `osr` workspace and share the `user` peer. The installer
 provisions Honcho before the agents and passes its URL and CT only to them;

@@ -153,7 +153,7 @@ printf 'provision %s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$(basename "$(dirna
 printf 'prompt-env %s|%s|%s\n' "${PVE_ACCEPT_DEFAULTS:-}" "${PVE_CONFIRM:-}" "${PVE_INTERACTIVE:-}" > "$MOCK_LOG.prompt"
 [[ -z ${HONCHO_CLIENT_IPS:-}${HONCHO_URL:-}${HONCHO_CT_ID:-} ]] ||
   printf 'honcho-env %s|%s|%s\n' "${HONCHO_CLIENT_IPS:-}" "${HONCHO_URL:-}" "${HONCHO_CT_ID:-}" >> "$MOCK_LOG"
-[[ $(basename "$(dirname "$0")") != honcho ]] ||
+[[ -z ${HONCHO_EMBEDDING_MODEL:-}${HONCHO_EMBEDDING_DIMENSIONS:-}${HONCHO_EMBEDDING_BASE_URL:-} ]] ||
   printf 'embedding-env %s|%s|%s\n' "${HONCHO_EMBEDDING_MODEL:-}" "${HONCHO_EMBEDDING_DIMENSIONS:-}" "${HONCHO_EMBEDDING_BASE_URL:-}" >> "$MOCK_LOG"
 [[ $(basename "$(dirname "$0")") != honcho ]] ||
   printf 'router-ip %s\n' "${ROUTER_IP:-}" >> "$MOCK_LOG"
@@ -1012,19 +1012,12 @@ assert_not_contains "a preset HF_TOKEN is not asked for" "Hugging Face token (hf
 TARGET_HF_TOKEN=""; unset COMFYUI_IMAGE_VARIANT
 TARGETS=honcho
 HONCHO_CT_ID=934; HONCHO_IP_CIDR=192.0.2.101/24; HONCHO_STORAGE=router-store
-unset HONCHO_MODEL HONCHO_EMBEDDING_MODEL HONCHO_EMBEDDING_DIMENSIONS HONCHO_EMBEDDING_BASE_URL
-prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nfast\nnomic-embed-text\n768\nhttp://192.0.2.90:11434/v1\n'
-assert_eq "Honcho confirms its router chat tier" fast "$HONCHO_MODEL"
-assert_eq "Honcho prompts for a real embedding model" nomic-embed-text "$HONCHO_EMBEDDING_MODEL"
-assert_eq "and its vector dimensions" 768 "$HONCHO_EMBEDDING_DIMENSIONS"
-assert_eq "and the embedding endpoint" http://192.0.2.90:11434/v1 "$HONCHO_EMBEDDING_BASE_URL"
-assert_contains "the prompt explains the endpoint" "Ollama CT" "$(cat "$_out")"
-unset HONCHO_EMBEDDING_BASE_URL
-prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\n\nnomic-embed-text\n768\n\n'
-assert_eq "a blank endpoint leaves Honcho on OSR's /v1/embeddings" "" "$HONCHO_EMBEDDING_BASE_URL"
-assert_contains "and the prompt says so" "Leave the URL blank" "$(cat "$_out")"
-# Later cases use the first answers again.
-HONCHO_EMBEDDING_BASE_URL=http://192.0.2.90:11434/v1
+unset HONCHO_MODEL
+prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nlarge\n'
+assert_eq "Honcho asks for its router chat model or tier" large "$HONCHO_MODEL"
+assert_contains "and no embedding model: it runs its own" "Qwen3-Embedding-0.6B runs on llama.cpp in Honcho's CT" "$(cat "$_out")"
+assert_not_contains "(no embedding question)" "Embedding" "$(grep -v 'Qwen3-Embedding' "$_out")"
+HONCHO_MODEL=fast
 TARGETS=""
 
 describe valid_honcho_context_tokens
@@ -1052,15 +1045,6 @@ assert_ok "an Ollama tag with a namespace" valid_honcho_model "hf.co/nomic-ai/no
 assert_fail "empty" valid_honcho_model ""
 assert_fail "a leading dash" valid_honcho_model -fast
 assert_fail "a space" valid_honcho_model "nomic embed"
-
-describe valid_honcho_embedding_url
-assert_ok "blank uses the router" valid_honcho_embedding_url ""
-assert_ok "an Ollama /v1 endpoint" valid_honcho_embedding_url http://192.0.2.90:11434/v1
-assert_ok "a trailing slash" valid_honcho_embedding_url http://192.0.2.90:11434/v1/
-assert_ok "HTTPS without a port" valid_honcho_embedding_url https://embed.example.net/v1
-assert_fail "Ollama's native API" valid_honcho_embedding_url http://192.0.2.90:11434/api
-assert_fail "no scheme" valid_honcho_embedding_url 192.0.2.90:11434/v1
-assert_fail "a path below /v1" valid_honcho_embedding_url http://192.0.2.90:11434/v1/embeddings
 
 describe target_menu_group
 assert_eq "services" 'Services (CPU): configuration and alerts; created before OSR.' "$(target_menu_group gitea)"
@@ -1123,26 +1107,6 @@ MODEL_SERVER_COUNT=3; MODEL_SERVER_1=10.0.0.51; TARGETS="hermes"
 preset_target_model_servers > /dev/null
 assert_eq "companions alone change nothing" "3 10.0.0.51" "$MODEL_SERVER_COUNT $MODEL_SERVER_1"
 for _i in 1 2 3 4 5; do unset "MODEL_SERVER_$_i"; done; unset _i
-
-describe honcho_known_dimensions
-_saved_targets_dir=$TARGETS_DIR
-TARGETS_DIR="${HERE}/../targets"
-assert_eq "a common embedding model's known size" 768 "$(honcho_known_dimensions nomic-embed-text)"
-assert_eq "an Ollama tag that decides it" 1024 "$(honcho_known_dimensions qwen3-embedding:0.6b)"
-assert_eq "nothing for an unknown model" "" "$(honcho_known_dimensions my-embedder)"
-TARGETS_DIR=$_saved_targets_dir; unset _saved_targets_dir
-assert_eq "nothing without the helper" "" "$(honcho_known_dimensions nomic-embed-text)"
-TARGETS=honcho
-HONCHO_CT_ID=934; HONCHO_IP_CIDR=192.0.2.101/24; HONCHO_STORAGE=router-store
-unset HONCHO_EMBEDDING_DIMENSIONS
-_saved_fn="$(declare -f honcho_known_dimensions)"
-honcho_known_dimensions() { [[ $1 == bge-m3 ]] && echo 1024; return 0; }
-_out="$(mktemp)"
-prompt_target_settings > "$_out" 2>&1 <<< $'\n\n\nfast\nbge-m3\n\n\n'
-assert_eq "the known size is the default vector size" 1024 "$HONCHO_EMBEDDING_DIMENSIONS"
-assert_contains "and the prompt says so" "bge-m3 makes 1024-dimension vectors (its known size)" "$(cat "$_out")"
-eval "$_saved_fn"; unset _saved_fn
-HONCHO_EMBEDDING_DIMENSIONS=768; HONCHO_EMBEDDING_MODEL=nomic-embed-text; TARGETS=""
 
 describe target_context_var
 assert_eq "Ollama's window is OLLAMA_CONTEXT_LENGTH" OLLAMA_CONTEXT_LENGTH "$(target_context_var ollama)"
@@ -1433,8 +1397,7 @@ assert_contains "Honcho reuses the router's Debian 13 template" \
   "provision honcho|920|192.0.2.100/24|192.0.2.1|t-store|vmbr2|local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst" "$(mock_calls)"
 assert_contains "Honcho gets every selected agent address" \
   "honcho-env 192.0.2.94 192.0.2.98 192.0.2.101||" "$(mock_calls)"
-assert_contains "Honcho gets the prompted embedding settings" \
-  "embedding-env nomic-embed-text|768|http://192.0.2.90:11434/v1" "$(mock_calls)"
+assert_not_contains "and no embedding settings: it embeds in its own CT" "embedding-env" "$(mock_calls)"
 assert_contains "Honcho gets the router IP entered earlier" "router-ip 192.0.2.80" "$(mock_calls)"
 assert_contains "Honcho gets the selected router chat model" "chat-model fast" "$(mock_calls)"
 assert_not_contains "an unset Honcho window is not passed (a first install sizes for 65536)" "context-env" "$(mock_calls)"

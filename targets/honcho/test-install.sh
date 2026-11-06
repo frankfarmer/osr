@@ -99,7 +99,7 @@ router=http://127.0.0.1:$(<"$fake/port")
 
 # --- stubs ------------------------------------------------------------------------
 stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$bin/$1"; chmod +x "$bin/$1"; }
-stub id 'case $1 in -u) echo 0 ;; honcho|honcho-proxy) [[ -e $FAKE_DIR/user-$1 ]] ;; esac'
+stub id 'case $1 in -u) echo 0 ;; honcho|honcho-proxy|honcho-embedding) [[ -e $FAKE_DIR/user-$1 ]] ;; esac'
 stub useradd 'echo "useradd $*" >> "$FAKE_LOG"; touch "$FAKE_DIR/user-${@: -1}"'
 stub chown 'echo "chown $*" >> "$FAKE_LOG"'
 stub sleep ':'
@@ -147,17 +147,23 @@ stub pg_dump 'echo "pg_dump $*" >> "$FAKE_LOG"; cat "$FAKE_DIR/db-data"'
 stub pg_restore 'echo "pg_restore $*" >> "$FAKE_LOG"; cat > "$FAKE_DIR/db-data"'
 # git: the checkout is the commit named in .git/FAKE_HEAD; tags map to commits.
 # Like real git as root, a call into the honcho-owned checkout must name it
-# safe (-c safe.directory=DIR) or it fails with "dubious ownership".
+# safe (-c safe.directory=DIR) or it fails with "dubious ownership". The
+# llama.cpp source is root's own, fetched by tag: FETCH_HEAD is the commit
+# FAKE_LLAMA_COMMIT names, the pinned one unless a case says otherwise.
 stub git 'echo "git $*" >> "$FAKE_LOG"
 dir="" safe=""
 while [[ $1 == -c || $1 == -C ]]; do
   if [[ $1 == -C ]]; then dir=$2; elif [[ $2 == safe.directory=* ]]; then safe=${2#safe.directory=}; fi
   shift 2
 done
-if [[ -n $dir && -e $dir/.git/FAKE_HEAD && $safe != "$dir" ]]; then
+if [[ -n $dir && $dir == "$FAKE_OPT" && -e $dir/.git/FAKE_HEAD && $safe != "$dir" ]]; then
   echo "fatal: detected dubious ownership in repository at $dir" >&2; exit 128
 fi
+if [[ $1 == checkout && ${@: -1} == FETCH_HEAD ]]; then
+  printf "%s\n" "${FAKE_LLAMA_COMMIT:-7fe450e19305b828c199d602c23a8337aaa1f03b}" > "$dir/.git/FAKE_HEAD"; exit
+fi
 case $1 in
+  init) mkdir -p "${@: -1}/.git" ;;
   clone) mkdir -p "$3/.git" "$3/mcp" ;;
   fetch) : ;;
   rev-parse)
@@ -170,12 +176,27 @@ case $1 in
     esac; echo ;;
   checkout) printf "%s\n" "$3" > "$dir/.git/FAKE_HEAD" ;;
 esac'
-# curl: the health checks (healthy unless the checkout is FAKE_UNHEALTHY_COMMIT)
-# and the Bun release download.
+# cmake: configuring is logged; building leaves a llama-server that answers --version.
+stub cmake 'echo "cmake $*" >> "$FAKE_LOG"
+if [[ $1 == --build ]]; then
+  mkdir -p "$2/bin"
+  printf "#!/usr/bin/env bash\necho \"version: fake llama\"\n" > "$2/bin/llama-server"
+  chmod +x "$2/bin/llama-server"
+fi'
+# curl: the health checks (healthy unless the checkout is FAKE_UNHEALTHY_COMMIT),
+# the local embedding model (its health and one vector of FAKE_DIR/embed-dims
+# values, 1024 unless a case says otherwise), and the Bun and model downloads.
 stub curl 'echo "curl $*" >> "$FAKE_LOG"
 out=""; url=""
 while (( $# )); do case $1 in -o) out=$2; shift 2 ;; http*) url=$1; shift ;; *) shift ;; esac; done
 case $url in
+  http://127.0.0.1:8766/health)
+    [[ -e $FAKE_DIR/active-honcho-embedding ]] || exit 7 ;;
+  http://127.0.0.1:8766/v1/embeddings)
+    [[ -e $FAKE_DIR/active-honcho-embedding ]] || exit 7
+    python3 -c "import json, sys; print(json.dumps({\"data\": [{\"embedding\": [0.0] * int(sys.argv[1])}]}))" \
+      "$(cat "$FAKE_DIR/embed-dims" 2>/dev/null || echo 1024)" ;;
+  https://models.test/*) echo "download $url" >> "$FAKE_LOG"; cp "$FAKE_DIR/model.gguf" "$out" ;;
   http://127.0.0.1:8765/healthz)
     [[ -e $FAKE_DIR/active-honcho-proxy ]] || exit 7 ;;
   http://127.0.0.1:8000/health|http://127.0.0.1:3000/health)
@@ -203,7 +224,7 @@ case $* in
     echo "alembic dims=${EMBEDDING_VECTOR_DIMENSIONS:-from-env-file} $head" >> "$FAKE_LOG"
     echo "half-migrated $head" > "$FAKE_DIR/db-data"
     # A signal test interrupts this migration halfway.
-    if [[ $head == "${FAKE_SLOW_MIGRATE_COMMIT:-none}" ]]; then : > "$FAKE_DIR/migrating"; /bin/sleep 2; fi
+    if [[ $head == "${FAKE_SLOW_MIGRATE_COMMIT:-none}" ]]; then : > "$FAKE_DIR/migrating"; /bin/sleep 10; fi
     [[ $head != "${FAKE_MIGRATE_FAIL_COMMIT:-none}" ]] || exit 1
     echo "migrated $head" > "$FAKE_DIR/db-data" ;;
   'python scripts/configure_embeddings.py --yes') echo 'configure_embeddings' >> "$FAKE_LOG" ;;
@@ -223,9 +244,11 @@ make_bun() {
 }
 
 # fresh: an empty CT. guest VAR=...: one run of the script; its output is $out.
+printf 'GGUF fake Qwen3-Embedding\n' > "$fake/model.gguf"
+model_sha=$(sha256sum "$fake/model.gguf" | cut -d' ' -f1)
 fresh() {
-  rm -rf -- "$tmp/ct" "$tmp/uv" "$tmp/bun" "$fake"/active-* "$fake"/pg-* "$fake/db-data" "$fake/user-honcho" "$fake/user-honcho-proxy" "$fake/probe.json" "$fake/tool-probe.json"
-  rm -f "$fake/chat-status" "$fake/chat-warning" "$fake/dims"
+  rm -rf -- "$tmp/ct" "$tmp/uv" "$tmp/bun" "$fake"/active-* "$fake"/failed-* "$fake"/pg-* "$fake/db-data" "$fake"/user-honcho* "$fake/probe.json" "$fake/tool-probe.json"
+  rm -f "$fake/chat-status" "$fake/chat-warning" "$fake/embed-dims"
   mkdir -p "$tmp/ct/deploy" "$tmp/ct/units"
   cp "$here"/honcho-*.service "$here/budgets.py" "$here/honcho-proxy.py" "$here/direct_dispatch.py" "$tmp/ct/deploy/"
   cp "$fake/router-key" "$tmp/ct/deploy/router-api-key"
@@ -241,10 +264,10 @@ guest() {
     HONCHO_DEPLOY_DIR="$tmp/ct/deploy" HONCHO_OPT="$tmp/ct/opt" HONCHO_ETC="$tmp/ct/etc" \
     HONCHO_STATE_DIR="$tmp/ct/state" HONCHO_HOME="$tmp/ct/home" HONCHO_UV_DIR="$tmp/uv" \
     HONCHO_BUN_DIR="$tmp/bun" HONCHO_UNIT_DIR="$tmp/ct/units" HONCHO_CPUINFO="$tmp/ct/cpuinfo" \
-    HONCHO_PROXY_LIB_DIR="$tmp/ct/lib" \
+    HONCHO_PROXY_LIB_DIR="$tmp/ct/lib" HONCHO_LLAMA_DIR="$tmp/ct/llama" \
+    HONCHO_EMBEDDING_DIR="$tmp/ct/embedding" HONCHO_EMBEDDING_FILE_URL=https://models.test/model.gguf \
+    HONCHO_EMBEDDING_FILE_SHA256="$model_sha" \
     HONCHO_HEALTH_TRIES=2 ROUTER_URL="$router" \
-    HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_DIMENSIONS=768 \
-    HONCHO_EMBEDDING_BASE_URL= \
     "$@" bash "$script" 2>&1
 }
 calls() { cat "$FAKE_LOG"; }
@@ -257,11 +280,9 @@ file_mode() {
 }
 
 describe honcho_required_inputs
-out=$(env PATH="$bin:$PATH" ROUTER_URL="$router" \
-  HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_DIMENSIONS=768 \
-  NONINTERACTIVE=true env -u HONCHO_EMBEDDING_BASE_URL bash "$script" 2>&1 || true)
-assert_contains "an unattended guest must choose its embedding endpoint" \
-  'Set HONCHO_EMBEDDING_BASE_URL' "$out"
+out=$(env PATH="$bin:$PATH" NONINTERACTIVE=true env -u ROUTER_URL bash "$script" 2>&1 || true)
+assert_contains "an unattended guest needs the router's URL, and no embedding settings" \
+  'Set ROUTER_URL' "$out"
 
 describe honcho_fresh_install
 fresh
@@ -281,15 +302,31 @@ file_mode "the admin key is root-only" 600 "$etc/api-key"
 file_mode "so is the client key" 600 "$etc/client-api-key"
 file_mode "the router key is limited to the proxy group" 640 "$etc/router-api-key"
 file_mode "the backend keys are limited to the proxy group" 640 "$etc/backend-keys"
-assert_contains "the env file has the vector size" "EMBEDDING_VECTOR_DIMENSIONS=768" "$(cat "$etc/honcho.env")"
+assert_contains "llama.cpp is fetched by its release tag" "fetch -q --depth 1 origin refs/tags/v0.5.0" "$(calls)"
+assert_contains "and built for the CPU's instruction sets, not natively" "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_F16C=OFF -DGGML_FMA=OFF -DGGML_AVX2=ON -DGGML_BMI2=OFF" "$(calls)"
+assert_contains "without the web UI download" "-DLLAMA_USE_PREBUILT_UI=OFF" "$(calls)"
+assert_ok "llama-server is installed" test -x "$tmp/ct/llama/bin/llama-server"
+assert_contains "the pinned model file is downloaded" "download https://models.test/model.gguf" "$(calls)"
+assert_ok "and kept under its own name" cmp -s "$fake/model.gguf" "$tmp/ct/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf"
+file_mode "readable by the embedding service's group only" 640 "$tmp/ct/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf"
+assert_ok "the embedding unit is installed" cmp -s "$here/honcho-embedding.service" "$tmp/ct/units/honcho-embedding.service"
+assert_contains "with this CT's cores" "HONCHO_EMBEDDING_THREADS=$(nproc)" "$(cat "$etc/embedding.env")"
+assert_contains "and its account" "useradd --system --no-create-home --shell /usr/sbin/nologin honcho-embedding" "$(calls)"
+assert_contains "it is checked with one embedding before Honcho is set up" "Local embedding model ready: qwen3-embedding-0.6b (1024 dimensions)" "$out"
+assert_contains "the env file has its vector size" "EMBEDDING_VECTOR_DIMENSIONS=1024" "$(cat "$etc/honcho.env")"
+assert_contains "and its model" "EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-0.6b" "$(cat "$etc/honcho.env")"
+assert_contains "at the local server" "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://127.0.0.1:8766/v1" "$(cat "$etc/honcho.env")"
+assert_contains "which gets no dimensions= field" "EMBEDDING_MODEL_CONFIG__DIMENSIONS_MODE=never" "$(cat "$etc/honcho.env")"
+assert_contains "inputs that fit its 2048-token batch" "EMBEDDING_MAX_INPUT_TOKENS=1536" "$(cat "$etc/honcho.env")"
+assert_contains "and CPU-sized requests" "EMBEDDING_MAX_TOKENS_PER_REQUEST=4096" "$(cat "$etc/honcho.env")"
+assert_not_contains "nothing is cleared on a first install" "UPDATE documents" "$(calls)"
 assert_contains "and the local proxy as the model endpoint" "DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL=http://127.0.0.1:8765/v1" "$(cat "$etc/honcho.env")"
 assert_contains "and allows headroom beyond Kindi's silent read" "DERIVER_MODEL_CONFIG__OVERRIDES__PROVIDER_PARAMS__TIMEOUT=7200" "$(cat "$etc/honcho.env")"
 assert_contains "for every dialectic level" "DIALECTIC_LEVELS__max__MODEL_CONFIG__OVERRIDES__PROVIDER_PARAMS__TIMEOUT=7200" "$(cat "$etc/honcho.env")"
-assert_contains "and the local proxy as the embedding endpoint" "EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=http://127.0.0.1:8765/v1" "$(cat "$etc/honcho.env")"
 assert_not_contains "Honcho does not hold the router address" "$router" "$(cat "$etc/honcho.env")"
 assert_not_contains "Honcho does not hold the router key" "sk-router-test-key" "$(cat "$etc/honcho.env")"
 assert_not_contains "upstream's structured output by default" "STRUCTURED_OUTPUT_MODE" "$(cat "$etc/honcho.env")"
-assert_eq "the model target receives no router key" "" "$(cat "$fake/embedding-auth")"
+assert_not_contains "the proxy is no longer told about embeddings" "EMBEDDING" "$(<"$etc/proxy.settings")"
 assert_not_contains "nothing is dumped on a first install" "pg_dump" "$(calls)"
 assert_ok "the proxy unit is installed" test -f "$tmp/ct/units/honcho-proxy.service"
 assert_contains "the proxy pins the resolved model" 'RESOLVED_MODEL=fast-model' "$(<"$etc/proxy.settings")"
@@ -308,24 +345,45 @@ assert_contains "even the same commit gets a rollback dump" "pg_dump -Fc honcho"
 assert_eq "the admin key is kept" "$admin_key" "$(<"$etc/api-key")"
 assert_eq "and the client key" "$client_key" "$(<"$etc/client-api-key")"
 assert_eq "and the first install's context" "HONCHO_CONTEXT_TOKENS=65536" "$(<"$etc/budgets.env")"
-out=$(guest HONCHO_EMBEDDING_BASE_URL="http://localhost:$(<"$fake/port")/v1") && rc=0 || rc=$?
-assert_eq "a separate embedding endpoint works" 0 "$rc"
-assert_eq "and gets a placeholder key, not the router's" "Bearer no-key" "$(cat "$fake/embedding-auth")"
+assert_not_contains "llama.cpp is not built again" "cmake -S" "$(calls)"
+assert_not_contains "nor the model downloaded again" "download" "$(calls)"
+assert_not_contains "and the stored vectors stay" "UPDATE documents" "$(calls)"
+out=$(guest HONCHO_EMBEDDING_MODEL=nomic-embed-text) && rc=0 || rc=$?
+assert_eq "an old embedding setting does not stop a run" 0 "$rc"
+assert_contains "it is named as no longer used" "HONCHO_EMBEDDING_MODEL is no longer used" "$out"
+
+describe honcho_embedding_switch
+# A CT installed before the local model embedded with another one.
+sed -i -e 's/^EMBEDDING_MODEL_CONFIG__MODEL=.*/EMBEDDING_MODEL_CONFIG__MODEL=nomic-embed-text/' \
+  -e 's/^EMBEDDING_VECTOR_DIMENSIONS=.*/EMBEDDING_VECTOR_DIMENSIONS=768/' "$etc/honcho.env"
+rm -f "$tmp/ct/units/honcho-embedding.service"
+before_env=$(<"$etc/honcho.env") before_db=$(<"$fake/db-data")
+out=$(guest) && rc=0 || rc=$?
+assert_ne "a model switch on an existing CT is refused" 0 "$rc"
+assert_contains "with migration guidance" "Cannot change Honcho embeddings from nomic-embed-text to qwen3-embedding-0.6b" "$out"
+assert_not_contains "before a database dump" "pg_dump" "$(calls)"
+assert_not_contains "or vector deletion" "DELETE FROM message_embeddings" "$(calls)"
+assert_eq "the old environment is kept" "$before_env" "$(<"$etc/honcho.env")"
+assert_eq "and the database is kept" "$before_db" "$(<"$fake/db-data")"
+assert_ok "with the old API still running" test -e "$fake/active-honcho-api"
+assert_fail "and no rollback directory" test -e "$tmp/ct/state/rollback"
+sed -i -e 's/^EMBEDDING_MODEL_CONFIG__MODEL=.*/EMBEDDING_MODEL_CONFIG__MODEL=qwen3-embedding-0.6b/' \
+  -e 's/^EMBEDDING_VECTOR_DIMENSIONS=.*/EMBEDDING_VECTOR_DIMENSIONS=1024/' "$etc/honcho.env"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "the same-model rerun still works" 0 "$rc"
 
 describe honcho_same_commit_rollback
 before_env=$(<"$etc/honcho.env") before_db=$(<"$fake/db-data")
 before_proxy=$(<"$etc/proxy.settings")
 printf '# prior proxy revision\n' >> "$tmp/ct/lib/honcho-proxy.py"
 before_proxy_code=$(<"$tmp/ct/lib/honcho-proxy.py")
-printf '1024\n' > "$fake/dims"
-out=$(guest HONCHO_EMBEDDING_DIMENSIONS=1024 FAKE_MIGRATE_FAIL_COMMIT="$(printf 'a%.0s' {1..40})") && rc=0 || rc=$?
+out=$(guest HONCHO_CONTEXT_TOKENS=32768 FAKE_MIGRATE_FAIL_COMMIT="$(printf 'a%.0s' {1..40})") && rc=0 || rc=$?
 assert_ne "a failed same-commit migration fails the run" 0 "$rc"
 assert_contains "its database is restored from the dump" "pg_restore --exit-on-error -d honcho" "$(calls)"
 assert_eq "including the prior data" "$before_db" "$(<"$fake/db-data")"
-assert_eq "and its embedding configuration" "$before_env" "$(<"$etc/honcho.env")"
+assert_eq "and its env file" "$before_env" "$(<"$etc/honcho.env")"
 assert_eq "and its prior proxy settings" "$before_proxy" "$(<"$etc/proxy.settings")"
 assert_eq "and its prior proxy implementation" "$before_proxy_code" "$(<"$tmp/ct/lib/honcho-proxy.py")"
-rm -f "$fake/dims"
 
 describe honcho_upgrade
 out=$(guest HONCHO_REF=v3.6.0) && rc=0 || rc=$?
@@ -366,6 +424,7 @@ for signal in TERM INT HUP; do
       OSR_INTERRUPT_LOG="$fake/interrupt.log" > "$fake/signal-out" ) &
   pid=$!
   for _ in {1..100}; do [[ -e $fake/migrating ]] && break; /bin/sleep 0.1; done
+  assert_ok "SIG$signal reaches the migration before it exits" test -e "$fake/migrating"
   kill -"$signal" "$pid"
   rc=0; wait "$pid" || rc=$?
   out=$(cat "$fake/signal-out" "$fake/interrupt.log" 2>/dev/null || true)
@@ -492,13 +551,46 @@ printf '400\n' > "$fake/chat-status"
 out=$(guest HONCHO_SKIP_CHAT_PROBE=true) && rc=0 || rc=$?
 assert_eq "the active chat probe can be skipped" 0 "$rc"
 rm -f "$fake/chat-status"
-printf '1024\n' > "$fake/dims"
+printf '768\n' > "$fake/embed-dims"
 out=$(guest) && rc=0 || rc=$?
-assert_ne "a wrong vector size stops the run" 0 "$rc"
-assert_contains "naming both sizes" "embedding returned 1024 values; configured 768" "$out"
-rm -f "$fake/dims"
+assert_ne "a local model that returns the wrong vector size stops the run" 0 "$rc"
+assert_contains "naming both sizes" "returned 768 vector instead of 1024 values" "$out"
+assert_not_contains "before Honcho is stopped" "pg_dump" "$(calls)"
+assert_ok "an existing install is left running" test -e "$fake/active-honcho-api"
+rm -f "$fake/embed-dims"
 out=$(guest HONCHO_MODEL=large) && rc=0 || rc=$?
 assert_ne "a model the router does not list is refused" 0 "$rc"
+
+describe honcho_local_embedding
+fresh
+out=$(guest HONCHO_EMBEDDING_FILE_SHA256="$(printf '0%.0s' {1..64})") && rc=0 || rc=$?
+assert_ne "a model file that does not match its checksum is refused" 0 "$rc"
+assert_contains "and says so" "does not match its pinned SHA-256" "$out"
+assert_fail "nothing of it is kept" test -e "$tmp/ct/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf.part"
+assert_not_contains "before Honcho is set up" "createdb" "$(calls)"
+rm -rf -- "$tmp/ct/llama"   # built by the run above, before its download
+out=$(guest FAKE_LLAMA_COMMIT="$(printf 'e%.0s' {1..40})") && rc=0 || rc=$?
+assert_ne "a llama.cpp tag that is not the reviewed commit is refused" 0 "$rc"
+assert_contains "naming both" "llama.cpp v0.5.0 is not commit 7fe450e19305b828c199d602c23a8337aaa1f03b" "$out"
+assert_not_contains "and not built" "cmake --build" "$(calls)"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "the pinned commit and model install" 0 "$rc"
+printf 'damaged\n' > "$tmp/ct/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "a damaged model file is replaced" 0 "$rc"
+assert_contains "by downloading it again" "download https://models.test/model.gguf" "$(calls)"
+assert_ok "intact" cmp -s "$fake/model.gguf" "$tmp/ct/embedding/Qwen3-Embedding-0.6B-Q8_0.gguf"
+printf 'flags : fpu sse2 avx f16c fma avx2 bmi2\n' > "$tmp/ct/cpuinfo"
+out=$(guest) && rc=0 || rc=$?
+assert_eq "another CPU (a migrated CT) gets llama.cpp built for it" 0 "$rc"
+assert_contains "with its instruction sets" "-DGGML_FMA=ON -DGGML_AVX2=ON -DGGML_BMI2=ON" "$(calls)"
+before=$(<"$tmp/ct/llama/build-info")
+out=$(guest HONCHO_REF=v3.7.0 FAKE_MIGRATE_FAIL_COMMIT="$(printf 'd%.0s' {1..40})") && rc=0 || rc=$?
+assert_ne "a failed run after the embedding step" 0 "$rc"
+assert_contains "rolls back" "is running again" "$out"
+assert_ok "with the local model's unit" test -f "$tmp/ct/units/honcho-embedding.service"
+assert_ok "and running" test -e "$fake/active-honcho-embedding"
+assert_eq "and its build record" "$before" "$(<"$tmp/ct/llama/build-info")"
 
 describe honcho_bun
 python3 - "$tmp/bun.zip" <<'PY'

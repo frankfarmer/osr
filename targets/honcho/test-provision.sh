@@ -1,44 +1,65 @@
 #!/usr/bin/env bash
-# The Honcho preflight must reject an unusable embedding setup before PVE calls.
+# The Honcho provisioner: its questions, its plan, and its checks before any PVE call.
 set -Eeuo pipefail
 exec </dev/null
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$here/../../tests/lib/assert.sh"
 provision=$here/provision-lxc.sh
 common=(CT_ID=285 ROUTER_CT_ID=280 ROUTER_IP=192.0.2.80 TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst
-  STORAGE=local-lvm IP_CIDR=192.0.2.85/24 GATEWAY=192.0.2.1
-  HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_DIMENSIONS=768
-  HONCHO_EMBEDDING_BASE_URL=http://192.0.2.90:11434/v1)
+  STORAGE=local-lvm IP_CIDR=192.0.2.85/24 GATEWAY=192.0.2.1)
 
 describe honcho_dry_run
 plan=$(env "${common[@]}" bash "$provision" --dry-run)
 assert_contains "valid setup gets a plan" "Would create Honcho CT 285" "$plan"
 assert_contains "the plan shows the entered router IP" "Router IP: 192.0.2.80" "$plan"
-assert_contains "the plan shows the selected embedding endpoint" "via http://192.0.2.90:11434/v1" "$plan"
+assert_contains "the plan shows the local embedding model" "embedding: qwen3-embedding-0.6b (1024 dimensions) in the Honcho CT" "$plan"
 assert_fail "a missing Honcho CT ID cannot be guessed" env "${common[@]}" CT_ID= bash "$provision" --dry-run
 assert_fail "a missing router CT ID cannot be guessed" env "${common[@]}" ROUTER_CT_ID= bash "$provision" --dry-run
 assert_fail "a missing Honcho IP cannot be guessed" env "${common[@]}" IP_CIDR= bash "$provision" --dry-run
 assert_fail "a missing router IP cannot be guessed" env "${common[@]}" ROUTER_IP= bash "$provision" --dry-run
 assert_fail "Honcho cannot reuse the router IP" env "${common[@]}" ROUTER_IP=192.0.2.85 bash "$provision" --dry-run
 assert_fail "an agent cannot reuse the Honcho IP" env "${common[@]}" HONCHO_CLIENT_IPS=192.0.2.85 bash "$provision" --dry-run
-assert_fail "a missing embedding model is refused" env "${common[@]}" HONCHO_EMBEDDING_MODEL= bash "$provision" --dry-run
-assert_fail "a missing vector size is refused" env "${common[@]}" HONCHO_EMBEDDING_DIMENSIONS= bash "$provision" --dry-run
-assert_fail "an unattended install must choose an embedding endpoint" env "${common[@]}" env -u HONCHO_EMBEDDING_BASE_URL bash "$provision" --dry-run
-assert_fail "a non-v1 embedding URL is refused" env "${common[@]}" HONCHO_EMBEDDING_BASE_URL=http://192.0.2.90:11434/api bash "$provision" --dry-run
+out=$(env "${common[@]}" HONCHO_EMBEDDING_MODEL=nomic-embed-text HONCHO_EMBEDDING_BASE_URL=http://192.0.2.90:11434/v1 \
+  bash "$provision" --dry-run 2>&1) && rc=0 || rc=$?
+assert_eq "an earlier embedding setting does not stop a run" 0 "$rc"
+assert_contains "it is named as no longer used" "HONCHO_EMBEDDING_MODEL is no longer used" "$out"
+assert_not_contains "and does not reach the CT" "nomic-embed-text" "$(grep -v 'no longer used' <<< "$out")"
 assert_fail "Debian 12 lacks the packaged pgvector target" env "${common[@]}" TEMPLATE=local:vztmpl/debian-12-standard_12.0-1_amd64.tar.zst bash "$provision" --dry-run
 assert_contains "a release is pinned by default" "with v3.5.0" "$plan"
-assert_ok "a blank embedding URL uses the router" env "${common[@]}" HONCHO_EMBEDDING_BASE_URL= bash "$provision" --dry-run
-assert_ok "an HTTPS embedding URL needs no port" env "${common[@]}" HONCHO_EMBEDDING_BASE_URL=https://embed.example.net/v1 bash "$provision" --dry-run
 assert_fail "a moving branch other than main is refused" env "${common[@]}" HONCHO_REF=develop bash "$provision" --dry-run
 assert_fail "--rotate-keys needs an existing CT" env "${common[@]}" bash "$provision" --dry-run --rotate-keys
 plan=$(env "${common[@]}" bash "$provision" --dry-run --reconfigure --rotate-keys)
 assert_contains "a reconfigure can rotate the keys" "Would replace the JWT secret and both Honcho keys" "$plan"
+assert_contains "a dry-run reconfigure names the check it cannot make" "Not checked by a dry run: CT 285 must be running and embed with qwen3-embedding-0.6b" "$plan"
+assert_not_contains "a dry-run create has no such check" "Not checked by a dry run" "$(env "${common[@]}" bash "$provision" --dry-run)"
 assert_contains "and admits Honcho in the router's firewall" "Would admit 192.0.2.85 to the router API in /etc/pve/firewall/280.fw" "$plan"
 assert_not_contains "unless that is turned off" "Would admit" "$(env "${common[@]}" HONCHO_ROUTER_FIREWALL=false bash "$provision" --dry-run)"
 assert_fail "json_object or json_schema only" env "${common[@]}" HONCHO_STRUCTURED_OUTPUT_MODE=xml bash "$provision" --dry-run
 assert_fail "another Bun needs a checksum" env "${common[@]}" HONCHO_BUN_VERSION=1.5.0 bash "$provision" --dry-run
 assert_ok "and runs with the baseline one alone" env "${common[@]}" HONCHO_BUN_VERSION=1.5.0 HONCHO_BUN_BASELINE_SHA256="$(printf 'a%.0s' {1..64})" bash "$provision" --dry-run
 assert_fail "a checksum is 64 hex digits" env "${common[@]}" HONCHO_BUN_SHA256=abc bash "$provision" --dry-run
+
+describe honcho_reconfigure_preflight
+# shellcheck disable=SC1090
+source <(awk '/^# Reconfigure guard helper:/{c=1} /^# End reconfigure guard helper\.$/{print; c=0} c' "$provision")
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+pct() {
+  case $1 in
+    status) [[ ${FAKE_CT_DOWN:-false} != true ]] && printf 'status: running\n' ;;
+    exec)
+      case $4 in
+        sed) printf '%s\n' "${FAKE_PREVIOUS_EMBEDDING:-qwen3-embedding-0.6b}" ;;
+      esac ;;
+  esac
+}
+preflight() ( honcho_reconfigure_preflight 285 )
+assert_ok "the same model permits reconfigure" preflight
+out=$(FAKE_PREVIOUS_EMBEDDING=nomic-embed-text preflight 2>&1) && rc=0 || rc=$?
+assert_ne "an older model is refused" 0 "$rc"
+assert_contains "with migration guidance" "cannot migrate stored vectors" "$out"
+out=$(FAKE_CT_DOWN=true preflight 2>&1) && rc=0 || rc=$?
+assert_ne "a stopped CT is refused by the helper" 0 "$rc"
+assert_contains "with its CT ID" "Honcho CT 285 is not running" "$out"
 
 describe router_fw_with_honcho
 # shellcheck disable=SC1090
@@ -274,53 +295,42 @@ assert_contains "a number off the list is asked again" "Choose 1-2, or type a na
 assert_contains "so is an invalid name" "Not a valid choice: bad name" "$out"
 assert_eq "until an answer fits" "qwen3:14b" "$(tail -n1 <<< "$out" | sed 's/.*: //')"
 assert_fail "the end of input is no choice" choose_from Model '' valid_model_name <<< ''
-assert_eq "without a list a number is the value" 1024 "$(choose_from Size '' valid_dimensions <<< '1024' 2>/dev/null)"
-assert_eq "listed_url finds a listed model's host, in any case" "http://192.0.2.91:11434/v1" "$(listed_url QWEN3:32B "${lines[@]}")"
-assert_eq "and nothing for an unlisted one" "" "$(listed_url other "${lines[@]}")"
-choices=$here/model_choices.py
-assert_eq "the vector size is measured with one request when the host is known" \
-  $'640\tmeasured at http://192.0.2.90:11434/v1' "$(suggest_dimensions "$choices" nomic-embed-text http://192.0.2.90:11434/v1)"
-assert_contains "at the host's /embeddings" "http://192.0.2.90:11434/v1/embeddings" "$(cat "$stubs/calls")"
-assert_eq "an unreachable host falls back to the model's known size" \
-  $'768\tthe size nomic-embed-text is known to have' "$(FAIL_EMBED=true suggest_dimensions "$choices" nomic-embed-text http://192.0.2.90:11434/v1)"
-assert_eq "as does no host" $'1024\tthe size bge-m3 is known to have' "$(suggest_dimensions "$choices" bge-m3)"
-assert_eq "an unknown model with no host gets no suggestion" "" "$(suggest_dimensions "$choices" my-embedder)"
-
+valid_count() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
+assert_eq "without a list a number is the value" 1024 "$(choose_from Size '' valid_count <<< '1024' 2>/dev/null)"
 describe honcho_interactive_choices
 if command -v script >/dev/null; then
   interactive_env=(CT_ID=285 ROUTER_CT_ID=280 ROUTER_IP=192.0.2.80 GATEWAY=192.0.2.1 IP_CIDR=192.0.2.85/24
     TEMPLATE=local:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst STORAGE=local-lvm HONCHO_CLIENT_IPS=)
   # Answers: the context window (Enter: 65536), the chat model (Enter: the
-  # suggestion), the embedding model (its number), the embedding URL (Enter:
-  # inventory), the vector size (Enter).
-  out=$(printf '\n\n1\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+  # suggestion). Nothing about embeddings is asked.
+  out=$(printf '\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
     script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
   assert_contains "the context window is asked first, with the first-install size" "Context window the chat model serves (tokens; none = Honcho's 128k budgets) [65536]" "$out"
   assert_contains "and reaches the CT" "HONCHO_CONTEXT_TOKENS=65536" "$out"
   assert_contains "the router's inventory is read once its address is known" "Reading the models router CT 280 serves" "$out"
   assert_contains "the usable chat model is listed" "1) qwen3:14b  (65536-token context, 14.8B, loaded, on http://192.0.2.90:11434)" "$out"
   assert_contains "the ones the proxy cannot use are named, with the reason" "gemma3:12b (tool support not reported)" "$out"
-  assert_contains "and the embedding models" "1) nomic-embed-text:latest" "$out"
-  assert_contains "the vector size is suggested" "Embedding vector dimensions: 640 suggested (measured at http://192.0.2.90:11434/v1)." "$out"
-  assert_contains "and the answers reach the plan" "chat model: qwen3:14b; embedding: nomic-embed-text:latest (640 dimensions) via router inventory" "$out"
-  # A preset chat model; the embedding model typed, so no listed host to measure.
-  out=$(printf '\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" HONCHO_MODEL=large \
+  assert_not_contains "embedding models are not offered" "nomic-embed-text" "$out"
+  assert_not_contains "nor asked for" "Embedding model (" "$out"
+  assert_contains "and the answer reaches the plan" "chat model: qwen3:14b; embedding: qwen3-embedding-0.6b (1024 dimensions) in the Honcho CT" "$out"
+  # A preset chat model: only the context window is asked.
+  out=$(printf '\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" HONCHO_MODEL=large \
     script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
   assert_not_contains "a preset chat model is not asked for" "Chat model (number" "$out"
-  assert_contains "a vector size it cannot measure is the model's known one" "768 suggested (the size nomic-embed-text is known to have)" "$out"
+  assert_not_contains "nor is the inventory read for it" "Reading the models" "$out"
   assert_contains "the preset is kept" "chat model: large;" "$out"
   cp "$stubs/inventory.json" "$stubs/full.json"
   printf '{"models": [{"server": "http://192.0.2.90:11434", "name": "gemma3:12b", "tools": null, "context_length": 131072}]}\n' > "$stubs/inventory.json"
-  out=$(printf '\n\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+  out=$(printf '\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
     script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
   assert_contains "with no usable model, the install is said to need one" "No model in the inventory reports tool support" "$out"
   assert_contains "and the fast tier is suggested" "Chat model (number, name or tier) [fast]" "$out"
   assert_contains "the Enter key takes it" "chat model: fast;" "$out"
   printf 'not json\n' > "$stubs/inventory.json"
-  out=$(printf '\n\nnomic-embed-text\n\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
+  out=$(printf '\n\n' | env "${interactive_env[@]}" STUBS="$stubs" PATH="$PATH" \
     script -qec "bash $provision --dry-run" /dev/null 2>&1 | tr -d '\r') || true
-  assert_contains "an unreadable inventory is said so" "Could not read the router inventory; enter the model names yourself." "$out"
-  assert_contains "and the names are still asked for" "chat model: fast; embedding: nomic-embed-text (768 dimensions)" "$out"
+  assert_contains "an unreadable inventory is said so" "Could not read the router inventory; enter the model name yourself." "$out"
+  assert_contains "and the name is still asked for" "chat model: fast;" "$out"
   mv "$stubs/full.json" "$stubs/inventory.json"
 else
   printf 'SKIP honcho_interactive_choices (no script command for a terminal)\n'
@@ -337,11 +347,11 @@ printf '#!/bin/sh\nexit 1\n' > "$nostub/curl"; cp "$nostub/curl" "$nostub/pct"; 
 printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.80/24\ntags: osr-router\n' > "$lxc/280.conf"
 printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.94/24\ntags: osr-target;hermes\n' > "$lxc/294.conf"
 printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.81/24\ntags: osr-target;deepseek-harness\n' > "$lxc/281.conf"
-answers=$'\n\n285\nlocal:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst\nlocal-lvm\n192.0.2.85/24\n\n\n\nnomic-embed-text\n\n768\n\n'
-out=$(PATH="$nostub:$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR=$lxc HONCHO_EMBEDDING_MODEL='' bash "$provision" --dry-run 2>&1 <<< "$answers")
-order=$(sed '/== Honcho: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|Router CT ID|Router IP|New Honcho CT ID|amd64 template|Root disk storage|Honcho IP/CIDR|Honcho gateway|Context window|Chat model \(|Embedding model \(|Embedding /v1 URL|Embedding vector dimensions \[|Embedding vector dimensions:|Agent CT IPs' | grep -v 'Embedding vector dimensions:' | paste -sd'|')
+answers=$'\n\n285\nlocal:vztmpl/debian-13-standard_13.1-1_amd64.tar.zst\nlocal-lvm\n192.0.2.85/24\n\n\n\n\n'
+out=$(PATH="$nostub:$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR=$lxc bash "$provision" --dry-run 2>&1 <<< "$answers")
+order=$(sed '/== Honcho: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|Router CT ID|Router IP|New Honcho CT ID|amd64 template|Root disk storage|Honcho IP/CIDR|Honcho gateway|Context window|Chat model \(|Embedding|Agent CT IPs' | paste -sd'|')
 assert_eq "create asks router, container, models, agents, then the summary" \
-  '== Router ==|Router CT ID|Router IP|== Honcho container ==|New Honcho CT ID|amd64 template|Root disk storage|Honcho IP/CIDR|Honcho gateway|== Honcho models ==|Context window|Chat model (|Embedding model (|Embedding /v1 URL|Embedding vector dimensions [|== Agents allowed to Honcho ==|Agent CT IPs|== Honcho: create ==' \
+  '== Router ==|Router CT ID|Router IP|== Honcho container ==|New Honcho CT ID|amd64 template|Root disk storage|Honcho IP/CIDR|Honcho gateway|== Honcho models ==|Context window|Chat model (|== Agents allowed to Honcho ==|Agent CT IPs|== Honcho: create ==' \
   "$order"
 assert_contains "the router and its address are offered" 'Router IP [192.0.2.80]' "$out"
 assert_contains "the router's gateway is offered" 'Honcho gateway [192.0.2.1]' "$out"
@@ -349,10 +359,10 @@ assert_contains "the agent CTs on this host are offered" 'Agent CT IPs (space-se
 assert_contains "Enter admits them" 'Agent IPs allowed to Honcho: 192.0.2.94 192.0.2.81.' "$out"
 assert_contains "the summary names the plan" 'Agents allowed             192.0.2.94 192.0.2.81' "$out"
 assert_contains "a chosen chat model reaches the CT" 'HONCHO_MODEL=fast' "$out"
+assert_contains "the summary names the local embedding model" 'Qwen3-Embedding-0.6B (1024 dimensions), llama.cpp on the CT' "$out"
 out=$(PATH="$nostub:$PATH" env "${common[@]}" PVE_INTERACTIVE=true PVE_LXC_DIR=$lxc HONCHO_CLIENT_IPS= HONCHO_MODEL=fast \
   bash "$provision" --dry-run 2>&1 <<< $'\n')
 assert_not_contains "presets are not asked again" 'Router CT ID' "$out"
-assert_not_contains "(nor the embedding model)" 'Embedding model (' "$out"
 assert_not_contains "nor agents given as empty" 'Agent CT IPs' "$out"
 out=$(PATH="$nostub:$PATH" env "${common[@]}" PVE_INTERACTIVE=true PVE_ACCEPT_DEFAULTS=true PVE_LXC_DIR=$lxc HONCHO_CLIENT_IPS= \
   bash "$provision" --dry-run 2>&1 < /dev/null)
@@ -360,8 +370,8 @@ assert_not_contains "under the OSR installer no default is asked" 'Context windo
 assert_contains "and the first-install window is used" 'HONCHO_CONTEXT_TOKENS=65536' "$out"
 # Reconfigure: the CT to change (offered by its tag), then Router.
 printf 'net0: name=eth0,bridge=vmbr0,gw=192.0.2.1,ip=192.0.2.85/24\ntags: osr-target;honcho\n' > "$lxc/285.conf"
-out=$(PATH="$nostub:$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR=$lxc IP_CIDR=192.0.2.85/24 HONCHO_EMBEDDING_BASE_URL='' \
-  bash "$provision" --dry-run --reconfigure 2>&1 <<< $'\n\n\nnomic-embed-text\n768\n')
+out=$(PATH="$nostub:$PATH" PVE_INTERACTIVE=true PVE_LXC_DIR=$lxc IP_CIDR=192.0.2.85/24 \
+  bash "$provision" --dry-run --reconfigure 2>&1 <<< $'\n\n\n')
 order=$(sed '/== Honcho: /q' <<< "$out" | grep -oE '== [A-Za-z: ]+ ==|Honcho CT ID|Router CT ID|Router IP' | paste -sd'|')
 assert_eq "reconfigure asks the CT first, then Router (its address comes from the route)" \
   '== Honcho container to reconfigure ==|Honcho CT ID|== Router ==|Router CT ID|== Honcho models ==|== Honcho: reconfigure ==' "$order"
@@ -401,7 +411,10 @@ assert_not_contains "and never from a piped install script" 'bun.sh/install' "$(
 assert_contains "clients get a key scoped to the osr workspace" 'generate_key --workspace osr' "$(cat "$install")"
 assert_contains "Open WebUI is given that key" '/etc/honcho-target/client-api-key' "$(cat "$provision")"
 assert_contains "Honcho uses a stable local chat endpoint" '%s_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1' "$(cat "$install")"
-assert_contains "Honcho uses a stable local embedding endpoint" 'EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1' "$(cat "$install")"
+assert_contains "Honcho asks its own embedding model" 'EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1' "$(cat "$install")"
+assert_contains "which listens on loopback only" '--host 127.0.0.1 --port 8766' "$(cat "$here/honcho-embedding.service")"
+assert_contains "the embedding unit is pushed with the guest installer" "honcho-mcp.service honcho-embedding.service" "$(cat "$provision")"
+assert_not_contains "and no re-embedding unit" "honcho-reembed" "$(cat "$provision" "$install")"
 assert_contains "the proxy runs as a dedicated user" 'User=honcho-proxy' "$(cat "$here/honcho-proxy.service")"
 assert_not_contains "and never the admin key" 'cat /etc/honcho-target/api-key' "$(cat "$provision")"
 for unit in honcho-api honcho-deriver; do

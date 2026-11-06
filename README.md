@@ -52,8 +52,8 @@ create the first admin account in the browser, enable API keys and create one
 when prompted. A failed service stops the install before the router is built;
 a failed model or companion target leaves the router running and is listed with
 retry instructions at the end. Honcho additionally requires a router model
-with tools and structured output, an embedding model and its vector size, and
-an Open WebUI admin API token for MCP registration. Its
+with tools and structured output and an Open WebUI admin API token for MCP
+registration; it brings its own embedding model. Its
 [target README](targets/honcho/README.md) lists the network and model checks.
 
 Ollama and AirLLM install their engines during provisioning. The llama.cpp
@@ -262,10 +262,11 @@ and recovery steps. Provisioners support `--dry-run`.
 [Mattermost](targets/mattermost/README.md) provide config history and alerts.
 [Honcho AI](targets/honcho/README.md) provides CPU-only agent memory and an
 MCP tool server for Open WebUI. Selecting it with Hermes or OpenClaw connects
-their native memory integrations to the same `osr` workspace. Honcho needs an
-OpenAI-compatible embedding model; the installer asks for its name, vector
-dimensions and `/v1` endpoint. Its loopback proxy uses router inventory to
-select a compatible chat model and sends inference directly to model hosts.
+their native memory integrations to the same `osr` workspace. Honcho embeds
+with its own Qwen3-Embedding-0.6B on llama.cpp in its CT, on the CPU, so it
+needs no embedding model elsewhere. Its loopback proxy uses router inventory
+to select a compatible chat model and sends chat requests directly to model
+hosts.
 Reconfigure Honcho after router or model backend key rotation to refresh its
 proxy credentials.
 [Open Terminal](targets/open-terminal/README.md) adds a terminal tool.

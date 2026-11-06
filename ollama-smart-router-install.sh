@@ -985,7 +985,7 @@ target_table() {
     'maya|model|Project Maya (GLM-5.3-Flash) on an NVIDIA GPU|maya+http://@IP@:@PORT@|maya|required:nvidia' \
     'xolotl|model|Xolotl (DeepSeek-V4.1-Flash, 552B) on a 24 GB NVIDIA GPU; ~372 GB download|xolotl+http://@IP@:@PORT@|xolotl|required:nvidia' \
     'avalon|model|Avalon (Qwen3.8-Flash-Next, llama.cpp fork) on a 16-20 GB AMD RX 7000 (ROCm) or NVIDIA GPU; ~90 GiB download|avalon+http://@IP@:@PORT@|avalon|required:amd,nvidia:rdna3,rtx20,rtx30,rtx40,rtx50' \
-    'honcho|companion|Honcho AI: shared agent memory and MCP tools; CPU, needs an embedding endpoint|||' \
+    'honcho|companion|Honcho AI: shared agent memory and MCP tools; CPU, with its own embedding model|||' \
     'hermes|companion|Hermes Agent: offered in Open WebUI as the model hermes-agent|||' \
     'openclaw|companion|OpenClaw: agent offered in Open WebUI as the model openclaw|||' \
     'deepseek-harness|companion|DeepSeek Harness: agent Web UI in its own LXC, using OSR models|||' \
@@ -1585,8 +1585,6 @@ show_strata_template_alternatives() {
 }
 valid_comfyui_variant() { [[ $1 == klein-4b || $1 == klein-9b ]]; }
 valid_honcho_model() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; }
-# Blank: Honcho asks the router's /v1/embeddings.
-valid_honcho_embedding_url() { [[ -z $1 || $1 =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]]; }
 # Blank: Honcho's own token budgets (fine for a context window of 128k or more).
 valid_honcho_context_tokens() { [[ -z $1 || ( $1 =~ ^[1-9][0-9]{3,6}$ && $1 -ge 8192 && $1 -le 1048576 ) ]]; }
 valid_dsh_context_tokens() { [[ $1 =~ ^[1-9][0-9]{4,6}$ && $1 -ge 16384 && $1 -le 1048576 ]]; }
@@ -1655,18 +1653,11 @@ ensure_target_template() {
   pveam download "$storage" "$name"
 }
 
-# honcho_known_dimensions MODEL: the vector size a common embedding model is
-# known to have (from targets/honcho/model_choices.py), or nothing.
-honcho_known_dimensions() {
-  [[ -r ${TARGETS_DIR}/honcho/model_choices.py ]] || return 0
-  python3 "${TARGETS_DIR}/honcho/model_choices.py" dimensions "$1" 2>/dev/null || true
-}
-
 # For each selected target: an explicit CT ID, static address and storage (and
 # a template for Strata, Basalt, Maya, Xolotl, Avalon and Kindi). Presets:
 # <NAME>_CT_ID, <NAME>_IP_CIDR, <NAME>_STORAGE, <NAME>_TEMPLATE.
 prompt_target_settings() {
-  local name prefix id_var ip_var storage_var template_var default ip dims_default
+  local name prefix id_var ip_var storage_var template_var default ip
   [[ -n "${TARGETS:-}" ]] || return 0
   echo
   echo "--- Target containers ---"
@@ -1691,15 +1682,7 @@ prompt_target_settings() {
     if [[ $name == honcho ]]; then
       echo "    Honcho's chat model comes from OSR and must support tools and structured output."
       prompt_until_valid "    Chat model or tier" HONCHO_MODEL "${HONCHO_MODEL:-fast}" valid_honcho_model || return 1
-      echo "    Honcho needs an OpenAI-compatible embedding endpoint reachable from its CT."
-      echo "    For an Ollama CT, pull an embedding model there and use http://<ollama-ip>:11434/v1."
-      echo "    Leave the URL blank to use OSR's /v1/embeddings (it needs an embedding model mapped in LiteLLM)."
-      prompt_until_valid "    Embedding model" HONCHO_EMBEDDING_MODEL "${HONCHO_EMBEDDING_MODEL:-}" valid_honcho_model || return 1
-      dims_default="${HONCHO_EMBEDDING_DIMENSIONS:-$(honcho_known_dimensions "$HONCHO_EMBEDDING_MODEL")}"
-      [[ -n ${HONCHO_EMBEDDING_DIMENSIONS:-} || -z $dims_default ]] ||
-        echo "    ${HONCHO_EMBEDDING_MODEL} makes ${dims_default}-dimension vectors (its known size); Enter accepts it."
-      prompt_until_valid "    Embedding dimensions" HONCHO_EMBEDDING_DIMENSIONS "$dims_default" valid_positive_int || return 1
-      prompt_until_valid "    Embedding base URL" HONCHO_EMBEDDING_BASE_URL "${HONCHO_EMBEDDING_BASE_URL:-}" valid_honcho_embedding_url || return 1
+      echo "    Its embedding model needs no answer: Qwen3-Embedding-0.6B runs on llama.cpp in Honcho's CT."
       echo "    Its context window is asked with the model targets' windows, below."
     fi
     if [[ $name == deepseek-harness ]]; then
@@ -2073,10 +2056,7 @@ run_target_provisioner() {
     if [[ "$phase" == companion ]]; then
       export ROUTER_CT_ID="$router_ct" OPENWEBUI_PORT="$webui_port"
       if [[ "$name" == honcho ]]; then
-        export ROUTER_IP="$router_ip" HONCHO_MODEL="${HONCHO_MODEL:-fast}" \
-          HONCHO_EMBEDDING_MODEL="${HONCHO_EMBEDDING_MODEL:-}" \
-          HONCHO_EMBEDDING_DIMENSIONS="${HONCHO_EMBEDDING_DIMENSIONS:-}" \
-          HONCHO_EMBEDDING_BASE_URL="${HONCHO_EMBEDDING_BASE_URL:-}"
+        export ROUTER_IP="$router_ip" HONCHO_MODEL="${HONCHO_MODEL:-fast}"
         export HONCHO_CLIENT_IPS="${client_ips:-${HONCHO_CLIENT_IPS:-}}"
         # Set and empty: Honcho's own budgets (not the first install's 65536).
         [[ -z ${HONCHO_CONTEXT_TOKENS+set} ]] || export HONCHO_CONTEXT_TOKENS

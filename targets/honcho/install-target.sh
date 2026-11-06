@@ -23,12 +23,14 @@ unit_dir=${HONCHO_UNIT_DIR:-/etc/systemd/system}
 # path, so nothing else may live beside the proxy.
 proxy_lib_dir=${HONCHO_PROXY_LIB_DIR:-/usr/local/lib/honcho-proxy}
 proxy_url=http://127.0.0.1:8765
+llama_dir=${HONCHO_LLAMA_DIR:-/opt/honcho-llama}
+embedding_dir=${HONCHO_EMBEDDING_DIR:-/var/lib/honcho-embedding}
 cpuinfo=${HONCHO_CPUINFO:-/proc/cpuinfo}
 health_tries=${HONCHO_HEALTH_TRIES:-60}
 
 # Settings a reconfigure keeps, from settings.env: unset here, the last run's
 # value is used; set and empty, the default. Only these names are read back.
-kept_names=(HONCHO_REF HONCHO_MODEL HONCHO_STRUCTURED_OUTPUT_MODE HONCHO_EMBEDDING_DIMENSIONS_MODE
+kept_names=(HONCHO_REF HONCHO_MODEL HONCHO_STRUCTURED_OUTPUT_MODE
   HONCHO_BUN_VERSION HONCHO_BUN_SHA256 HONCHO_BUN_BASELINE_SHA256)
 kept_from_last_run=()
 if [[ -f $etc/settings.env ]]; then
@@ -43,11 +45,20 @@ fi
 ref=${HONCHO_REF:-v3.5.0}
 model=${HONCHO_MODEL:-fast}
 router_url=${ROUTER_URL:-}
-embedding_model=${HONCHO_EMBEDDING_MODEL:-}
-embedding_dimensions=${HONCHO_EMBEDDING_DIMENSIONS:-}
-embedding_endpoint_chosen=${HONCHO_EMBEDDING_BASE_URL+x}
-embedding_url=${HONCHO_EMBEDDING_BASE_URL:-}
-embedding_dimensions_mode=${HONCHO_EMBEDDING_DIMENSIONS_MODE:-never}
+# Honcho's embeddings come from this CT: llama.cpp's llama-server on the CPU
+# with Qwen3-Embedding-0.6B (Q8_0, 1024 dimensions), on loopback only.
+# llama.cpp release reviewed for CPU embeddings (the llama.cpp target's pin).
+# https://github.com/ggml-org/llama.cpp/releases/tag/v0.5.0
+llama_ref=v0.5.0
+llama_commit=7fe450e19305b828c199d602c23a8337aaa1f03b
+# The model file, fixed to one revision of Qwen's repository and its SHA-256.
+# (The tests point the URL and checksum at a local file.)
+embedding_file=Qwen3-Embedding-0.6B-Q8_0.gguf
+embedding_file_url=${HONCHO_EMBEDDING_FILE_URL:-https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/370f27d7550e0def9b39c1f16d3fbaa13aa67728/Qwen3-Embedding-0.6B-Q8_0.gguf}
+embedding_file_sha256=${HONCHO_EMBEDDING_FILE_SHA256:-06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439}
+embedding_model=qwen3-embedding-0.6b
+embedding_dimensions=1024
+embedding_url=http://127.0.0.1:8766
 # Empty keeps upstream's default (JSON-schema output); json_object is for
 # backends that only do JSON mode.
 structured_output_mode=${HONCHO_STRUCTURED_OUTPUT_MODE:-}
@@ -65,7 +76,7 @@ if [[ $bun_version == "$default_bun_version" ]]; then
   bun_sha256_baseline=${bun_sha256_baseline:-e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76}
 fi
 bun=$bun_dir/bun
-units=(honcho-proxy honcho-api honcho-deriver honcho-mcp)
+units=(honcho-embedding honcho-proxy honcho-api honcho-deriver honcho-mcp)
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 [[ $KINDI_READ_TIMEOUT_SECONDS =~ ^[1-9][0-9]{0,5}$ ]] || die 'Invalid KINDI_READ_TIMEOUT_SECONDS.'
@@ -76,12 +87,10 @@ if [[ ${1:-} == --help ]]; then
 Usage: bash install-target.sh
 
 Run as root inside an existing Honcho CT after the Proxmox provisioner has
-staged router-api-key. An interactive run asks for ROUTER_URL, the embedding
-model and its vector dimensions when unset. It also asks for the embedding
-/v1 endpoint when HONCHO_EMBEDDING_BASE_URL is unset; a blank answer uses the
-router inventory to find the model target. For unattended runs set ROUTER_URL,
-HONCHO_EMBEDDING_MODEL, HONCHO_EMBEDDING_DIMENSIONS, and
-HONCHO_EMBEDDING_BASE_URL (empty means router inventory).
+staged router-api-key. An interactive run asks for ROUTER_URL when unset; for
+unattended runs set it. Embeddings need no settings: this CT builds llama.cpp
+(llama-server, CPU) and runs Qwen3-Embedding-0.6B (Q8_0, 1024 dimensions) as
+honcho-embedding.service on 127.0.0.1:8766.
 CT ID and CT IP are chosen by provision-lxc.sh on the Proxmox host.
 USAGE
   exit 0
@@ -93,36 +102,18 @@ if [[ ${NONINTERACTIVE:-false} != true && -t 0 ]]; then
     IFS= read -r -p 'Router base URL (http(s)://router-address:port): ' router_url ||
       die 'No router URL was entered.'
   fi
-  if [[ -z $embedding_model ]]; then
-    IFS= read -r -p 'Embedding model served by the chosen endpoint: ' embedding_model ||
-      die 'No embedding model was entered.'
-  fi
-  if [[ -z $embedding_dimensions ]]; then
-    IFS= read -r -p 'Embedding vector dimensions: ' embedding_dimensions ||
-      die 'No embedding dimensions were entered.'
-  fi
-  if [[ -z $embedding_endpoint_chosen ]]; then
-    IFS= read -r -p 'Embedding base URL (/v1; blank = router inventory): ' embedding_url ||
-      die 'No embedding endpoint choice was entered.'
-    embedding_endpoint_chosen=yes
-  fi
 fi
-[[ -n $embedding_endpoint_chosen ]] ||
-  die 'Set HONCHO_EMBEDDING_BASE_URL to the embedding server /v1 URL, or set it to an empty string to use router inventory.'
-embedding_url=${embedding_url:-${router_url}/v1}
+for name in HONCHO_EMBEDDING_MODEL HONCHO_EMBEDDING_DIMENSIONS HONCHO_EMBEDDING_BASE_URL HONCHO_EMBEDDING_DIMENSIONS_MODE; do
+  [[ -z ${!name+set} ]] || note "$name is no longer used: Honcho embeds with its own $embedding_model."
+done
 [[ $router_url =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]{1,5}$ ]] || die 'Set ROUTER_URL to the OSR base URL.'
 [[ $model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Invalid HONCHO_MODEL.'
-[[ $embedding_model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Set HONCHO_EMBEDDING_MODEL to a model served by an OpenAI-compatible embedding endpoint.'
-[[ $embedding_dimensions =~ ^[1-9][0-9]{0,5}$ ]] || die 'Set HONCHO_EMBEDDING_DIMENSIONS to the model vector size.'
-[[ $embedding_url =~ ^https?://[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?/v1/?$ ]] || die 'Set HONCHO_EMBEDDING_BASE_URL to an HTTP(S) host[:port]/v1 endpoint.'
-[[ $embedding_dimensions_mode =~ ^(never|auto|always)$ ]] || die 'HONCHO_EMBEDDING_DIMENSIONS_MODE must be never, auto or always.'
 [[ -z $structured_output_mode || $structured_output_mode =~ ^(json_schema|json_object)$ ]] || die 'HONCHO_STRUCTURED_OUTPUT_MODE must be json_schema or json_object.'
 [[ $skip_probe =~ ^(true|false)$ && $rotate_keys =~ ^(true|false)$ ]] || die 'HONCHO_SKIP_CHAT_PROBE and HONCHO_ROTATE_KEYS are true or false.'
-embedding_url=${embedding_url%/}
 [[ $ref =~ ^(main|v[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$ ]] || die 'HONCHO_REF must be main, a release tag or a full commit SHA.'
 [[ -s $deploy/router-api-key ]] || die "Missing $deploy/router-api-key."
 [[ -s $deploy/budgets.py ]] || die "Missing $deploy/budgets.py."
-for file in honcho-proxy.py direct_dispatch.py honcho-proxy.service; do
+for file in honcho-proxy.py direct_dispatch.py honcho-proxy.service honcho-embedding.service; do
   [[ -s $deploy/$file ]] || die "Missing $deploy/$file."
 done
 [[ -f $deploy/backend-keys ]] || : > "$deploy/backend-keys"
@@ -133,7 +124,8 @@ done
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-  ca-certificates curl git openssl python3 python3-venv postgresql postgresql-client
+  ca-certificates curl git openssl python3 python3-venv postgresql postgresql-client \
+  build-essential cmake ninja-build
 # Token budgets for the model's context window (HONCHO_CONTEXT_TOKENS and the
 # HONCHO_<SETTING> overrides; see the README), checked before anything changes.
 # Unset variables keep the last run's values from $etc/budgets.env. A first
@@ -145,20 +137,18 @@ fi
 python3 "$deploy/budgets.py" "$etc/budgets.env" "$deploy/budgets.record" "$deploy/budgets.settings" ||
   die 'Invalid Honcho budget settings; nothing was changed.'
 # The proxy alone contacts the router inventory and model hosts. It resolves
-# one tool-capable model with enough context, probes tools and structured
-# output, then checks the embedding endpoint before Honcho's data is touched.
+# one tool-capable model with enough context and probes tools and structured
+# output before Honcho's data is touched.
 context_tokens=$(sed -n 's/^HONCHO_CONTEXT_TOKENS=//p' "$deploy/budgets.record" | head -n1)
 context_tokens=${context_tokens:-131072}
 {
   printf 'ROUTER_URL=%s\nHONCHO_MODEL=%s\nHONCHO_CONTEXT_TOKENS=%s\n' "$router_url" "$model" "$context_tokens"
-  printf 'EMBEDDING_BASE_URL=%s\nEMBEDDING_MODEL=%s\nEMBEDDING_DIMENSIONS=%s\n' \
-    "$embedding_url" "$embedding_model" "$embedding_dimensions"
-  printf 'EMBEDDING_DIMENSIONS_MODE=%s\nHONCHO_STRUCTURED_OUTPUT_MODE=%s\nHONCHO_SKIP_CHAT_PROBE=%s\n' \
-    "$embedding_dimensions_mode" "$structured_output_mode" "$skip_probe"
+  printf 'HONCHO_STRUCTURED_OUTPUT_MODE=%s\nHONCHO_SKIP_CHAT_PROBE=%s\n' \
+    "$structured_output_mode" "$skip_probe"
   printf 'KINDI_READ_TIMEOUT_SECONDS=%s\n' "$KINDI_READ_TIMEOUT_SECONDS"
 } > "$deploy/proxy.settings"
 selected_model=$(python3 "$deploy/honcho-proxy.py" --probe "$deploy") ||
-  die 'Honcho proxy could not validate a direct chat and embedding target.'
+  die 'Honcho proxy could not validate a direct chat target.'
 [[ $selected_model =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]] || die 'Honcho proxy selected an invalid model name.'
 printf 'RESOLVED_MODEL=%s\n' "$selected_model" >> "$deploy/proxy.settings"
 note "Honcho proxy selected $selected_model from router inventory for $model."
@@ -172,9 +162,11 @@ systemctl enable --now postgresql
 if ! id honcho >/dev/null 2>&1; then
   useradd --system --home-dir "$home" --create-home --shell /usr/sbin/nologin honcho
 fi
-if ! id honcho-proxy >/dev/null 2>&1; then
-  useradd --system --no-create-home --shell /usr/sbin/nologin honcho-proxy
-fi
+for account in honcho-proxy honcho-embedding; do
+  if ! id "$account" >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin "$account"
+  fi
+done
 install -d -m 0750 -o honcho -g honcho "$opt"
 install -d -m 0700 "$state"
 install -d -m 0755 "$proxy_lib_dir"
@@ -186,11 +178,12 @@ as_honcho() { runuser -u honcho -- env HOME="$home" "$@"; }
 # counts, so nothing is written to root's git config.
 opt_git() { git -c safe.directory="$opt" -C "$opt" "$@"; }
 honcho_run() { as_honcho "$uv" --directory "$opt" run --frozen --no-dev --env-file "$etc/honcho.env" "$@"; }
-proxy_expected=true
+proxy_expected=true embedding_expected=true
 healthy() {
   local _
   for (( _ = 0; _ < health_tries; _++ )); do
     if { [[ $proxy_expected != true ]] || curl -fsS --max-time 2 "$proxy_url/healthz" >/dev/null; } &&
+       { [[ $embedding_expected != true ]] || curl -fsS --max-time 2 "$embedding_url/health" >/dev/null; } &&
        curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null &&
        curl -fsS --max-time 2 http://127.0.0.1:3000/health >/dev/null; then
       return 0
@@ -201,28 +194,34 @@ healthy() {
 }
 
 # --- an installed CT: set aside what this run changes ---------------------------
-existing=false prev_commit='' dump_taken=false had_proxy=false
+existing=false prev_commit='' dump_taken=false had_proxy=false had_embedding=false
 previous_etc_mode='' previous_etc_owner=''
 backup=$state/rollback
 if [[ -f $unit_dir/honcho-api.service && -d $opt/.git ]]; then
   existing=true
   [[ ! -f $unit_dir/honcho-proxy.service ]] || had_proxy=true
+  [[ ! -f $unit_dir/honcho-embedding.service ]] || had_embedding=true
   previous_etc_mode=$(stat -c %a "$etc")
   previous_etc_owner=$(stat -c %u:%g "$etc")
   prev_commit=$(opt_git rev-parse HEAD)
   if [[ -e $backup ]]; then
     die "Previous rollback data remains in $backup: an earlier run's rollback did not complete.
-It holds what that run set aside: honcho.env, the budget and settings records, the keys, the units, Bun and, as honcho.dump, the
-database from before that run. Check Honcho (systemctl status honcho-proxy honcho-api honcho-deriver honcho-mcp).
+It holds what that run set aside: honcho.env, the budget and settings records, the keys, the units, Bun, llama-server and, as honcho.dump, the
+database from before that run. Check Honcho (systemctl status honcho-embedding honcho-proxy honcho-api honcho-deriver honcho-mcp).
 If it is healthy, or after restoring from those copies (see 'When a rollback does not complete' in
 targets/honcho/README.md), remove the directory with: rm -r -- $backup
 Then run the reconfigure again. Nothing was changed by this run."
   fi
+  previous_embedding=$(sed -n 's/^EMBEDDING_MODEL_CONFIG__MODEL=//p' "$etc/honcho.env" 2>/dev/null | head -n1 || true)
+  if [[ $previous_embedding != "$embedding_model" ]]; then
+    die "Cannot change Honcho embeddings from ${previous_embedding:-the previous model} to $embedding_model during reconfigure. Honcho has no verified in-place migration for stored vectors. The existing database and services were not changed; see 'Changing an existing embedding model' in targets/honcho/README.md."
+  fi
   install -d -m 0700 "$backup"
   for file in "$etc/honcho.env" "$etc/budgets.env" "$etc/settings.env" "$etc/proxy.settings" \
               "$etc/router-api-key" "$etc/backend-keys" "$etc/jwt-secret" "$etc/api-key" "$etc/client-api-key" \
-              "$proxy_lib_dir/honcho-proxy.py" "$proxy_lib_dir/direct_dispatch.py" "$bun" \
-              "$unit_dir/honcho-proxy.service" "$unit_dir/honcho-api.service" \
+              "$etc/embedding.env" "$proxy_lib_dir/honcho-proxy.py" "$proxy_lib_dir/direct_dispatch.py" "$bun" \
+              "$llama_dir/bin/llama-server" "$llama_dir/build-info" \
+              "$unit_dir/honcho-embedding.service" "$unit_dir/honcho-proxy.service" "$unit_dir/honcho-api.service" \
               "$unit_dir/honcho-deriver.service" "$unit_dir/honcho-mcp.service"; do
     if [[ -f $file ]]; then cp -a -- "$file" "$backup/$(basename "$file")"; fi
   done
@@ -235,7 +234,7 @@ rollback() {
   trap - EXIT
   note 'Honcho setup failed; restoring the previous installation.'
   systemctl stop "${units[@]/%/.service}" >/dev/null 2>&1 || true
-  for name in honcho.env budgets.env settings.env proxy.settings router-api-key backend-keys jwt-secret api-key client-api-key; do
+  for name in honcho.env budgets.env settings.env proxy.settings router-api-key backend-keys jwt-secret api-key client-api-key embedding.env; do
     if [[ -f $backup/$name ]]; then cp -a -- "$backup/$name" "$etc/$name"
     else rm -f -- "$etc/$name"; fi
   done
@@ -250,6 +249,8 @@ rollback() {
   install -d -m "$previous_etc_mode" -o "${previous_etc_owner%%:*}" \
     -g "${previous_etc_owner#*:}" "$etc" || ok=false
   if [[ -f $backup/bun ]]; then cp -a -- "$backup/bun" "$bun"; fi
+  if [[ -f $backup/llama-server ]]; then cp -a -- "$backup/llama-server" "$llama_dir/bin/llama-server"; fi
+  if [[ -f $backup/build-info ]]; then cp -a -- "$backup/build-info" "$llama_dir/build-info"; fi
   if [[ $(opt_git rev-parse HEAD 2>/dev/null) != "$prev_commit" ]]; then
     { opt_git checkout --detach "$prev_commit" && chown -R honcho:honcho "$opt" &&
       as_honcho "$uv" --directory "$opt" sync --frozen --no-dev --python 3.13 &&
@@ -261,17 +262,19 @@ rollback() {
       runuser -u postgres -- pg_restore --exit-on-error -d honcho < "$backup/honcho.dump"; } || ok=false
   fi
   systemctl daemon-reload || ok=false
-  if $had_proxy; then
-    systemctl restart "${units[@]/%/.service}" || ok=false
-  else
-    systemctl restart honcho-api.service honcho-deriver.service honcho-mcp.service || ok=false
-  fi
-  proxy_expected=$had_proxy
+  # The units the previous installation had (an older one had no proxy or
+  # local embedding model).
+  local -a restart=()
+  for name in "${units[@]}"; do
+    [[ ! -f $unit_dir/$name.service ]] || restart+=("$name.service")
+  done
+  systemctl restart "${restart[@]}" || ok=false
+  proxy_expected=$had_proxy embedding_expected=$had_embedding
   if $ok && healthy; then
     rm -rf -- "$backup"
     note "The previous Honcho (${prev_commit:0:12}) is running again."
   else
-    note "Honcho did not come back cleanly; the set-aside copies are in $backup. Inspect journalctl -u honcho-proxy -u honcho-api -u honcho-deriver -u honcho-mcp."
+    note "Honcho did not come back cleanly; the set-aside copies are in $backup. Inspect journalctl -u honcho-embedding -u honcho-proxy -u honcho-api -u honcho-deriver -u honcho-mcp."
   fi
 }
 on_exit() {
@@ -288,6 +291,82 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exec >>"${OSR_INTERRUPT_LOG:-/var/log/osr-install-interrupted.log}" 2>&1 || exec >/dev/null 2>&1; exit 129' HUP
+
+# --- the local embedding model: llama.cpp on the CPU ----------------------------
+# Set up and checked before Honcho is stopped or its data touched.
+# cpu_flags: the CMake switches for the x86 instruction sets this CPU has. A
+# fixed list instead of a native build, which can use instructions an older
+# CPU lacks (llama.cpp's native build died with SIGILL on an AVX-only Xeon).
+cpu_flags() {
+  local line flag
+  line=$(sed -n 's/^flags[[:space:]]*:[[:space:]]*//p' "$cpuinfo" | head -n1)
+  printf '%s\n' -DGGML_NATIVE=OFF
+  for flag in avx f16c fma avx2 bmi2; do
+    if [[ " $line " == *" $flag "* ]]; then printf -- '-DGGML_%s=ON\n' "${flag^^}"
+    else printf -- '-DGGML_%s=OFF\n' "${flag^^}"; fi
+  done
+}
+mapfile -t llama_cpu_flags < <(cpu_flags)
+llama_build="$llama_commit ${llama_cpu_flags[*]}"
+if [[ ! -x $llama_dir/bin/llama-server || $(cat "$llama_dir/build-info" 2>/dev/null) != "$llama_build" ]]; then
+  note "Building llama.cpp $llama_ref (llama-server for the CPU) for the local embedding model; this takes a few minutes."
+  llama_src=$(mktemp -d "${TMPDIR:-/tmp}/honcho-llama.XXXXXX")
+  git init -q "$llama_src"
+  git -C "$llama_src" remote add origin https://github.com/ggml-org/llama.cpp.git
+  # The tag explicitly, so a branch of that name cannot stand in; then the
+  # commit it must be.
+  git -C "$llama_src" fetch -q --depth 1 origin "refs/tags/$llama_ref"
+  git -C "$llama_src" checkout -q --detach FETCH_HEAD
+  [[ $(git -C "$llama_src" rev-parse HEAD) == "$llama_commit" ]] ||
+    die "llama.cpp $llama_ref is not commit $llama_commit; refusing to build it."
+  cmake -S "$llama_src" -B "$llama_src/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_IS_DEV=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF \
+    -DLLAMA_USE_PREBUILT_UI=OFF -DGGML_CUDA=OFF "${llama_cpu_flags[@]}"
+  cmake --build "$llama_src/build" --target llama-server --parallel "$(nproc)"
+  install -d -m 0755 "$llama_dir" "$llama_dir/bin"
+  install -m 0755 "$llama_src/build/bin/llama-server" "$llama_dir/bin/llama-server.new"
+  mv -f -- "$llama_dir/bin/llama-server.new" "$llama_dir/bin/llama-server"
+  printf '%s\n' "$llama_build" > "$llama_dir/build-info"
+  rm -rf -- "$llama_src"
+fi
+"$llama_dir/bin/llama-server" --version >/dev/null 2>&1 || die "$llama_dir/bin/llama-server does not run."
+# The model file: downloaded once, and checked against its SHA-256 every run.
+install -d -m 0750 -o root -g honcho-embedding "$embedding_dir"
+embedding_path=$embedding_dir/$embedding_file
+model_ok() { printf '%s  %s\n' "$embedding_file_sha256" "$1" | sha256sum -c --quiet - >/dev/null 2>&1; }
+if ! model_ok "$embedding_path"; then
+  note "Downloading $embedding_file (639 MB)."
+  rm -f -- "$embedding_path.part"
+  curl -fL --retry 3 -o "$embedding_path.part" "$embedding_file_url" ||
+    die "Could not download $embedding_file_url."
+  model_ok "$embedding_path.part" || { rm -f -- "$embedding_path.part"; die "$embedding_file does not match its pinned SHA-256."; }
+  mv -f -- "$embedding_path.part" "$embedding_path"
+fi
+chown root:honcho-embedding "$embedding_path"
+chmod 0640 "$embedding_path"
+install -d -m 0711 -o root -g root "$etc"
+printf 'HONCHO_EMBEDDING_THREADS=%s\n' "$(nproc)" > "$deploy/embedding.env"
+install -m 0644 "$deploy/embedding.env" "$etc/embedding.env"
+install -m 0644 "$deploy/honcho-embedding.service" "$unit_dir/honcho-embedding.service"
+systemctl daemon-reload
+systemctl enable honcho-embedding.service
+systemctl restart honcho-embedding.service
+# embedding_size: the length of the vector the local model returns, or nothing.
+embedding_size() {
+  curl -fsS --max-time 120 -H 'Content-Type: application/json' \
+    -d "{\"model\": \"$embedding_model\", \"input\": [\"Honcho setup check\"], \"encoding_format\": \"float\"}" \
+    "$embedding_url/v1/embeddings" 2>/dev/null |
+    python3 -c 'import json, sys; print(len(json.load(sys.stdin)["data"][0]["embedding"]))' 2>/dev/null
+}
+for (( _ = 0; _ < health_tries; _++ )); do
+  curl -fsS --max-time 2 "$embedding_url/health" >/dev/null 2>&1 && break
+  sleep 2
+done
+size=$(embedding_size) || size=''
+[[ $size == "$embedding_dimensions" ]] ||
+  die "The local embedding model returned ${size:-no} vector instead of $embedding_dimensions values. Inspect journalctl -u honcho-embedding."
+note "Local embedding model ready: $embedding_model ($embedding_dimensions dimensions) on $embedding_url."
 
 if [[ ! -d $opt/.git ]]; then
   git clone https://github.com/plastic-labs/honcho.git "$opt"
@@ -367,11 +446,20 @@ llm_timeout=$((KINDI_READ_TIMEOUT_SECONDS * 2))
     [[ -z $structured_output_mode ]] ||
       printf 'DIALECTIC_LEVELS__%s__MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=%s\n' "$level" "$structured_output_mode"
   done
+  # The local embedding model, straight from Honcho (no proxy, no key). Its
+  # vectors are always 1024 values, so Honcho never sends dimensions=; floats,
+  # not base64. Inputs are at most 1536 tokens (the server's batch is 2048;
+  # see honcho-embedding.service). On a CPU a request stays small (4096
+  # tokens, about a minute at most) and two run at a time, so none waits long.
   printf 'EMBEDDING_VECTOR_DIMENSIONS=%s\n' "$embedding_dimensions"
   printf 'EMBEDDING_MODEL_CONFIG__MODEL=%s\n' "$embedding_model"
-  printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$proxy_url"
-  printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY=honcho-local-proxy\n'
-  printf 'EMBEDDING_MODEL_CONFIG__DIMENSIONS_MODE=%s\n' "$embedding_dimensions_mode"
+  printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL=%s/v1\n' "$embedding_url"
+  printf 'EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY=honcho-local-embedding\n'
+  printf 'EMBEDDING_MODEL_CONFIG__DIMENSIONS_MODE=never\n'
+  printf 'EMBEDDING_MODEL_CONFIG__ENCODING_FORMAT_MODE=float\n'
+  printf 'EMBEDDING_MODEL_CONFIG__TIMEOUT=600\n'
+  printf 'EMBEDDING_MAX_INPUT_TOKENS=1536\nEMBEDDING_MAX_TOKENS_PER_REQUEST=4096\n'
+  printf 'EMBEDDING_MAX_CONCURRENT_EMBEDDINGS=2\n'
   cat "$deploy/budgets.settings"
 } > "$etc/honcho.env"
 chown root:honcho "$etc/honcho.env"
@@ -385,6 +473,8 @@ install -m 0600 "$deploy/settings.record" "$etc/settings.env"
 # Upstream's bootstrap: the first migration creates vector(1536) columns, then
 # configure_embeddings.py sets them to the model's size. Later runs migrate
 # with the real size, so a migration that touches those columns keeps it.
+# An existing deployment with another model is rejected before the backup:
+# Honcho does not provide a verified in-place rebuild of all stored vectors.
 if [[ $(runuser -u postgres -- psql -d honcho -Atqc "SELECT to_regclass('public.alembic_version') IS NOT NULL") == t ]]; then
   honcho_run alembic upgrade head
 else
