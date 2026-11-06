@@ -142,13 +142,26 @@ recall it too, once Honcho's deriver has processed the messages
 
 The service binds to the CT's IPv4 address and answers browsers that use that
 address (Harness rejects other host names unless they are added with
-`--trusted-host`). It prints a tokenized login URL at every start; read the
-newest one from the journal and open it from an address allowed by
-`DSH_ACCESS_CIDR`:
+`--trusted-host`, which this target does not set). It prints a login URL with
+a one-time token at every start, and the provisioner prints the command to
+read it at the end of each run. Read the newest one from the journal and open
+it from an address allowed by `DSH_ACCESS_CIDR` (replace `<CT>` with the
+Harness CT ID):
 
 ```bash
-pct exec 281 -- journalctl -u deepseek-harness.service -b --no-pager | grep 'dsh web:' | tail -n1
+pct exec <CT> -- journalctl -u deepseek-harness.service -b --no-pager | grep 'dsh web:' | tail -n1
 ```
+
+A restart or reboot makes a new token, so fetch the URL again after either.
+
+**If the Web UI won't open:**
+
+| What you see | Cause | Fix |
+|---|---|---|
+| The browser times out or cannot connect | Your machine is outside `DSH_ACCESS_CIDR`: the CT firewall drops everything else (`policy_in: DROP`). Check the source in `grep dport /etc/pve/firewall/<CT>.fw`. Or the service is not running: `pct exec <CT> -- systemctl is-active deepseek-harness.service`. | Admit your network: `DSH_ACCESS_CIDR=<your subnet, e.g. 192.168.1.0/24> bash targets/deepseek-harness/provision-lxc.sh --reconfigure` (every other setting keeps its recorded value). For a stopped service, read `pct exec <CT> -- journalctl -u deepseek-harness.service -b -n 40 --no-pager`. |
+| `dsh web authentication required; reopen the URL printed by dsh web.` | The address was opened without its token, or with a token from before the last restart. | Open the newest URL from the command above, token included. |
+| The page is refused when you use a host name | Harness only trusts the CT's IP address. | Use `http://<CT IP>:<DSH_PORT>/…` as printed, not a DNS name or `localhost`. |
+| The service is `inactive`, the journal has no entries and `/etc/deepseek-harness/service.env` is missing | The install inside the CT never finished. | Run it again on the existing CT: `CT_ID=<CT> bash targets/deepseek-harness/provision-lxc.sh --reconfigure`, and read its output for the step that fails. |
 
 The Web UI is plain HTTP, so the token crosses your LAN unencrypted. The
 workspace is `/var/lib/deepseek-harness/workspace` and the Harness profile home
