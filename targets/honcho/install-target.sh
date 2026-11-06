@@ -153,6 +153,12 @@ selected_model=$(python3 "$deploy/honcho-proxy.py" --probe "$deploy") ||
 printf 'RESOLVED_MODEL=%s\n' "$selected_model" >> "$deploy/proxy.settings"
 note "Honcho proxy selected $selected_model from router inventory for $model."
 systemctl enable --now postgresql
+db_encoding=$(runuser -u postgres -- psql -Atqc \
+  "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='honcho'") ||
+  die 'Cannot read the Honcho database encoding.'
+if [[ -n $db_encoding && $db_encoding != UTF8 ]]; then
+  die "Honcho database uses $db_encoding, but Honcho needs UTF8. No database was changed. If this is a failed first install with no data, drop only the empty honcho database as described in targets/honcho/README.md, then rerun the provisioner with --reconfigure. Do not drop a database that contains Honcho data."
+fi
 pg_major=$(runuser -u postgres -- psql -Atqc 'SHOW server_version_num' 2>/dev/null | cut -c1-2)
 [[ $pg_major =~ ^[0-9]{2}$ ]] || die 'PostgreSQL did not start.'
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "postgresql-${pg_major}-pgvector" ||
@@ -258,7 +264,7 @@ rollback() {
   fi
   if $dump_taken; then
     { runuser -u postgres -- dropdb --if-exists honcho &&
-      runuser -u postgres -- createdb -O honcho honcho &&
+      runuser -u postgres -- createdb -O honcho --encoding=UTF8 --template=template0 honcho &&
       runuser -u postgres -- pg_restore --exit-on-error -d honcho < "$backup/honcho.dump"; } || ok=false
   fi
   systemctl daemon-reload || ok=false
@@ -409,7 +415,7 @@ else
   runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c "ALTER ROLE honcho PASSWORD '$db_password'"
 fi
 if ! runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_database WHERE datname='honcho'" | grep -qx 1; then
-  runuser -u postgres -- createdb -O honcho honcho
+  runuser -u postgres -- createdb -O honcho --encoding=UTF8 --template=template0 honcho
 fi
 for extension in vector pg_trgm btree_gin; do
   runuser -u postgres -- psql -d honcho -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS $extension"
@@ -423,7 +429,7 @@ fi
 if [[ ! -s $etc/jwt-secret ]]; then openssl rand -hex 48 > "$etc/jwt-secret"; fi
 llm_timeout=$((KINDI_READ_TIMEOUT_SECONDS * 2))
 {
-  printf 'DB_CONNECTION_URI=postgresql+psycopg://honcho:%s@127.0.0.1:5432/honcho\n' "$db_password"
+  printf 'DB_CONNECTION_URI=postgresql+psycopg://honcho:%s@127.0.0.1:5432/honcho?client_encoding=utf8\n' "$db_password"
   printf 'AUTH_USE_AUTH=true\nAUTH_JWT_SECRET=%s\n' "$(<"$etc/jwt-secret")"
   printf 'LLM_OPENAI_API_KEY=honcho-local-proxy\n'
   # Honcho's OpenAI client gives up after 600 s without a byte and then retries.

@@ -138,11 +138,12 @@ case $* in
   *server_version_num*) echo 170005 ;;
   *pg_roles*) [[ -e $FAKE_DIR/pg-role ]] && echo 1 ;;
   *"CREATE ROLE"*) touch "$FAKE_DIR/pg-role" ;;
+  *pg_encoding_to_char*) if [[ -e $FAKE_DIR/pg-db ]]; then cat "$FAKE_DIR/db-encoding"; fi ;;
   *pg_database*) [[ -e $FAKE_DIR/pg-db ]] && echo 1 ;;
   *alembic_version*) if [[ -e $FAKE_DIR/db-data ]]; then echo t; else echo f; fi ;;
 esac; exit 0'
-stub createdb 'echo "createdb $*" >> "$FAKE_LOG"; touch "$FAKE_DIR/pg-db"'
-stub dropdb 'echo "dropdb $*" >> "$FAKE_LOG"; rm -f "$FAKE_DIR/pg-db" "$FAKE_DIR/db-data"'
+stub createdb 'echo "createdb $*" >> "$FAKE_LOG"; touch "$FAKE_DIR/pg-db"; echo UTF8 > "$FAKE_DIR/db-encoding"'
+stub dropdb 'echo "dropdb $*" >> "$FAKE_LOG"; rm -f "$FAKE_DIR/pg-db" "$FAKE_DIR/db-data" "$FAKE_DIR/db-encoding"'
 stub pg_dump 'echo "pg_dump $*" >> "$FAKE_LOG"; cat "$FAKE_DIR/db-data"'
 stub pg_restore 'echo "pg_restore $*" >> "$FAKE_LOG"; cat > "$FAKE_DIR/db-data"'
 # git: the checkout is the commit named in .git/FAKE_HEAD; tags map to commits.
@@ -247,7 +248,7 @@ make_bun() {
 printf 'GGUF fake Qwen3-Embedding\n' > "$fake/model.gguf"
 model_sha=$(sha256sum "$fake/model.gguf" | cut -d' ' -f1)
 fresh() {
-  rm -rf -- "$tmp/ct" "$tmp/uv" "$tmp/bun" "$fake"/active-* "$fake"/failed-* "$fake"/pg-* "$fake/db-data" "$fake"/user-honcho* "$fake/probe.json" "$fake/tool-probe.json"
+  rm -rf -- "$tmp/ct" "$tmp/uv" "$tmp/bun" "$fake"/active-* "$fake"/failed-* "$fake"/pg-* "$fake/db-data" "$fake/db-encoding" "$fake"/user-honcho* "$fake/probe.json" "$fake/tool-probe.json"
   rm -f "$fake/chat-status" "$fake/chat-warning" "$fake/embed-dims"
   mkdir -p "$tmp/ct/deploy" "$tmp/ct/units"
   cp "$here"/honcho-*.service "$here/budgets.py" "$here/honcho-proxy.py" "$here/direct_dispatch.py" "$tmp/ct/deploy/"
@@ -284,10 +285,22 @@ out=$(env PATH="$bin:$PATH" NONINTERACTIVE=true env -u ROUTER_URL bash "$script"
 assert_contains "an unattended guest needs the router's URL, and no embedding settings" \
   'Set ROUTER_URL' "$out"
 
+describe honcho_database_encoding
+fresh
+touch "$fake/pg-db"
+printf 'SQL_ASCII\n' > "$fake/db-encoding"
+out=$(guest) && rc=0 || rc=$?
+assert_ne "an existing SQL_ASCII database is refused" 0 "$rc"
+assert_contains "with safe recovery guidance" 'Do not drop a database that contains Honcho data' "$out"
+assert_not_contains "and is not dropped by the installer" 'dropdb' "$(calls)"
+
 describe honcho_fresh_install
 fresh
 out=$(guest) && rc=0 || rc=$?
 assert_eq "a fresh install succeeds" 0 "$rc"
+assert_contains "the database is created in UTF8 even if template1 is SQL_ASCII" 'createdb -O honcho --encoding=UTF8 --template=template0 honcho' "$(calls)"
+assert_eq "and records that encoding" UTF8 "$(<"$fake/db-encoding")"
+assert_contains "the connection requests UTF8 text decoding" '?client_encoding=utf8' "$(<"$etc/honcho.env")"
 assert_contains "and reports both services healthy" "Honcho API and MCP are healthy." "$out"
 assert_contains "the release is checked out" "git -c safe.directory=$tmp/ct/opt -C $tmp/ct/opt checkout --detach $(printf 'a%.0s' {1..40})" "$(calls)"
 assert_not_contains "every git call into the checkout names it safe (it belongs to honcho)" "git -C $tmp/ct/opt" "$(calls)"
@@ -379,6 +392,7 @@ printf '# prior proxy revision\n' >> "$tmp/ct/lib/honcho-proxy.py"
 before_proxy_code=$(<"$tmp/ct/lib/honcho-proxy.py")
 out=$(guest HONCHO_CONTEXT_TOKENS=32768 FAKE_MIGRATE_FAIL_COMMIT="$(printf 'a%.0s' {1..40})") && rc=0 || rc=$?
 assert_ne "a failed same-commit migration fails the run" 0 "$rc"
+assert_contains "rollback also recreates the database in UTF8" 'createdb -O honcho --encoding=UTF8 --template=template0 honcho' "$(calls)"
 assert_contains "its database is restored from the dump" "pg_restore --exit-on-error -d honcho" "$(calls)"
 assert_eq "including the prior data" "$before_db" "$(<"$fake/db-data")"
 assert_eq "and its env file" "$before_env" "$(<"$etc/honcho.env")"

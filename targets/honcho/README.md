@@ -306,7 +306,7 @@ cannot overwrite the only copy of the old database. Inside the Honcho CT:
    ```bash
    systemctl stop honcho-mcp honcho-deriver honcho-api honcho-proxy honcho-embedding
    runuser -u postgres -- dropdb --if-exists honcho
-   runuser -u postgres -- createdb -O honcho honcho
+   runuser -u postgres -- createdb -O honcho --encoding=UTF8 --template=template0 honcho
    runuser -u postgres -- pg_restore --exit-on-error -d honcho < /var/lib/honcho-target/rollback/honcho.dump
    systemctl start honcho-embedding honcho-proxy honcho-api honcho-deriver honcho-mcp
    ```
@@ -326,6 +326,27 @@ then sets them to the local model's 1024, as upstream documents. Later runs
 migrate with the configured size, so a future migration that touches the
 vector columns keeps it. `configure_embeddings.py` refuses to change the size
 of columns that already hold vectors; reconfigure does not clear them.
+
+### A first install stopped at the PostgreSQL version check
+
+If Alembic ends with `TypeError: cannot use a string pattern on a bytes-like
+object` while SQLAlchemy reads the PostgreSQL version, the database may have
+inherited `SQL_ASCII` from the template. New installs create the `honcho`
+database as UTF8. A rerun refuses an existing database with another encoding
+instead of silently replacing it. Inside the Honcho CT, check the failed
+database:
+
+```bash
+runuser -u postgres -- psql -d honcho -Atqc 'SHOW server_encoding'
+runuser -u postgres -- psql -d honcho -Atqc \
+  "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')"
+```
+
+Only if this was a fresh install, the encoding is `SQL_ASCII`, and the table
+count is `0`, remove that empty database with
+`runuser -u postgres -- dropdb honcho`. Then rerun the Proxmox provisioner
+with `--reconfigure` and the same settings. Preserve any database with Honcho
+tables or existing data; inspect it before changing its encoding.
 
 `--reconfigure --rotate-keys` replaces the JWT secret, which invalidates every
 existing key, and makes a new admin key and `osr` workspace key. The
