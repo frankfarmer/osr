@@ -716,7 +716,7 @@ else
   if pct exec "$CT_ID" -- test -f /etc/openclaw-target/settings; then
     :
   elif [[ $mode == reconfigure && -f $firewall_file ]] &&
-       pct config "$CT_ID" 2>/dev/null | grep -qxF "description: $OPENCLAW_CT_DESCRIPTION"; then
+       pve_ct_described "$CT_ID" "$OPENCLAW_CT_DESCRIPTION"; then
     note "CT $CT_ID has no completed OpenClaw settings; resuming its partial installation."
   else
     die "CT $CT_ID has no completed OpenClaw installation. A partial install can be resumed only when this target's CT description and firewall file remain."

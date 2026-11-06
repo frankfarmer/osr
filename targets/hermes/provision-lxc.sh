@@ -764,7 +764,7 @@ else
   if pct exec "$CT_ID" -- test -f /etc/hermes-target/settings; then
     existing_install=true
   elif [[ $mode == reconfigure && -f $firewall_file ]] &&
-       pct config "$CT_ID" 2>/dev/null | grep -qxF "description: $HERMES_CT_DESCRIPTION"; then
+       pve_ct_described "$CT_ID" "$HERMES_CT_DESCRIPTION"; then
     note "CT $CT_ID has no completed Hermes settings; resuming its partial installation."
   else
     die "CT $CT_ID has no completed Hermes installation. A partial install can be resumed only when this target's CT description and firewall file remain."

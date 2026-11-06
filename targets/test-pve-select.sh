@@ -183,4 +183,16 @@ GATEWAY='' IP_CIDR=192.0.2.86/24
 if ( pve_ask_network X ) 2>/dev/null; then die 'an unattended run took the suggested gateway'; fi
 ( pve_confirm 'Create it?' < /dev/null ) || die 'an unattended run asked to confirm'
 [[ $(pve_row Model fast 2>&1) == '  Model                      fast' ]] || die 'summary row format'
-printf 'Template, storage, required-input and guided-prompt tests passed.\n'
+
+# CT descriptions as Proxmox keeps them: URL-encoded on one line, with the
+# trailing newline the GUI's Notes field adds, or notes below the first line.
+pct() { [[ $1 == config ]] && printf 'hostname: x\ndescription: %s\ntags: t\n' "$FAKE_DESCRIPTION"; }
+want='DeepSeek Harness for Ollama Smart Router'
+for d in "$want" "$want%0A" "$want%0A%0A" "$want %0A" "$want%0Akept for the team%3A do not delete%0A" 'DeepSeek%20Harness for Ollama Smart Router'; do
+    FAKE_DESCRIPTION=$d pve_ct_described 159 "$want" || die "description not recognised: $d"
+done
+for d in "$want 2" "Not $want" 'DeepSeek Harness' "x%0A$want" ''; do
+    if FAKE_DESCRIPTION=$d pve_ct_described 159 "$want"; then die "wrong description accepted: $d"; fi
+done
+unset -f pct
+printf 'Template, storage, required-input and guided-prompt and CT description tests passed.\n'

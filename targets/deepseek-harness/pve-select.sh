@@ -310,6 +310,19 @@ pve_ct_with_ip() {
     done
 }
 
+# pve_ct_described ID TEXT: is TEXT the first line of the CT's description?
+# Proxmox keeps the description URL-encoded on one line ("%0A" for a newline);
+# saving the Notes field in the GUI adds a trailing newline, and a person may
+# add notes below. So the description is decoded, and only its first line,
+# without trailing white space, has to match.
+pve_ct_described() {
+    local raw first
+    raw=$(pct config "$1" 2>/dev/null | sed -n 's/^description: //p' | head -n 1) || return 1
+    [[ -n $raw ]] || return 1
+    first=$(perl -e '$_ = shift; s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge; s/\n.*//s; s/\s+\z//; print' -- "$raw") || return 1
+    [[ $first == "$2" ]]
+}
+
 # pve_ct_net ID ip|gw|cidr|bridge: one field of a CT's net0 on this node (ip
 # without its prefix), or nothing.
 pve_ct_net() {

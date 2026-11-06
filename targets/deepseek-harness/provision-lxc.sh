@@ -207,7 +207,7 @@ else
   if (( ! dry_run )); then
     # What the CT records: the defaults for every question below.
     pct status "$CT_ID" 2>/dev/null | grep -q 'status: running' || die "Harness CT $CT_ID is not running."
-    pct config "$CT_ID" | grep -qx 'description: DeepSeek Harness for Ollama Smart Router' ||
+    pve_ct_described "$CT_ID" 'DeepSeek Harness for Ollama Smart Router' ||
       die 'The selected CT is not this target; refusing to reconfigure it.'
     IP_CIDR=$(pct exec "$CT_ID" -- ip -4 -o addr show dev eth0 | awk 'NR==1 {print $4}')
     valid_cidr "$IP_CIDR" || die 'Cannot determine the Harness CT IPv4 address.'

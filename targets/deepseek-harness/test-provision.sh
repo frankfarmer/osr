@@ -158,7 +158,7 @@ cat > "$fake/bin/pct" <<'EOF'
 #!/usr/bin/env bash
 case $1 in
   status) echo 'status: running' ;;
-  config) echo 'description: DeepSeek Harness for Ollama Smart Router' ;;
+  config) echo "description: DeepSeek Harness for Ollama Smart Router$(cat "$FAKE/description-suffix" 2>/dev/null)" ;;
   push) cp -- "$3" "$FAKE/pushed-$(basename "$4")" ;;
   exec)
     id=$2; shift 3
@@ -205,6 +205,18 @@ assert_eq "then only the new port" 3081 "$(harness_ports)"
 assert_contains "other CT rules stay" '-source 192.0.2.9/32 -p tcp -dport 22' "$(cat "$fake/pve/firewall/281.fw")"
 assert_contains "the router admits Harness" '# osr-deepseek-harness-router' "$(cat "$fake/pve/firewall/250.fw")"
 assert_eq "and no staging directory is left" 0 "$(stages)"
+
+reset_fake
+# Saved from the Proxmox GUI's Notes field, the description ends in a newline.
+printf '%%0Akept by the team\n' > "$fake/description-suffix"
+status=0; out=$("${reconf[@]}" 2>&1) || status=$?
+rm -f -- "$fake/description-suffix"
+assert_eq "a description edited in the GUI is still this target's" 0 "$status"
+printf ' 2\n' > "$fake/description-suffix"
+status=0; out=$("${reconf[@]}" 2>&1) || status=$?
+rm -f -- "$fake/description-suffix"
+assert_eq "another description is refused" 1 "$status"
+assert_contains "naming why" 'not this target' "$out"
 
 reset_fake
 echo 1 > "$fake/guest-status"
