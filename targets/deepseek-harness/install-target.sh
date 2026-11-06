@@ -140,6 +140,16 @@ nodesource_repo() {
     printf 'deb [signed-by=%s] https://deb.nodesource.com/node_24.x nodistro main\n' "$keyring" > "$list" )
   chmod 0644 -- "$keyring" "$list"
 }
+# nodesource_readable KEYRING LIST: make a keyring and source list left by an
+# earlier run readable before apt runs at all. Otherwise the first apt-get
+# update (for curl and gnupg) already fails on the root-only keyring, before
+# nodesource_repo could rewrite it.
+nodesource_readable() {
+  local file
+  for file in "$@"; do
+    [[ ! -e $file || -n $(find "$file" -maxdepth 0 -perm -0444) ]] || chmod 0644 -- "$file"
+  done
+}
 # End install helpers.
 
 if (( dry_run )); then
@@ -215,6 +225,7 @@ unchanged() {
 if [[ $VERSION != latest ]] && unchanged "$VERSION"; then exit 0; fi
 
 export DEBIAN_FRONTEND=noninteractive
+nodesource_readable /usr/share/keyrings/nodesource.gpg /etc/apt/sources.list.d/nodesource.list
 if ! node_ok || ! command -v curl >/dev/null 2>&1; then
   apt-get update
   apt-get install -y --no-install-recommends ca-certificates curl gnupg

@@ -325,6 +325,13 @@ assert_eq "and the repository signed by it" "deb [signed-by=$ns/keyrings/nodesou
 chmod 0600 "$ns/keyrings/nodesource.gpg" "$ns/sources/nodesource.list"
 (umask 077; PATH="$ns/bin:$PATH" nodesource_repo "$ns/keyrings/nodesource.gpg" "$ns/sources/nodesource.list")
 assert_eq "a root-only keyring from an earlier run is repaired" 644 "$(stat -c %a "$ns/keyrings/nodesource.gpg")"
+chmod 0600 "$ns/keyrings/nodesource.gpg" "$ns/sources/nodesource.list"
+nodesource_readable "$ns/keyrings/nodesource.gpg" "$ns/sources/nodesource.list" "$ns/keyrings/missing.gpg"
+assert_eq "before apt runs, a root-only keyring left behind is made readable" 644 "$(stat -c %a "$ns/keyrings/nodesource.gpg")"
+assert_eq "and its source list" 644 "$(stat -c %a "$ns/sources/nodesource.list")"
+assert_ok "a missing one is no error" test ! -e "$ns/keyrings/missing.gpg"
+assert_ok "the installer does that before its first apt-get update" \
+  awk '/^nodesource_readable \/usr\/share\/keyrings\/nodesource.gpg/{r=NR} /^  apt-get update$/ && !u{u=NR} END{exit !(r && u && r < u)}' "$script"
 printf '#!/bin/sh\nexit 22\n' > "$ns/bin/curl"
 assert_fail "a failed key download fails" env PATH="$ns/bin:$PATH" bash -c "$(declare -f nodesource_repo); set -Eeuo pipefail; nodesource_repo '$ns/k2/nodesource.gpg' '$ns/s2/nodesource.list'"
 rm -rf -- "$ns"
