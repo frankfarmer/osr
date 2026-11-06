@@ -240,7 +240,7 @@ UV
 }
 make_bun() {
   mkdir -p "$tmp/bun"
-  printf '#!/usr/bin/env bash\n[[ $1 == --version ]] && { echo %s; exit; }\necho "bun $*" >> "$FAKE_LOG"\n' "${1:-1.4.4}" > "$tmp/bun/bun"
+  printf '#!/usr/bin/env bash\n[[ $1 == --version ]] && { echo %s; exit; }\n[[ $1 == install && $2 == --frozen-lockfile && $PWD == "$FAKE_OPT/mcp" ]] || { echo "unexpected Bun command: $* in $PWD" >&2; exit 3; }\necho "bun $* cwd=$PWD" >> "$FAKE_LOG"\n' "${1:-1.4.4}" > "$tmp/bun/bun"
   chmod +x "$tmp/bun/bun"
 }
 
@@ -298,6 +298,7 @@ describe honcho_fresh_install
 fresh
 out=$(guest) && rc=0 || rc=$?
 assert_eq "a fresh install succeeds" 0 "$rc"
+assert_contains "MCP dependencies install from the mcp package" "bun install --frozen-lockfile cwd=$tmp/ct/opt/mcp" "$(calls)"
 assert_contains "the database is created in UTF8 even if template1 is SQL_ASCII" 'createdb -O honcho --encoding=UTF8 --template=template0 honcho' "$(calls)"
 assert_eq "and records that encoding" UTF8 "$(<"$fake/db-encoding")"
 assert_contains "the connection requests UTF8 text decoding" '?client_encoding=utf8' "$(<"$etc/honcho.env")"
@@ -417,6 +418,7 @@ assert_ne "an upgrade that does not come up fails" 0 "$rc"
 assert_contains "and puts the previous release back" "The previous Honcho (bbbbbbbbbbbb) is running again." "$out"
 assert_eq "at its commit" "$(printf 'b%.0s' {1..40})" "$(cat "$tmp/ct/opt/.git/FAKE_HEAD")"
 assert_contains "with its database restored from the dump" "pg_restore --exit-on-error -d honcho" "$(calls)"
+assert_eq "rollback also installs from the mcp package" 2 "$(grep -Fc "bun install --frozen-lockfile cwd=$tmp/ct/opt/mcp" "$FAKE_LOG")"
 assert_eq "as it was" "migrated $(printf 'b%.0s' {1..40})" "$(cat "$fake/db-data")"
 assert_eq "and its env file" "$before_env" "$(<"$etc/honcho.env")"
 assert_ok "running again" test -e "$fake/active-honcho-api"
@@ -610,7 +612,7 @@ describe honcho_bun
 python3 - "$tmp/bun.zip" <<'PY'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1], "w") as z:
-    z.writestr("bun-linux-x64/bun", '#!/usr/bin/env bash\n[[ $1 == --version ]] && { echo 9.9.9; exit; }\necho "bun $*" >> "$FAKE_LOG"\n')
+    z.writestr("bun-linux-x64/bun", '#!/usr/bin/env bash\n[[ $1 == --version ]] && { echo 9.9.9; exit; }\n[[ $1 == install && $2 == --frozen-lockfile && $PWD == "$FAKE_OPT/mcp" ]] || { echo "unexpected Bun command: $* in $PWD" >&2; exit 3; }\necho "bun $* cwd=$PWD" >> "$FAKE_LOG"\n')
 PY
 zip_sha=$(sha256sum "$tmp/bun.zip" | cut -d' ' -f1)
 export FAKE_BUN_ZIP=$tmp/bun.zip

@@ -260,7 +260,7 @@ rollback() {
   if [[ $(opt_git rev-parse HEAD 2>/dev/null) != "$prev_commit" ]]; then
     { opt_git checkout --detach "$prev_commit" && chown -R honcho:honcho "$opt" &&
       as_honcho "$uv" --directory "$opt" sync --frozen --no-dev --python 3.13 &&
-      as_honcho "$bun" --cwd "$opt/mcp" install --frozen-lockfile; } || ok=false
+      (cd "$opt/mcp" && as_honcho "$bun" install --frozen-lockfile); } || ok=false
   fi
   if $dump_taken; then
     { runuser -u postgres -- dropdb --if-exists honcho &&
@@ -522,7 +522,7 @@ if [[ ! -x $bun || $("$bun" --version 2>/dev/null) != "$bun_version" ]]; then
   install -m 0755 "$bun_tmp/$bun_asset/bun" "$bun"
   rm -rf -- "$bun_tmp"
 fi
-as_honcho "$bun" --cwd "$opt/mcp" install --frozen-lockfile
+(cd "$opt/mcp" && as_honcho "$bun" install --frozen-lockfile)
 for name in "${units[@]}"; do
   install -m 0644 "$deploy/$name.service" "$unit_dir/$name.service"
 done
