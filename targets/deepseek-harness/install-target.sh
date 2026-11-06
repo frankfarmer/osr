@@ -125,6 +125,21 @@ node_ok() {
   command -v node >/dev/null 2>&1 &&
     node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>24 || a===24 && b>=9 ? 0 : 1)'
 }
+# nodesource_repo KEYRING LIST: NodeSource's signing key and apt source, both
+# world-readable. This script runs under umask 077, and apt on Debian 13 checks
+# signatures as its unprivileged _apt user (sqv): a root-only keyring makes
+# "Permission denied" and an unsigned repository. Rewriting the files also
+# repairs ones left root-only by an earlier run.
+nodesource_repo() {
+  local keyring=$1 list=$2
+  install -d -m 0755 "$(dirname -- "$keyring")" "$(dirname -- "$list")"
+  ( umask 022
+    curl --fail --silent --show-error --location \
+      https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key |
+      gpg --batch --yes --dearmor -o "$keyring"
+    printf 'deb [signed-by=%s] https://deb.nodesource.com/node_24.x nodistro main\n' "$keyring" > "$list" )
+  chmod 0644 -- "$keyring" "$list"
+}
 # End install helpers.
 
 if (( dry_run )); then
@@ -206,12 +221,7 @@ if ! node_ok || ! command -v curl >/dev/null 2>&1; then
 fi
 if ! node_ok; then
   note 'Installing Node.js 24 from the NodeSource signed apt repository.'
-  install -d -m 0755 /usr/share/keyrings
-  curl --fail --silent --show-error --location \
-    https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key |
-    gpg --dearmor --yes -o /usr/share/keyrings/nodesource.gpg
-  printf '%s\n' 'deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main' \
-    > /etc/apt/sources.list.d/nodesource.list
+  nodesource_repo /usr/share/keyrings/nodesource.gpg /etc/apt/sources.list.d/nodesource.list
   apt-get update
   apt-get install -y --no-install-recommends nodejs
 fi

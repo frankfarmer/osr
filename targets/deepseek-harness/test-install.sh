@@ -308,6 +308,27 @@ printf '401\n' > "$fake/http-code"
 assert_ok "the unauthenticated Harness response is healthy" healthy
 rm -f -- "$fake/http-code"
 
+describe install_nodesource_repo
+# The keyring and source list must be readable by apt's _apt user although the
+# installer runs under umask 077 (Debian 13: "Failed to parse keyring ...
+# Permission denied", then "The repository ... is not signed").
+ns=$(mktemp -d)
+mkdir -p "$ns/bin"
+printf '#!/bin/sh\nprintf "armored key\\n"\n' > "$ns/bin/curl"
+printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\ncat > "$out"\n' > "$ns/bin/gpg"
+chmod +x "$ns/bin/curl" "$ns/bin/gpg"
+(umask 077; PATH="$ns/bin:$PATH" nodesource_repo "$ns/keyrings/nodesource.gpg" "$ns/sources/nodesource.list")
+assert_eq "under umask 077 the keyring is world-readable" 644 "$(stat -c %a "$ns/keyrings/nodesource.gpg")"
+assert_eq "and so is the source list" 644 "$(stat -c %a "$ns/sources/nodesource.list")"
+assert_eq "with the key" 'armored key' "$(cat "$ns/keyrings/nodesource.gpg")"
+assert_eq "and the repository signed by it" "deb [signed-by=$ns/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" "$(cat "$ns/sources/nodesource.list")"
+chmod 0600 "$ns/keyrings/nodesource.gpg" "$ns/sources/nodesource.list"
+(umask 077; PATH="$ns/bin:$PATH" nodesource_repo "$ns/keyrings/nodesource.gpg" "$ns/sources/nodesource.list")
+assert_eq "a root-only keyring from an earlier run is repaired" 644 "$(stat -c %a "$ns/keyrings/nodesource.gpg")"
+printf '#!/bin/sh\nexit 22\n' > "$ns/bin/curl"
+assert_fail "a failed key download fails" env PATH="$ns/bin:$PATH" bash -c "$(declare -f nodesource_repo); set -Eeuo pipefail; nodesource_repo '$ns/k2/nodesource.gpg' '$ns/s2/nodesource.list'"
+rm -rf -- "$ns"
+
 describe install_npm_failure
 push_deploy
 touch "$fake/npm-fail"
