@@ -158,17 +158,77 @@ Options:
   --force                    With 'clear-lock': stop the process holding the lock
   -h, --help                 This help
 
-Examples:
-  manage-model-servers.sh add 10.0.0.55 --tier large --apply
-  manage-model-servers.sh add ollama7.lan:11434 --tier fast,medium --apply --commit
-  manage-model-servers.sh remove 10.0.0.52 --apply
-  manage-model-servers.sh set-tier large 10.0.0.54 10.0.0.55 --apply
-  manage-model-servers.sh models
-  manage-model-servers.sh set-model large qwen3:32b --apply --commit
-  manage-model-servers.sh set-server-model large 10.0.0.54 llama3.3:70b --apply
-  manage-model-servers.sh set-server-model medium 192.168.11.14 smtek/Qwen3.8-27B:Q3_K_XL-16gb --apply
-  manage-model-servers.sh set-keepalive 2h --apply
-  manage-model-servers.sh set-webui-version latest --apply
+Examples (one or more for every command and option):
+
+  Inspecting
+    manage-model-servers.sh list
+    manage-model-servers.sh status
+    manage-model-servers.sh discover
+    ROUTER_URL=http://10.0.0.20:8000 manage-model-servers.sh discover
+    manage-model-servers.sh models
+
+  Adding and removing servers
+    manage-model-servers.sh add 10.0.0.55 --tier large --apply
+    manage-model-servers.sh add ollama7.lan:11434 --tier fast,medium --apply --commit
+    manage-model-servers.sh add http://10.0.0.56:11434 10.0.0.57 --tier medium
+    manage-model-servers.sh add lmstudio://10.0.0.9 --tier fast --apply
+    manage-model-servers.sh add 10.0.0.14:8093 --type kindi --tier xlarge --apply
+    manage-model-servers.sh add 10.0.0.60 --no-probe --type ollama --tier fast
+    manage-model-servers.sh add 10.0.0.61 --tier large --dry-run
+    manage-model-servers.sh remove 10.0.0.52 --apply
+    manage-model-servers.sh remove 3 --yes --apply
+    manage-model-servers.sh remove 10.0.0.52 10.0.0.53 --apply --commit="Retire old GPU boxes"
+
+  Tiers and models
+    manage-model-servers.sh set-tier large 10.0.0.54 10.0.0.55 --apply
+    manage-model-servers.sh set-tier fast strata://10.0.0.8 --type strata --apply
+    manage-model-servers.sh set-model large qwen3:32b --apply --commit
+    manage-model-servers.sh set-model fast llama3.2:3b --no-probe
+    manage-model-servers.sh set-server-model large 10.0.0.54 llama3.3:70b --apply
+    manage-model-servers.sh set-server-model medium 192.168.11.14 smtek/Qwen3.8-27B:Q3_K_XL-16gb --apply
+    manage-model-servers.sh set-keepalive 2h --apply
+    manage-model-servers.sh set-keepalive -1 --apply
+    manage-model-servers.sh set-keepalive '' --apply
+
+  Applying and committing
+    manage-model-servers.sh apply
+    manage-model-servers.sh apply --all
+    manage-model-servers.sh commit
+    manage-model-servers.sh commit "Move qwen3 to the large tier"
+
+  Credentials and alerting
+    manage-model-servers.sh set-token
+    manage-model-servers.sh set-token <gitea-deploy-token>
+    manage-model-servers.sh set-api-key --generate --apply
+    manage-model-servers.sh set-api-key <key> --apply
+    manage-model-servers.sh set-api-key --off --apply
+    manage-model-servers.sh set-lmstudio-token <token> --apply
+    manage-model-servers.sh set-strata-token <token> --apply
+    manage-model-servers.sh set-basalt-token <token> --apply
+    manage-model-servers.sh set-maya-token <token> --apply
+    manage-model-servers.sh set-xolotl-token <token> --apply
+    manage-model-servers.sh set-avalon-token <token> --apply
+    manage-model-servers.sh set-kindi-token <token> --apply
+    manage-model-servers.sh set-kindi-token --off --apply
+    manage-model-servers.sh set-webhook https://mm.example.lan/hooks/abc123 --apply
+    manage-model-servers.sh set-webhook --channel alerts --username osr-monitor --apply
+    manage-model-servers.sh set-webhook --verify-tls false --apply
+    manage-model-servers.sh set-webhook --channel '' --apply
+    manage-model-servers.sh set-webhook '' --apply
+    manage-model-servers.sh test-alert
+    manage-model-servers.sh test-alert "Hello from manage-model-servers"
+
+  Maintenance
+    manage-model-servers.sh set-webui-version
+    manage-model-servers.sh set-webui-version 0.12.4 --apply
+    manage-model-servers.sh set-webui-version latest --apply
+    manage-model-servers.sh clear-lock
+    manage-model-servers.sh clear-lock --force
+    manage-model-servers.sh --help
+
+  Environment overrides
+    CT_ID=105 manage-model-servers.sh list            (on the Proxmox host: skip the container search)
+    CONFIG_REPO_DIR=/srv/osr-config manage-model-servers.sh list
 USAGE
 }
 

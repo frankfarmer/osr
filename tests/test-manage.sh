@@ -98,6 +98,21 @@ assert_contains "lists add"              "add <addr>"          "$out"
 assert_contains "lists set-server-model" "set-server-model"    "$out"
 assert_contains "lists set-webui-version" "set-webui-version"  "$out"
 assert_contains "documents --dry-run"    "--dry-run"           "$out"
+# Every command (including one set-<kind>-token per server kind) and every
+# option has at least one example line, so running the tool with no
+# arguments shows how to use all of it.
+for c in list status discover add remove set-tier set-model set-server-model \
+         models set-keepalive apply commit set-token set-api-key test-alert \
+         set-webhook set-webui-version clear-lock; do
+  assert_contains "example for $c" "manage-model-servers.sh $c" "$out"
+done
+for k in $(server_kinds); do
+  assert_contains "example for set-$k-token" "manage-model-servers.sh set-$k-token" "$out"
+done
+for o in --tier --type --apply --commit --no-probe --dry-run --yes --force \
+         --all --generate --off --channel --username --verify-tls --help; do
+  assert_contains "example uses $o" " $o" "$(sed -n '/^Examples/,$p' <<<"$out")"
+done
 
 # ── address handling ──────────────────────────────────────────────────────────
 describe valid_hostname_or_ip
