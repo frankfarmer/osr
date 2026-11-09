@@ -62,6 +62,12 @@ or `MODEL_PATH` are set; see its [README](targets/llamacpp/README.md).
 Generated Gitea and Mattermost admin passwords are in
 `/etc/<service>-target/admin-password` inside their respective CTs.
 
+### Incus instead of Proxmox
+
+The installer above targets a Proxmox host. [`incus/`](incus/README.md) has ports of the
+router, Ollama, ComfyUI and Honcho targets for hosts running Incus, plus an optional
+voice-chat utility (Speaches).
+
 ### LXC distribution support
 
 | LXC | Default | Other supported releases |
