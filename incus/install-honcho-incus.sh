@@ -14,7 +14,8 @@
 # Settings (environment variables):
 #   CT_NAME               container name                          (osr-honcho)
 #   IMAGE                 Incus image                             (images:debian/13)
-#   CT_IP                 fixed IPv4 on the Incus bridge          (10.127.234.13)
+#   BRIDGE       Incus bridge to take the subnet from      (incusbr0)
+#   CT_IP                 fixed IPv4 on the Incus bridge          (.13 in the bridge /24)
 #   CPUS / MEMORY         resource limits                         (4 / 8GiB)
 #   ROUTER_CT             router container (key is read from it)  (osr-router)
 #   ROUTER_URL            router base URL as the container sees it (http://<bridge gateway>:8000)
@@ -26,7 +27,20 @@ set -euo pipefail
 
 CT_NAME="${CT_NAME:-osr-honcho}"
 IMAGE="${IMAGE:-images:debian/13}"
-CT_IP="${CT_IP:-10.127.234.13}"
+CT_IP="${CT_IP:-}"
+BRIDGE="${BRIDGE:-incusbr0}"
+# Default container address: .N in the bridge's /24. Incus picks a random subnet
+# for each host, so nothing here may assume a particular one.
+bridge_ip() {
+  local cidr
+  cidr="$(incus network get "$BRIDGE" ipv4.address 2>/dev/null || true)"
+  if [[ "$cidr" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/24$ ]]; then
+    echo "${BASH_REMATCH[1]}.$1"
+  else
+    echo "cannot derive a default address: ${BRIDGE} ipv4.address is '${cidr}' (expected an IPv4 /24); set CT_IP" >&2
+    return 1
+  fi
+}
 CPUS="${CPUS:-4}"
 MEMORY="${MEMORY:-8GiB}"
 ROUTER_CT="${ROUTER_CT:-osr-router}"
@@ -40,6 +54,7 @@ trap 'rm -rf "$STAGE"' EXIT
 
 command -v incus >/dev/null || { echo "incus not found" >&2; exit 1; }
 incus info >/dev/null 2>&1 || { echo "cannot talk to incus (incus-admin group?)" >&2; exit 1; }
+[[ -n "$CT_IP" ]] || CT_IP="$(bridge_ip 13)"
 incus info "$ROUTER_CT" >/dev/null 2>&1 || { echo "router container ${ROUTER_CT} not found" >&2; exit 1; }
 FILES=(install-target.sh budgets.py honcho-proxy.py direct_dispatch.py honcho-proxy.service
        honcho-api.service honcho-deriver.service honcho-mcp.service honcho-embedding.service)

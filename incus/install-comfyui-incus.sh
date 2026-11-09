@@ -11,7 +11,8 @@
 # Settings (environment variables):
 #   CT_NAME              container name                       (osr-comfyui)
 #   IMAGE                Incus image                          (images:ubuntu/26.04)
-#   CT_IP                fixed IPv4 on the Incus bridge       (10.127.234.11)
+#   BRIDGE       Incus bridge to take the subnet from      (incusbr0)
+#   CT_IP                fixed IPv4 on the Incus bridge       (.11 in the bridge /24)
 #   GPU_PCI              PCI address of the GPU (lspci -D)    (auto: first NVIDIA)
 #   CPUS / MEMORY        resource limits                      (4 / 16GiB)
 #   NVIDIA_BRANCH        driver package suffix                (auto from the host)
@@ -22,7 +23,20 @@ set -euo pipefail
 
 CT_NAME="${CT_NAME:-osr-comfyui}"
 IMAGE="${IMAGE:-images:ubuntu/26.04}"
-CT_IP="${CT_IP:-10.127.234.11}"
+CT_IP="${CT_IP:-}"
+BRIDGE="${BRIDGE:-incusbr0}"
+# Default container address: .N in the bridge's /24. Incus picks a random subnet
+# for each host, so nothing here may assume a particular one.
+bridge_ip() {
+  local cidr
+  cidr="$(incus network get "$BRIDGE" ipv4.address 2>/dev/null || true)"
+  if [[ "$cidr" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/24$ ]]; then
+    echo "${BASH_REMATCH[1]}.$1"
+  else
+    echo "cannot derive a default address: ${BRIDGE} ipv4.address is '${cidr}' (expected an IPv4 /24); set CT_IP" >&2
+    return 1
+  fi
+}
 CPUS="${CPUS:-4}"
 MEMORY="${MEMORY:-16GiB}"
 COMFYUI_IMAGE_VARIANT="${COMFYUI_IMAGE_VARIANT:-klein-4b}"
@@ -36,6 +50,7 @@ trap 'rm -rf "$STAGE"' EXIT
 
 command -v incus >/dev/null || { echo "incus not found" >&2; exit 1; }
 incus info >/dev/null 2>&1 || { echo "cannot talk to incus (incus-admin group?)" >&2; exit 1; }
+[[ -n "$CT_IP" ]] || CT_IP="$(bridge_ip 11)"
 [[ -r "$TARGET_DIR/install-target.sh" ]] || { echo "missing $TARGET_DIR/install-target.sh" >&2; exit 1; }
 [[ $COMFYUI_IMAGE_VARIANT == klein-4b || $COMFYUI_IMAGE_VARIANT == klein-9b ]] || { echo "COMFYUI_IMAGE_VARIANT must be klein-4b or klein-9b" >&2; exit 1; }
 if [[ $COMFYUI_IMAGE_VARIANT == klein-9b && -z "${HF_TOKEN:-}" ]]; then
